@@ -1,0 +1,17 @@
+# Custom ByteTrack config, tuned for fast-moving/blurred objects on CCTV.
+tracker_type: bytetrack
+track_high_thresh: 0.35    # lowered from 0.5 - accept lower-confidence,
+                           # motion-blurred detections as valid track starts
+track_low_thresh: 0.08
+new_track_thresh: 0.45     # lowered from 0.6 - fast objects get fewer total
+                           # detections before leaving frame, so don't demand
+                           # as much confidence to START a new track
+track_buffer: 60
+match_thresh: 0.75         # slightly more lenient matching, tolerates the
+                           # larger frame-to-frame pixel displacement of a
+                           # fast-moving object
+fuse_score: True
+vehicle_iou_buffer: 0.3    # AI VISION: buffered IoU for vehicle-vehicle association only
+                           # (backend/detection/tracker.py) - keeps fast vehicles on one track
+                           # when they move further than their own width between analysed frames.
+                           # 0 = original ByteTrack association.
