@@ -104,6 +104,31 @@ enter the password again.
 
 **Check at any time:** `start-backend.cmd --check` (or `backend\.venv\Scripts\python backend\main.py --check`).
 
+## Setup and start on Debian / Ubuntu Linux
+
+One script does everything - clone the repository and run it:
+
+```
+git clone https://github.com/pyrotechhumandetection-lab/pyrotech-vision-.git
+cd pyrotech-vision-
+./start.sh
+```
+
+`start.sh` installs the missing system packages with `apt` (Python venv, Node.js, the OpenGL/GLib
+libraries OpenCV needs; asks for the sudo password once), creates `backend/.venv` with the pinned
+packages (about 1 GB the first time, internet needed; CPU PyTorch unless an NVIDIA GPU is found),
+creates `.env` from `.env.example`, runs the self-check once, then starts the web UI in the background
+and the backend in the terminal and opens http://127.0.0.1:5173. Ctrl+C stops both. Later starts skip
+the finished steps. Python 3.13 or 3.14 is used; on Debian 12 (Python 3.11) the script fetches
+Python 3.13 with `uv` into `backend/.uv` without changing the system Python.
+
+* Settings: edit `.env` (ports, `HOST=0.0.0.0` to open the UI from other PCs, model, engine), then run
+  `./start.sh` again. `AIV_TORCH=cpu|cuda` forces the PyTorch build.
+* Options: `--setup-only`, `--check` (self-check), `--reinstall` (rebuild `backend/.venv`), `--no-browser`.
+* Cameras are not in the repository: add them in the UI. Camera passwords from the Windows PC cannot
+  be moved (they are encrypted for that Windows user); on Linux they are stored with owner-only file
+  permissions.
+
 ## Start
 
 **Everything at once:** double-click **`start_backend.cmd`**. It first checks whether an older backend still

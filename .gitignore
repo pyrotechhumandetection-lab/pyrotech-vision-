@@ -18,3 +18,6 @@ backend/models/head_yolov8m/head_yolov8m_openvino_model/head_yolov8m.bin
 *.tmp
 # optional Grounding DINO (Object Monitoring Layer 3), about 690 MB - installed with backend/tools/install-grounding-dino.cmd
 backend/models/object_monitor/hf/
+# start.sh: logs of the web UI, Python fetched by uv on older Debian
+logs/
+backend/.uv/
