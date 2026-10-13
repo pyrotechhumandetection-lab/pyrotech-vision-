@@ -21,6 +21,7 @@
 #    --check        run the self-check and exit
 #    --no-browser   do not open the browser
 #  Environment (or .env): AIV_TORCH=cpu|cuda  (default: cuda when an NVIDIA GPU is found, else cpu)
+#                         AIV_OPENVINO=off     (skip the optional OpenVINO speed-up)
 # ==========================================================================================
 set -euo pipefail
 
@@ -43,7 +44,7 @@ for a in "$@"; do
     --reinstall)  REINSTALL=1 ;;
     --check)      CHECK_ONLY=1 ;;
     --no-browser) OPEN_BROWSER=0 ;;
-    -h|--help)    sed -n '2,26p' "$0"; exit 0 ;;
+    -h|--help)    sed -n '2,27p' "$0"; exit 0 ;;
     *) echo "Unknown option: $a (see ./start.sh --help)"; exit 2 ;;
   esac
 done
@@ -63,6 +64,12 @@ env_get() {
 }
 
 [[ "$(uname -s)" == "Linux" ]] || die "This script is for Debian/Ubuntu Linux. On Windows use start_backend.cmd."
+ARCH="$(uname -m)"
+case "$ARCH" in
+  x86_64|aarch64) ;;
+  *) die "This PC is '$ARCH'. PyTorch (needed by all detection modules) is only available for 64-bit
+       systems (x86_64 or aarch64). On a Raspberry Pi install the 64-bit Raspberry Pi OS." ;;
+esac
 
 # ---------------------------------------------------------------- 1. system packages
 SUDO=""
@@ -156,7 +163,19 @@ if [[ "$(cat "$STAMP" 2>/dev/null)" != "$WANT_STAMP" ]]; then
       warn "CPU PyTorch $TORCH_VER not available - installing the standard build from PyPI instead."
     fi
   fi
-  "${PIP[@]}" install -r "$LOCK"
+  # OpenVINO only speeds up CPU inference; every module falls back to PyTorch without it. Its wheels
+  # exist only for some platforms (e.g. aarch64 needs glibc 2.35+), so it is installed separately.
+  CORE_REQ="$(mktemp)"; OPT_REQ="$(mktemp)"
+  grep -viE '^openvino(-telemetry)?==' "$LOCK" > "$CORE_REQ"
+  grep -iE '^openvino(-telemetry)?==' "$LOCK" > "$OPT_REQ" || true
+  "${PIP[@]}" install -r "$CORE_REQ"
+  if [[ "$(env_get AIV_OPENVINO on)" == "off" ]]; then
+    echo "    OpenVINO skipped (AIV_OPENVINO=off) - detection uses PyTorch."
+  elif [[ -s "$OPT_REQ" ]] && ! "${PIP[@]}" install -r "$OPT_REQ"; then
+    warn "OpenVINO is not available for this PC ($ARCH, glibc $(ldd --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+$' || echo '?'), $("$PY" -V)).
+         Continuing without it: all modules work with PyTorch, only CPU inference is slower."
+  fi
+  rm -f "$CORE_REQ" "$OPT_REQ"
   # Object Monitoring needs the CONTRIB OpenCV build (CSRT tracker); ultralytics pulls in plain
   # opencv-python, which writes the same cv2 files - make the contrib build the one on disk.
   say "Activating the contrib OpenCV build"

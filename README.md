@@ -124,6 +124,9 @@ Python 3.13 with `uv` into `backend/.uv` without changing the system Python.
 
 * Settings: edit `.env` (ports, `HOST=0.0.0.0` to open the UI from other PCs, model, engine), then run
   `./start.sh` again. `AIV_TORCH=cpu|cuda` forces the PyTorch build.
+* OpenVINO (faster CPU inference) is optional: where no OpenVINO package exists for the PC (for example
+  64-bit ARM with an older system library) the script warns and every module runs on PyTorch.
+  `AIV_OPENVINO=off` skips it. 32-bit systems are not supported (no PyTorch).
 * Options: `--setup-only`, `--check` (self-check), `--reinstall` (rebuild `backend/.venv`), `--no-browser`.
 * Cameras are not in the repository: add them in the UI. Camera passwords from the Windows PC cannot
   be moved (they are encrypted for that Windows user); on Linux they are stored with owner-only file

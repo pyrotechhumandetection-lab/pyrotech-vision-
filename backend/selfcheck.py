@@ -46,7 +46,8 @@ def run():
             line("OK", f"import {mod} {versions[mod]}")
         except Exception as e:  # noqa: BLE001
             if mod == "openvino":   # optional: faster CPU inference of the same model
-                line("WARN", f"import openvino: {e}  -> run setup-backend.cmd (PyTorch is used until then)")
+                line("WARN", f"import openvino: {e}  -> optional speed-up not installed, PyTorch is used "
+                     f"({'setup-backend.cmd' if os.name == 'nt' else './start.sh --reinstall'} installs it where available)")
             else:
                 line("FAIL", f"import {mod}: {e}  -> run setup-backend.cmd")
     if fails:
