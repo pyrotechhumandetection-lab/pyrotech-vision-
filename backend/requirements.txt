@@ -1,0 +1,16 @@
+# PYROTECH VISION backend - direct dependencies of all five detection modules (Human, Vehicle, Human Count,
+# Fire & Smoke, Object Monitoring), pinned to versions tested with each module's original program.
+# setup-backend.cmd installs backend/requirements-lock.txt (these + every sub-dependency, exact versions).
+ultralytics==8.4.155      # YOLOv8 + ByteTrack, fire model (YOLO11), YOLOE + prompt-embedding cache (Object Monitoring)
+torch==2.14.0             # CPU build from PyPI (see README for an NVIDIA GPU build)
+torchvision==0.29.0
+opencv-python==5.0.0.93   # required by ultralytics; replaced on disk by the contrib build below (setup-backend.cmd)
+opencv-contrib-python==5.0.0.93   # same OpenCV + CSRT/KCF trackers and SIFT (Object Monitoring)
+numpy==2.5.3
+lap==0.5.13               # required by Ultralytics ByteTrack
+psutil==7.2.2             # CPU / RAM metrics
+nvidia-ml-py==13.610.43   # optional: GPU utilisation metric
+openvino==2026.4.1        # optional: runs the same yolov8n weights ~3-4x faster on CPU (models/yolov8n_openvino_model)
+# The HTTP API uses only the Python standard library - no web framework is required.
+# Optional, NOT installed by default: transformers==5.17.0 for Object Monitoring Layer 3 (Grounding DINO,
+# see backend/models/README.md and backend/tools/install-grounding-dino.cmd).

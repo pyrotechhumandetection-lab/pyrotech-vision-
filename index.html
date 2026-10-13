@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="PYROTECH VISION  — AI-powered camera detection and monitoring console">
+  <meta name="color-scheme" content="light dark">
+  <title>PYROTECH VISION  — Camera Detection System</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%233478FF' stroke-width='2'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Ccircle cx='12' cy='12' r='5.5'/%3E%3Ccircle cx='12' cy='12' r='2' fill='%233478FF'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/variables.css">
+  <link rel="stylesheet" href="css/layout.css">
+  <link rel="stylesheet" href="css/components.css">
+  <link rel="stylesheet" href="css/dashboard.css">
+  <link rel="stylesheet" href="css/cameras.css">
+  <link rel="stylesheet" href="css/forms.css">
+  <link rel="stylesheet" href="css/detection-live.css">
+  <link rel="stylesheet" href="css/responsive.css">
+  <script>
+    /* The app always opens in light mode (dark mode can be switched on from the top bar or Settings). */
+    try { var p = JSON.parse(localStorage.getItem('pyrotechvision:v1') || '{}').prefs || {}; if (p.motion === 'reduce') document.documentElement.setAttribute('data-motion', 'reduce'); } catch (e) {}
+  </script>
+</head>
+<body>
+  <a class="skip-link" href="#page">Skip to content</a>
+  <div class="app" id="app">
+    <!-- ============ Sidebar ============ -->
+    <aside class="sidebar" id="sidebar" aria-label="Primary">
+      <a class="brand" href="#/dashboard" aria-label="PYROTECH VISION home">
+        <span class="brand-mark"><i data-icon="logo" data-size="30"></i></span>
+        <span><span class="brand-name" style="color:var(--text)">PYROTECH VISION</span><br><span class="brand-sub">Camera Detection System</span></span>
+      </a>
+      <nav class="nav" aria-label="Main navigation">
+        <ul>
+          <li><a class="nav-item" href="#/dashboard" data-nav="/dashboard"><i data-icon="dashboard" data-size="20"></i><span class="nav-label">Dashboard</span></a></li>
+          <li><a class="nav-item" href="#/cameras" data-nav="/cameras"><i data-icon="monitor" data-size="20"></i><span class="nav-label">Cameras</span></a></li>
+          <li><a class="nav-item" href="#/live" data-nav="/live"><i data-icon="camera" data-size="20"></i><span class="nav-label">Live View</span></a></li>
+          <li class="nav-group" id="nav-detections">
+            <button class="nav-item" type="button" aria-expanded="true" aria-controls="nav-det-sub" id="nav-det-toggle"><i data-icon="scan" data-size="20"></i><span class="nav-label">Detections</span><i data-icon="chevronDown" data-size="16" class="chev"></i></button>
+            <ul class="nav-sub" id="nav-det-sub">
+              <li><a class="nav-item" href="#/detections/ppe" data-nav="/detections/ppe"><i data-icon="vest" data-size="17"></i><span class="nav-label">PPE Detection</span></a></li>
+              <li><a class="nav-item" href="#/detections/helmet" data-nav="/detections/helmet"><i data-icon="helmet" data-size="17"></i><span class="nav-label">Helmet Detection</span></a></li>
+              <li><a class="nav-item" href="#/detections/fire" data-nav="/detections/fire"><i data-icon="flame" data-size="17"></i><span class="nav-label">Fire &amp; Smoke Detection</span></a></li>
+              <li><a class="nav-item" href="#/detections/human" data-nav="/detections/human"><i data-icon="user" data-size="17"></i><span class="nav-label">Human Detection</span></a></li>
+              <li><a class="nav-item" href="#/detections/vehicle" data-nav="/detections/vehicle"><i data-icon="car" data-size="17"></i><span class="nav-label">Vehicle Detection</span></a></li>
+              <li><a class="nav-item" href="#/detections/count" data-nav="/detections/count"><i data-icon="users" data-size="17"></i><span class="nav-label">Human Count</span></a></li>
+              <li><a class="nav-item" href="#/detections/object" data-nav="/detections/object"><i data-icon="box" data-size="17"></i><span class="nav-label">Object Monitoring</span></a></li>
+              <li><a class="nav-item" href="#/detections/custom" data-nav="/detections/custom"><i data-icon="model" data-size="17"></i><span class="nav-label">Custom Models</span></a></li>
+            </ul>
+          </li>
+          <li><a class="nav-item" href="#/alerts" data-nav="/alerts"><i data-icon="bell" data-size="20"></i><span class="nav-label">Alerts</span><span class="nav-badge" id="nav-alert-count" hidden></span></a></li>
+          <li><a class="nav-item" href="#/snapshots" data-nav="/snapshots"><i data-icon="snapshot" data-size="20"></i><span class="nav-label">Snapshots</span></a></li>
+          <li><a class="nav-item" href="#/recordings" data-nav="/recordings"><i data-icon="film" data-size="20"></i><span class="nav-label">Recordings</span></a></li>
+          <li><a class="nav-item" href="#/reports" data-nav="/reports"><i data-icon="report" data-size="20"></i><span class="nav-label">Reports</span></a></li>
+          <li><a class="nav-item" href="#/models" data-nav="/models"><i data-icon="cpu" data-size="20"></i><span class="nav-label">AI Models</span></a></li>
+          <li><a class="nav-item" href="#/settings" data-nav="/settings"><i data-icon="settings" data-size="20"></i><span class="nav-label">Settings</span></a></li>
+        </ul>
+      </nav>
+      <button class="status-card" id="system-status-card" type="button" aria-label="Open system status">
+        <span class="dot dot-muted" id="sys-dot"></span>
+        <span class="grow"><span class="title">System Status</span><br><span class="desc muted" id="sys-desc">Checking backend…</span></span>
+        <i data-icon="chevronRight" data-size="16"></i>
+      </button>
+    </aside>
+    <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+
+    <!-- ============ Main ============ -->
+    <div class="main" id="main">
+      <header class="topbar">
+        <button class="icon-btn menu-toggle" id="menu-toggle" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false"><i data-icon="menu"></i></button>
+        <div class="search-wrap" role="search">
+          <i data-icon="search" data-size="18"></i>
+          <label for="global-search" class="sr-only">Search cameras, detections, alerts and snapshots</label>
+          <input class="search-input" id="global-search" type="search" autocomplete="off" placeholder="Search cameras, detections, alerts…" aria-controls="search-results" aria-expanded="false">
+          <span class="kbd" aria-hidden="true">Ctrl + K</span>
+          <div class="search-results" id="search-results" role="listbox" aria-label="Search results"></div>
+        </div>
+        <div class="topbar-right">
+          <button class="conn-pill" id="conn-pill" type="button" aria-label="Backend connection status"><span class="dot dot-muted"></span><span id="conn-text">Checking…</span></button>
+          <div class="rel">
+            <button class="icon-btn" id="notif-btn" aria-label="Notifications" aria-haspopup="true" aria-expanded="false"><i data-icon="bell" data-size="19"></i><span class="dot-count" id="notif-count" hidden></span></button>
+            <div class="popover popover-wide" id="notif-panel" role="dialog" aria-label="Notifications"></div>
+          </div>
+          <button class="icon-btn" id="theme-btn" aria-label="Switch to light theme"><i data-icon="moon" data-size="19"></i></button>
+          <div class="rel">
+            <button class="profile-btn" id="profile-btn" aria-haspopup="true" aria-expanded="false">
+              <span class="avatar" id="avatar">AU</span>
+              <span class="profile-meta"><b id="profile-name">Admin User</b><span id="profile-role">Administrator</span></span>
+              <i data-icon="chevronDown" data-size="16"></i>
+            </button>
+            <div class="popover" id="profile-menu" role="menu">
+              <button class="menu-item" role="menuitem" data-act="profile"><i data-icon="user" data-size="16"></i>Profile information</button>
+              <button class="menu-item" role="menuitem" data-act="prefs"><i data-icon="sliders" data-size="16"></i>Application preferences</button>
+              <button class="menu-item" role="menuitem" data-act="shortcuts"><i data-icon="keyboard" data-size="16"></i>Keyboard shortcuts</button>
+              <div class="menu-sep"></div>
+              <button class="menu-item" role="menuitem" data-act="about"><i data-icon="info" data-size="16"></i>About PYROTECH VISION</button>
+            </div>
+          </div>
+        </div>
+      </header>
+      <main class="content" id="page" tabindex="-1"></main>
+    </div>
+  </div>
+  <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
+
+  <script src="js/config.js"></script>
+  <script src="js/icons.js"></script>
+  <script src="js/storage.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/demo-data.js"></script>
+  <script src="js/state.js"></script>
+  <script src="js/ui.js"></script>
+  <script src="js/router.js"></script>
+  <script src="js/media.js"></script>
+  <script src="js/detection-area.js"></script>
+  <script src="js/detection-modules.js"></script>
+  <script src="js/dashboard.js"></script>
+  <script src="js/cameras.js"></script>
+  <script src="js/camera-form.js"></script>
+  <script src="js/live-view.js"></script>
+  <script src="js/snapshots.js"></script>
+  <script src="js/alerts.js"></script>
+  <script src="js/pages-misc.js"></script>
+  <script src="js/detection-live.js"></script>
+  <script src="js/object-monitor.js"></script>
+  <script src="js/head-count.js"></script>
+  <script src="js/human-count.js"></script>
+  <script src="js/settings.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

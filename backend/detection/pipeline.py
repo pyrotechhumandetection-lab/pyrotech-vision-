@@ -1,0 +1,339 @@
+"""The existing person + vehicle detection algorithm, extracted from human_detect_yolo-2.py.
+
+Preserved exactly from the original script:
+  * Ultralytics YOLO (COCO weights) + ByteTrack (bytetrack_stable.yaml), model.track(persist=True)
+  * class mapping: person -> Person; bicycle/motorcycle -> 2-Wheeler; car -> 4-Wheeler; bus -> Bus; truck -> Truck
+  * per-class minimum confidence (CLASS_CONF_OVERRIDE) applied after the predictor's base conf
+  * MIN_HITS_TO_CONFIRM = 2, VOTES_BEFORE_LOCKING = 5 (label voting per track id)
+  * Rider = Person whose box centre lies inside / just above (RIDER_Y_MARGIN) a 2-Wheeler box
+  * optional far-person pass on an upscaled crop of the top region (ENABLE_FAR_DETECTION, default off)
+  * same box colours and "<label> #<id> <conf>" annotation
+
+Changed for the web service (no change to how objects are detected):
+  * no cv2.imshow window; the annotated frame is returned to the caller
+  * classes requested from the model follow the enabled modules (Human / Vehicle)
+  * thresholds come from the per-camera module config (defaults = original values)
+  * optional detection zones (point-in-polygon on the box centre, as in object-track.py)
+  * reports newly confirmed tracks so the caller can raise events / snapshots
+  * the same weights can run through OpenVINO (FP32 export of yolov8n.pt, identical detections, faster on CPU)
+
+Changed for fast-moving vehicles (accuracy rule kept):
+  * vehicle tracks are associated with buffered IoU (detection/tracker.py), so a vehicle that moves
+    further than its own width between analysed frames keeps one track instead of being dropped
+  * a VEHICLE track whose first UNANIMOUS_VOTES_TO_LOCK votes all agree on one class is locked after
+    those votes instead of waiting for VOTES_BEFORE_LOCKING. Tracks with mixed votes still need the
+    original 5-vote majority, and MIN_HITS_TO_CONFIRM and the per-class confidence thresholds are
+    unchanged, so a fast car/truck/2-wheeler that is visible for only 3 analysed frames is no longer missed.
+    The early lock also needs a mean confidence of class threshold + EARLY_LOCK_CONF_MARGIN, so borderline
+    detections (e.g. a parked scooter scored 0.41 as "4-Wheeler") still need the original 5-vote majority.
+"""
+import logging
+import time
+
+import cv2
+import numpy as np
+
+log = logging.getLogger("aivision.pipeline")
+
+# ---- constants from the original script ------------------------------------
+PERSON_CLASS = 0
+VEHICLE_CLASS_MAP = {
+    1: ("2-Wheeler", (255, 200, 0)),
+    3: ("2-Wheeler", (255, 200, 0)),
+    2: ("4-Wheeler", (0, 200, 255)),
+    5: ("Bus", (200, 0, 255)),
+    7: ("Truck", (0, 0, 255)),
+}
+PERSON_CLASS_MAP = {PERSON_CLASS: ("Person", (0, 255, 0))}
+ALL_CLASS_MAP = {**PERSON_CLASS_MAP, **VEHICLE_CLASS_MAP}
+TWO_WHEELER_COCO_IDS = {1, 3}
+RIDER_COLOR = (0, 140, 255)
+FAR_COLOR = (0, 255, 255)
+
+MIN_HITS_TO_CONFIRM = 2
+VOTES_BEFORE_LOCKING = 5
+UNANIMOUS_VOTES_TO_LOCK = 3        # vehicle tracks only - see module docstring
+EARLY_LOCK_CONF_MARGIN = 0.10      # ... and only when those votes average >= class threshold + this margin
+RIDER_Y_MARGIN = 40
+FAR_REGION_FRACTION = 0.5
+FAR_UPSCALE = 2.0
+FAR_CONF = 0.25
+FAR_DEDUPE_IOU = 0.3
+
+HUMAN_LABELS = ("Person", "Rider", "Person (far)")
+VEHICLE_LABELS = ("2-Wheeler", "4-Wheeler", "Bus", "Truck")
+LABEL_TO_COCO = {"Person": [0], "2-Wheeler": [1, 3], "4-Wheeler": [2], "Bus": [5], "Truck": [7]}
+
+
+def label_module(label):
+    return "human" if label in HUMAN_LABELS else "vehicle"
+
+
+def box_center(x1, y1, x2, y2):
+    return (x1 + x2) / 2, (y1 + y2) / 2
+
+
+def is_rider(person_box, vehicle_box, y_margin):
+    px1, py1, px2, py2 = person_box
+    vx1, vy1, vx2, vy2 = vehicle_box
+    pcx, pcy = box_center(px1, py1, px2, py2)
+    if not (vx1 <= pcx <= vx2):
+        return False
+    return (vy1 - y_margin) <= pcy <= vy2
+
+
+def iou(box_a, box_b):
+    ax1, ay1, ax2, ay2 = box_a
+    bx1, by1, bx2, by2 = box_b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    if ix2 <= ix1 or iy2 <= iy1:
+        return 0.0
+    inter = (ix2 - ix1) * (iy2 - iy1)
+    area_a = (ax2 - ax1) * (ay2 - ay1)
+    area_b = (bx2 - bx1) * (by2 - by1)
+    return inter / float(area_a + area_b - inter + 1e-6)
+
+
+def zone_polygon(zone, w, h):
+    """Normalised zone (rectangle or polygon, as saved by the UI) -> pixel polygon."""
+    if zone.get("type") == "rectangle":
+        x, y, zw, zh = zone["x"], zone["y"], zone["width"], zone["height"]
+        pts = [(x, y), (x + zw, y), (x + zw, y + zh), (x, y + zh)]
+    else:
+        pts = [(p["x"], p["y"]) for p in zone.get("points", [])]
+    return np.array([(int(px * w), int(py * h)) for px, py in pts], dtype=np.int32)
+
+
+def hex_to_bgr(color, fallback=(255, 255, 255)):
+    try:
+        c = color.lstrip("#")
+        return (int(c[4:6], 16), int(c[2:4], 16), int(c[0:2], 16))
+    except Exception:
+        return fallback
+
+
+class PersonVehiclePipeline:
+    """One instance per camera session (ByteTrack state is per model instance)."""
+
+    def __init__(self, model_path, tracker_config, img_size=640, device=None, engine="pytorch"):
+        from ultralytics import YOLO  # imported here so the API can start (and report) without it
+        from backend.detection.tracker import install as install_tracker
+        install_tracker()                # ByteTrack + buffered IoU for fast vehicles (see tracker.py)
+
+        self.model = YOLO(str(model_path), task="detect")
+        self.model_path = str(model_path)
+        self.engine = engine
+        self.tracker_config = str(tracker_config)
+        self.img_size = img_size
+        self.device = device
+        self.far_model = None
+        self.reset_tracking()
+
+    def reset_tracking(self):
+        self.hit_counts = {}
+        self.label_votes = {}
+        self.vote_conf = {}
+        self.locked_label = {}
+        self.confirmed_ids = {lbl: set() for lbl in HUMAN_LABELS + VEHICLE_LABELS}
+        self.promoted_far_ids = set()
+
+    # ------------------------------------------------------------------ config
+    @staticmethod
+    def build_plan(human_cfg, vehicle_cfg, camera_zones):
+        """Translate module configs into what the model is asked for.
+
+        human_cfg / vehicle_cfg: dict or None (module inactive or paused).
+        """
+        coco = set()
+        thresholds = {}
+        base_confs = []
+        draw_labels = set()
+        zone_by_module = {}
+        far = False
+        if human_cfg:
+            base = float(human_cfg.get("confidence", 0.35))
+            base_confs.append(base)
+            classes = human_cfg.get("classes", {})
+            if classes.get("person", True) or classes.get("rider", True):
+                coco.add(PERSON_CLASS)
+            if classes.get("rider", True):
+                coco.update(TWO_WHEELER_COCO_IDS)   # rider rule needs 2-wheeler boxes
+            for lbl in ("Person", "Rider"):
+                key = lbl.lower()
+                if classes.get(key, True):
+                    draw_labels.add(lbl)
+            far = bool(classes.get("personFar", False))
+            if far:
+                draw_labels.add("Person (far)")
+            cc = human_cfg.get("classConf", {})
+            thresholds["Person"] = max(base, float(cc.get("Person", 0.30)))
+            thresholds["Rider"] = thresholds["Person"]
+            zone_by_module["human"] = human_cfg.get("zones") or []
+        if vehicle_cfg:
+            base = float(vehicle_cfg.get("confidence", 0.35))
+            base_confs.append(base)
+            classes = vehicle_cfg.get("classes", {})
+            keymap = {"2-Wheeler": "twoWheeler", "4-Wheeler": "fourWheeler", "Bus": "bus", "Truck": "truck"}
+            cc = vehicle_cfg.get("classConf", {})
+            defaults = {"2-Wheeler": 0.35, "4-Wheeler": 0.35, "Bus": 0.55, "Truck": 0.55}
+            for lbl, key in keymap.items():
+                if classes.get(key, True):
+                    coco.update(LABEL_TO_COCO[lbl])
+                    draw_labels.add(lbl)
+                thresholds[lbl] = max(base, float(cc.get(lbl, defaults[lbl])))
+            zone_by_module["vehicle"] = vehicle_cfg.get("zones") or []
+        zones = {z["id"]: z for z in (camera_zones or []) if z.get("enabled", True)}
+        return {
+            "coco": sorted(coco),
+            "predict_conf": min(base_confs) if base_confs else 0.35,
+            "thresholds": thresholds,
+            "draw_labels": draw_labels,
+            "zones": {m: [zones[i] for i in ids if i in zones] for m, ids in zone_by_module.items()},
+            "far": far,
+        }
+
+    # ------------------------------------------------------------------ frame
+    def process(self, frame, plan):
+        """Run the original detection logic on one frame.
+
+        Returns (annotated_frame, detections, new_confirmations, inference_ms)
+        """
+        h, w = frame.shape[:2]
+        if not plan["coco"]:
+            return frame, [], [], 0.0
+
+        kwargs = dict(imgsz=self.img_size, conf=plan["predict_conf"], classes=plan["coco"], verbose=False)
+        if self.device is not None:
+            kwargs["device"] = self.device
+        t0 = time.perf_counter()
+        results = self.model.track(frame, persist=True, tracker=self.tracker_config, **kwargs)
+        inference_ms = (time.perf_counter() - t0) * 1000.0
+
+        thresholds = plan["thresholds"]
+        person_boxes, two_wheeler_boxes, all_boxes = [], [], []
+        for box in results[0].boxes:
+            if box.id is None:
+                continue
+            track_id = int(box.id[0])
+            cls_id = int(box.cls[0])
+            conf = float(box.conf[0])
+            frame_label, _ = ALL_CLASS_MAP.get(cls_id, ("Unknown", (255, 255, 255)))
+            if conf < thresholds.get(frame_label, plan["predict_conf"]):
+                continue
+            x1, y1, x2, y2 = (int(v) for v in box.xyxy[0].tolist())
+            all_boxes.append((track_id, cls_id, x1, y1, x2, y2, conf))
+
+            self.hit_counts[track_id] = self.hit_counts.get(track_id, 0) + 1
+            if track_id not in self.locked_label:
+                votes = self.label_votes.setdefault(track_id, {})
+                votes[frame_label] = votes.get(frame_label, 0) + 1
+                self.vote_conf[track_id] = self.vote_conf.get(track_id, 0.0) + conf
+                n_votes = sum(votes.values())
+                if n_votes >= VOTES_BEFORE_LOCKING:
+                    self.locked_label[track_id] = max(votes, key=votes.get)
+                elif (n_votes >= UNANIMOUS_VOTES_TO_LOCK and len(votes) == 1 and frame_label in VEHICLE_LABELS and
+                      self.vote_conf[track_id] / n_votes >= thresholds.get(frame_label, plan["predict_conf"]) + EARLY_LOCK_CONF_MARGIN):
+                    self.locked_label[track_id] = frame_label
+
+            if cls_id == PERSON_CLASS:
+                person_boxes.append((track_id, x1, y1, x2, y2))
+            elif cls_id in TWO_WHEELER_COCO_IDS:
+                two_wheeler_boxes.append((track_id, x1, y1, x2, y2))
+
+        rider_ids = set()
+        if "Rider" in plan["draw_labels"]:
+            for p_id, px1, py1, px2, py2 in person_boxes:
+                for _v_id, vx1, vy1, vx2, vy2 in two_wheeler_boxes:
+                    if is_rider((px1, py1, px2, py2), (vx1, vy1, vx2, vy2), RIDER_Y_MARGIN):
+                        rider_ids.add(p_id)
+                        break
+
+        zone_polys = {m: [(z, zone_polygon(z, w, h)) for z in zs] for m, zs in plan["zones"].items()}
+        for m, polys in zone_polys.items():
+            for z, poly in polys:
+                if len(poly) >= 3:
+                    cv2.polylines(frame, [poly], True, hex_to_bgr(z.get("color", "#3478FF")), 2)
+
+        detections, new_confirmations = [], []
+        for track_id, cls_id, x1, y1, x2, y2, conf in all_boxes:
+            if track_id in rider_ids:
+                label = "Rider"
+            elif track_id in self.locked_label:
+                label = self.locked_label[track_id]
+            else:
+                label = None
+            frame_label = ALL_CLASS_MAP.get(cls_id, ("Unknown", None))[0]
+            shown = label or frame_label
+            if shown not in plan["draw_labels"]:
+                continue   # e.g. 2-wheeler boxes fetched only for the rider rule
+            module = label_module(shown)
+            cx, cy = box_center(x1, y1, x2, y2)
+            polys = zone_polys.get(module) or []
+            in_zone = (not polys) or any(len(p) >= 3 and cv2.pointPolygonTest(p, (float(cx), float(cy)), False) >= 0 for _, p in polys)
+            zone_name = next((z.get("name") for z, p in polys if len(p) >= 3 and cv2.pointPolygonTest(p, (float(cx), float(cy)), False) >= 0), None)
+
+            confirmed = label is not None and self.hit_counts[track_id] >= MIN_HITS_TO_CONFIRM
+            if confirmed and track_id not in self.confirmed_ids.setdefault(label, set()):
+                self.confirmed_ids[label].add(track_id)
+                if in_zone:
+                    new_confirmations.append({"trackId": track_id, "label": label, "module": label_module(label),
+                                              "confidence": round(conf, 3), "zone": zone_name,
+                                              "box": [round(x1 / w, 4), round(y1 / h, 4), round(x2 / w, 4), round(y2 / h, 4)]})
+            elif confirmed:
+                self.confirmed_ids[label].add(track_id)
+
+            display_label = label if label is not None else "(deciding)"
+            color = RIDER_COLOR if display_label == "Rider" else ALL_CLASS_MAP.get(cls_id, ("", (255, 255, 255)))[1]
+            if not in_zone:
+                color = (140, 140, 140)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(frame, f"{display_label} #{track_id} {conf:.2f}", (x1, max(y1 - 8, 14)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+            detections.append({"trackId": track_id, "label": display_label, "module": module, "confidence": round(conf, 3),
+                               "box": [round(x1 / w, 4), round(y1 / h, 4), round(x2 / w, 4), round(y2 / h, 4)],
+                               "confirmed": confirmed, "inZone": in_zone})
+
+        if plan["far"]:
+            inference_ms += self._far_pass(frame, person_boxes, plan, new_confirmations, detections)
+
+        return frame, detections, new_confirmations, inference_ms
+
+    def _far_pass(self, frame, person_boxes, plan, new_confirmations, detections):
+        """Original 'Fix #1' far-person pass (upscaled top-region crop, person only)."""
+        from ultralytics import YOLO
+        if self.far_model is None:
+            self.far_model = YOLO(self.model_path, task="detect")
+        h, w = frame.shape[:2]
+        crop_h = int(h * FAR_REGION_FRACTION)
+        far_resized = cv2.resize(frame[0:crop_h, 0:w], None, fx=FAR_UPSCALE, fy=FAR_UPSCALE)
+        t0 = time.perf_counter()
+        far_results = self.far_model.track(far_resized, persist=True, tracker=self.tracker_config,
+                                           imgsz=self.img_size, conf=FAR_CONF, classes=[PERSON_CLASS], verbose=False)
+        ms = (time.perf_counter() - t0) * 1000.0
+        main_boxes = [(x1, y1, x2, y2) for _, x1, y1, x2, y2 in person_boxes]
+        for box in far_results[0].boxes:
+            if box.id is None:
+                continue
+            far_id = f"far-{int(box.id[0])}"
+            if far_id in self.promoted_far_ids:
+                continue
+            conf = float(box.conf[0])
+            fx1, fy1, fx2, fy2 = box.xyxy[0].tolist()
+            ox1, oy1, ox2, oy2 = int(fx1 / FAR_UPSCALE), int(fy1 / FAR_UPSCALE), int(fx2 / FAR_UPSCALE), int(fy2 / FAR_UPSCALE)
+            if any(iou((ox1, oy1, ox2, oy2), mb) > FAR_DEDUPE_IOU for mb in main_boxes):
+                self.confirmed_ids["Person (far)"].discard(far_id)
+                self.promoted_far_ids.add(far_id)
+                continue
+            self.hit_counts[far_id] = self.hit_counts.get(far_id, 0) + 1
+            if self.hit_counts[far_id] >= MIN_HITS_TO_CONFIRM and far_id not in self.confirmed_ids["Person (far)"]:
+                self.confirmed_ids["Person (far)"].add(far_id)
+                new_confirmations.append({"trackId": far_id, "label": "Person (far)", "module": "human", "confidence": round(conf, 3), "zone": None})
+            cv2.rectangle(frame, (ox1, oy1), (ox2, oy2), FAR_COLOR, 2)
+            cv2.putText(frame, f"Person(far) {conf:.2f}", (ox1, max(oy1 - 8, 14)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, FAR_COLOR, 2)
+            detections.append({"trackId": far_id, "label": "Person (far)", "module": "human", "confidence": round(conf, 3),
+                               "box": [round(ox1 / w, 4), round(oy1 / h, 4), round(ox2 / w, 4), round(oy2 / h, 4)], "confirmed": True, "inZone": True})
+        return ms
+
+    def unique_counts(self):
+        return {label: len(ids) for label, ids in self.confirmed_ids.items()}

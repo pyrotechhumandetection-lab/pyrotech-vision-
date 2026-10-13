@@ -1,0 +1,20 @@
+# local configuration (may contain machine-specific paths)
+.env
+# backend runtime data: cameras, encrypted credentials, alerts, snapshot images
+backend/data/*
+!backend/data/.gitkeep
+backend/snapshots/*
+!backend/snapshots/.gitkeep
+# Python
+backend/.venv/
+__pycache__/
+*.pyc
+node_modules/
+backend/wheels/
+backend/.ultralytics/
+# Head Count model files joined from their .part* files on first use (the parts are the tracked copy)
+backend/models/head_yolov8m/head_yolov8m.pt
+backend/models/head_yolov8m/head_yolov8m_openvino_model/head_yolov8m.bin
+*.tmp
+# optional Grounding DINO (Object Monitoring Layer 3), about 690 MB - installed with backend/tools/install-grounding-dino.cmd
+backend/models/object_monitor/hf/

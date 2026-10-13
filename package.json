@@ -1,0 +1,16 @@
+{
+  "name": "ai-vision-frontend",
+  "version": "1.0.0",
+  "description": "PYROTECH VISION — operator console for an AI camera detection system (vanilla HTML/CSS/JS, no build step).",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "backend": "python backend/main.py",
+    "test:backend": "python -m unittest discover -s backend/tests -t . -v"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "license": "UNLICENSED"
+}
