@@ -106,7 +106,7 @@ enter the password again.
 
 ## Setup and start on Debian / Ubuntu Linux
 
-One script does everything - clone the repository and run it:
+One command - clone the repository and run `start.sh`:
 
 ```
 git clone https://github.com/pyrotechhumandetection-lab/pyrotech-vision-.git
@@ -114,20 +114,30 @@ cd pyrotech-vision-
 ./start.sh
 ```
 
-`start.sh` installs the missing system packages with `apt` (Python venv, Node.js, the OpenGL/GLib
-libraries OpenCV needs; asks for the sudo password once), creates `backend/.venv` with the pinned
-packages (about 1 GB the first time, internet needed; CPU PyTorch unless an NVIDIA GPU is found),
-creates `.env` from `.env.example`, runs the self-check once, then starts the web UI in the background
-and the backend in the terminal and opens http://127.0.0.1:5173. Ctrl+C stops both. Later starts skip
-the finished steps. Python 3.13 or 3.14 is used; on Debian 12 (Python 3.11) the script fetches
-Python 3.13 with `uv` into `backend/.uv` without changing the system Python.
+`start.sh` runs `setup-backend.sh` (only the missing steps), then the web UI (`start-frontend.sh`, in the
+background) and the backend (`start-backend.sh`, in the terminal) and opens http://127.0.0.1:5173.
+Ctrl+C stops both. The first start needs internet and takes a few minutes (about 1 GB); later starts
+take seconds.
 
+| Linux script | Windows script | What it does |
+|---|---|---|
+| `start.sh` | `start_backend.cmd`, `start.cmd` | setup if needed, then web UI + backend (all five modules) |
+| `setup-backend.sh` | `setup-backend.cmd` | apt packages (Python venv, Node.js, libraries OpenCV needs; asks for the sudo password once), `.env` from `.env.example`, `backend/.venv` with the pinned packages, contrib OpenCV, self-check |
+| `start-backend.sh` | `start-backend.cmd` | backend only (`./start-backend.sh --check` = self-check) |
+| `start-frontend.sh` | `start-frontend.cmd` | web UI only |
+| `backend/tools/install-grounding-dino.sh <folder>` | `install-grounding-dino.cmd` | optional Object Monitoring Layer 3 |
+| `backend/tools/download-wheels.sh` | `download-wheels.cmd` | download all packages to `backend/wheels/linux` for an offline install |
+
+`backend/tools/migrate_data.ps1` and `venv-in-use.ps1` are Windows-only and have no Linux version (not needed there).
+
+* Python 3.13 or 3.14 is used; on Debian 12 (Python 3.11) setup fetches Python 3.13 with `uv` into
+  `backend/.uv` without changing the system Python. CPU PyTorch unless an NVIDIA GPU is found.
 * Settings: edit `.env` (ports, `HOST=0.0.0.0` to open the UI from other PCs, model, engine), then run
   `./start.sh` again. `AIV_TORCH=cpu|cuda` forces the PyTorch build.
+* Options of `start.sh`: `--setup-only`, `--check`, `--reinstall` (rebuild `backend/.venv`), `--no-browser`.
 * OpenVINO (faster CPU inference) is optional: where no OpenVINO package exists for the PC (for example
-  64-bit ARM with an older system library) the script warns and every module runs on PyTorch.
+  64-bit ARM with an older system library) setup warns and every module runs on PyTorch.
   `AIV_OPENVINO=off` skips it. 32-bit systems are not supported (no PyTorch).
-* Options: `--setup-only`, `--check` (self-check), `--reinstall` (rebuild `backend/.venv`), `--no-browser`.
 * Cameras are not in the repository: add them in the UI. Camera passwords from the Windows PC cannot
   be moved (they are encrypted for that Windows user); on Linux they are stored with owner-only file
   permissions.
