@@ -128,6 +128,11 @@ take seconds.
 | `backend/tools/install-grounding-dino.sh <folder>` | `install-grounding-dino.cmd` | optional Object Monitoring Layer 3 |
 | `backend/tools/download-wheels.sh` | `download-wheels.cmd` | download all packages to `backend/wheels/linux` for an offline install |
 
+**Debian AI box (starts by itself at every boot):** `scripts/debian/install-services.sh` installs the
+backend and the web UI as systemd services - automatic start at boot, restart after a crash, running
+detections resume after a reboot, console at `http://<box-ip>:5173`. See
+[docs/DEBIAN_AI_BOX_DEPLOYMENT.md](docs/DEBIAN_AI_BOX_DEPLOYMENT.md).
+
 `backend/tools/migrate_data.ps1` and `venv-in-use.ps1` are Windows-only and have no Linux version (not needed there).
 
 * Python 3.13 or 3.14 is used; on Debian 12 (Python 3.11) setup fetches Python 3.13 with `uv` into

@@ -330,6 +330,93 @@ class HumanCountTests(unittest.TestCase):
         self.assertEqual(len(validate("count", bad, [])), 3)
 
 
+class AutoStartTests(unittest.TestCase):
+    """Detections that were running are resumed after a backend restart (AI box reboot)."""
+
+    def setUp(self):
+        from backend.services import autostart
+        self.mod = autostart
+        self.path = config.DATA_DIR / "running_modules.json"
+        if self.path.exists():
+            self.path.unlink()
+        self.old = (autostart.FIRST_DELAY_S, autostart.RETRY_MIN_S)
+        autostart.FIRST_DELAY_S, autostart.RETRY_MIN_S = 0, 0.2
+
+    def tearDown(self):
+        self.mod.FIRST_DELAY_S, self.mod.RETRY_MIN_S = self.old
+        if self.path.exists():
+            self.path.unlink()
+
+    def _fake(self, fail_first=0, code="CAMERA_UNAVAILABLE"):
+        from backend.services.sessions import SessionError
+        calls = []
+
+        class Sessions:
+            def start_module(self, cam_id, mod):
+                calls.append((cam_id, mod))
+                if len([c for c in calls if c == (cam_id, mod)]) <= fail_first:
+                    raise SessionError(code, "Cannot connect to rtsp://admin:secret@10.0.0.9/stream", 503)
+        return Sessions(), calls
+
+    def _wait(self, cond, sec=5):
+        import time as _t
+        end = _t.time() + sec
+        while _t.time() < end and not cond():
+            _t.sleep(0.05)
+        return cond()
+
+    def test_record_forget_persist(self):
+        a = self.mod.AutoStart(None, None)
+        a.record("CAM-01", "human"); a.record("CAM-01", "fire"); a.record("CAM-01", "human"); a.record("CAM-02", "count")
+        b = self.mod.AutoStart(None, None)            # a new backend process reads the same file
+        self.assertEqual(sorted(b.remembered()), [("CAM-01", "fire"), ("CAM-01", "human"), ("CAM-02", "count")])
+        b.forget("CAM-01", "human"); b.forget("CAM-02")
+        self.assertEqual(self.mod.AutoStart(None, None).remembered(), [("CAM-01", "fire")])
+
+    def test_resume_with_retry_until_camera_answers(self):
+        a = self.mod.AutoStart(None, None)
+        a.record("CAM-01", "fire")
+        sessions, calls = self._fake(fail_first=2)
+        b = self.mod.AutoStart(sessions, None)
+        b.start()
+        self.assertTrue(self._wait(lambda: b.state.get("CAM-01|fire", {}).get("status") == "running"), b.status())
+        b.stop()
+        self.assertEqual(calls, [("CAM-01", "fire")] * 3)
+        self.assertNotIn("secret", str(b.status()))       # credentials never kept in the status
+
+    def test_permanent_error_and_user_stop(self):
+        a = self.mod.AutoStart(None, None)
+        a.record("CAM-09", "human")
+        sessions, calls = self._fake(fail_first=99, code="CAMERA_NOT_FOUND")
+        b = self.mod.AutoStart(sessions, None)
+        b.start()
+        self.assertTrue(self._wait(lambda: b.status()["remembered"][0].get("status") == "failed"))
+        b.stop()
+        self.assertEqual(len(calls), 1)                  # not retried
+        # a module the user stopped while retrying is not started again
+        a2 = self.mod.AutoStart(None, None); a2.forget("CAM-09"); a2.record("CAM-03", "count")
+        sessions2, calls2 = self._fake(fail_first=99)
+        c = self.mod.AutoStart(sessions2, None)
+        c.start()
+        self.assertTrue(self._wait(lambda: len(calls2) >= 1))
+        c.forget("CAM-03", "count")
+        n = len(calls2)
+        import time as _t
+        _t.sleep(1.0)
+        c.stop()
+        self.assertEqual(len(calls2), n)
+
+    def test_can_be_switched_off(self):
+        os.environ["AIV_AUTOSTART"] = "0"
+        try:
+            a = self.mod.AutoStart(None, None)
+            a.record("CAM-01", "human")
+            a.start()
+            self.assertIsNone(a.thread)
+        finally:
+            del os.environ["AIV_AUTOSTART"]
+
+
 class ClientDisconnectTests(unittest.TestCase):
     def test_client_closed_connection_is_not_an_error(self):
         """WinError 10053 (ConnectionAbortedError) while answering must not be logged as an unhandled error."""

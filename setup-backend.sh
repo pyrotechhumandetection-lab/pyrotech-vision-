@@ -52,7 +52,8 @@ apt_pick() {   # first package name that apt knows (Debian 13 renamed some libra
     if apt-cache show "$p" >/dev/null 2>&1; then printf '%s' "$p"; return; fi
   done
 }
-has_lib() { ldconfig -p 2>/dev/null | grep -F "$1" >/dev/null; }
+LDCONFIG="$(command -v ldconfig || echo /sbin/ldconfig)"     # /sbin is not in a normal user's PATH
+has_lib() { "$LDCONFIG" -p 2>/dev/null | grep -F "$1" >/dev/null; }
 
 need=()
 command -v python3 >/dev/null 2>&1 || need+=(python3)

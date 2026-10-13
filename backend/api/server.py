@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,6 +19,7 @@ from urllib.parse import parse_qs, urlparse
 from backend import __version__, config
 
 BOOT_ID = str(int(time.time()))
+from backend.services.autostart import AutoStart
 from backend.services.cameras import CameraRegistry
 from backend.services.events import VEHICLE_CATEGORY, EventStore
 from backend.detection.modules import MODULES, describe, module_config, validate as validate_module, deep_merge, DEFAULTS
@@ -42,6 +44,7 @@ class App:
         self.events = EventStore()
         self.sessions = SessionManager(self.registry, self.events)
         self.headcount = HeadCountService(self.registry, self.sessions, self.events)
+        self.autostart = AutoStart(self.sessions, self.registry)
         self._storage_cache = (0, None)
         self._gpu = None
         try:
@@ -215,7 +218,8 @@ def _module(m):
 def health(app, q, body):
     engine, path = config.resolve_engine()
     return {"status": "ok", "version": __version__, "modules": list(MODULES), "modelAvailable": config.MODEL_PATH.is_file(),
-            "modelFile": config.MODEL_PATH.name, "engine": {"openvino": "OpenVINO", "pytorch": "PyTorch"}[engine]}
+            "modelFile": config.MODEL_PATH.name, "engine": {"openvino": "OpenVINO", "pytorch": "PyTorch"}[engine],
+            "autostart": app.autostart.status() if getattr(app, "autostart", None) else None}
 
 
 @route("GET", r"/system/metrics")
@@ -278,6 +282,7 @@ def camera_delete(app, q, body, cid):
         s.modules.clear()
         s.viewers = 0
     app.registry.delete(cid)
+    app.autostart.forget(cid)
     app.sessions.camera_changed(cid, True)
     return {"success": True, "cameraId": cid}
 
@@ -486,6 +491,7 @@ def mod_start(app, q, body, mod):
     if not cfg.get("enabled"):
         cfg["enabled"] = True
         app.registry.update_module_config(cid, mod, cfg)
+    app.autostart.record(cid, mod)          # resumed automatically after a restart / reboot
     return {"success": True, "camera_id": cid, "cameraId": cid, "module": mod, "status": "running",
             "sharedWith": [m for m in s.modules if m != mod], "message": f"{MODULES[mod]['name']} started"}
 
@@ -495,6 +501,7 @@ def mod_stop(app, q, body, mod):
     mod = _module(mod)
     cid = _cam_id_param(q, body)
     stopped = app.sessions.stop_module(cid, mod)
+    app.autostart.forget(cid, mod)
     s = app.sessions.get(cid)
     return {"success": True, "camera_id": cid, "cameraId": cid, "module": mod, "status": "stopped", "wasRunning": stopped,
             "cameraStillOpen": bool(s), "message": f"{MODULES[mod]['name']} stopped" + (" (camera kept open for other users)" if s else "")}
@@ -792,11 +799,19 @@ def serve():
     log.info("PYROTECH VISION backend %s on http://%s:%d%s", __version__, config.HOST, config.PORT, config.API_PREFIX)
     log.info("model=%s (%s) data=%s snapshots=%s", config.MODEL_PATH.name, "found" if config.MODEL_PATH.is_file() else "MISSING",
              config.DATA_DIR, config.SNAPSHOT_DIR)
+    def _graceful(signum, frame):   # systemctl stop / kill: same clean shutdown as Ctrl+C
+        raise KeyboardInterrupt
+    try:
+        signal.signal(signal.SIGTERM, _graceful)
+    except ValueError:                 # not in the main thread (tests)
+        pass
+    app.autostart.start()        # background: resume detections that were running before the restart
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         log.info("shutting down")
+        app.autostart.stop()
         app.sessions.shutdown()
         srv.server_close()

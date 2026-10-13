@@ -39,6 +39,14 @@ for a in "$@"; do
   esac
 done
 
+# the AI box services (scripts/debian/install-services.sh) already run the application - never start a 2nd copy
+if (( ! SETUP_ONLY && ! CHECK_ONLY )) && command -v systemctl >/dev/null 2>&1 \
+   && systemctl is-active --quiet pyrotech-vision-backend.service pyrotech-vision-frontend.service 2>/dev/null; then
+  die "PYROTECH VISION already runs as a system service on this box.
+       Status: scripts/debian/status-services.sh   Restart: scripts/debian/restart-services.sh
+       To run it by hand instead: scripts/debian/stop-services.sh first."
+fi
+
 # ---------------------------------------------------------------- 1. setup
 ./setup-backend.sh "${SETUP_ARGS[@]}"
 
