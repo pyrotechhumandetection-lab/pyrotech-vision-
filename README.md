@@ -36,9 +36,13 @@ D:\ui\                         (repository root = frontend; copy this ONE folder
 ├── start-frontend.cmd          starts server.js
 ├── .env.example                all settings for both parts (copy to .env)
 ├── README.md
+├── scripts\debian\              Debian AI box: systemd services, status, perf-tune.sh (performance monitor / CPU optimizer)
+├── scripts\perf\                pyrotech_perf.py (monitor, benchmark, apply, rollback) + bench_worker.py
+├── docs\DEBIAN_AI_BOX_DEPLOYMENT.md   AI box: installation, services, camera streams, performance tuning
 └── backend\
     ├── main.py                 entry point  (main.py --check = self-check)
     ├── config.py  selfcheck.py
+    ├── runtime.py              CPU settings: PyTorch / OpenCV threads, inference concurrency, CPU affinity (read at start-up)
     ├── requirements.txt        direct dependencies (pinned)
     ├── requirements-lock.txt   exact versions of the working detector environment (installed by setup)
     ├── detection\              existing detection logic
@@ -203,6 +207,10 @@ Real environment variables override `.env`. Relative backend paths resolve again
 | `AIV_FIRE_ENGINE` | `auto` | backend | Fire & Smoke model: `auto` (OpenVINO if installed, ~5x faster on CPU), `openvino`, `pytorch` |
 | `AIV_FRAME_POLICY` | `queue` | backend | `queue` = every decoded frame is analysed in order (FIFO per camera); `latest` = original newest-frame behaviour |
 | `AIV_FRAME_QUEUE_SECONDS` / `_MAX_MB` | `0.5` / `96` | backend | per-camera queue size; when full the oldest frames are dropped and counted ("dropped (queue full)") |
+| `AIV_TORCH_THREADS` / `AIV_TORCH_INTEROP_THREADS` | *(empty)* | backend | PyTorch threads per model call / inter-op pool. Empty: Ultralytics sets min(8, CPUs−1) per call, for every camera at once |
+| `AIV_INFER_CONCURRENCY` | *(empty)* = unlimited | backend | model calls (all cameras, fire and object workers) running at the same time; the others wait in order |
+| `AIV_CV_THREADS` / `AIV_CPU_AFFINITY` / `AIV_OMP_WAIT_POLICY` | *(empty)* | backend | OpenCV threads / CPUs the backend may use (e.g. `4-7`) / `passive` or `active` OpenMP waiting |
+| `AIV_SHARED_PERSON_INFERENCE` | `1` | backend | Human Detection + Human Count on one camera use one model pass (identical detections); `0` = two passes |
 | `AIV_HEAD_ENGINE` | `auto` | backend | Head count model engine: `auto` (OpenVINO FP16 if installed), `openvino`, `pytorch` |
 | `AIV_HEAD_MAX_FRAME_AGE` | `2` | backend | Head count uses the running stream's newest frame if it is at most this many seconds old, else reads a new frame |
 | `AIV_STREAM_MAX_FPS` / `_MAX_WIDTH` / `_JPEG_QUALITY` | `15` / `1280` / `75` | backend | MJPEG output |
@@ -216,6 +224,11 @@ Real environment variables override `.env`. Relative backend paths resolve again
 substream while the main stream stays the viewing stream; *Snapshot image* = boxes only, or boxes + a
 full-resolution original from the main stream. Measurements, costs and setup:
 [docs/DEBIAN_AI_BOX_DEPLOYMENT.md §11](docs/DEBIAN_AI_BOX_DEPLOYMENT.md).
+
+**CPU thread settings** are read once at start-up. Do not guess them - `scripts/debian/perf-tune.sh` monitors the
+running application, benchmarks thread configurations on frames from your cameras, applies the best one to `.env`
+(backup first), measures before/after and rolls back automatically when there is no measured gain:
+[docs/DEBIAN_AI_BOX_DEPLOYMENT.md §13](docs/DEBIAN_AI_BOX_DEPLOYMENT.md).
 
 ## How it works
 
@@ -391,7 +404,9 @@ Errors: `{"success": false, "error_code": "...", "message": "..."}` with a 4xx/5
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/system/health` · `/system/metrics` · `/system/storage` | health; CPU/RAM/GPU, FPS, latency; disk + snapshots |
+| GET | `/system/health` · `/system/metrics` · `/system/storage` | health; CPU/RAM/GPU, FPS, latency, per-camera stage times (`stageMs`), CPU settings in effect; disk + snapshots |
+| GET | `/system/runtime` | CPU settings requested (`.env`) and in effect (read back from PyTorch / OpenCV), inference-slot statistics, engine |
+| GET | `/cameras/{id}/frame.jpg` | newest frame of a running session without boxes (AI stream) - used by the performance tool for representative frames |
 | GET | `/detection-modules` | human / vehicle, classes, running state |
 | GET, POST | `/cameras` | camera registry (password write-only) |
 | GET, PUT, DELETE | `/cameras/{id}` | editing a source restarts its session |
@@ -428,6 +443,8 @@ cd D:\ui
 backend\.venv\Scripts\python -m unittest discover -s backend/tests -t . -v
 backend\.venv\Scripts\python backend\main.py --check
 ```
+
+On Debian / Ubuntu: `backend/.venv/bin/python -m unittest discover -s backend/tests -t .` and `./start.sh --check`.
 
 ## Frontend without a backend
 

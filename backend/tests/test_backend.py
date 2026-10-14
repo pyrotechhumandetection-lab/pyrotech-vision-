@@ -800,3 +800,160 @@ class ObjectMonitorTests(unittest.TestCase):
         prompts, _ = prompt_table(DEFAULTS["object"]["detector"]["vocabulary"])
         self.assertEqual(caches[0].stem.split("_")[-1], hashlib.sha1("\n".join(prompts).encode()).hexdigest()[:10],
                          "the shipped vocabulary cache must match the default vocabulary")
+
+
+class PerfRuntimeTests(unittest.TestCase):
+    """CPU settings (backend/runtime.py), shared person pass, and the perf tool's safety logic."""
+
+    def test_cpu_list(self):
+        from backend.runtime import parse_cpu_list, _cpu_list_text
+        self.assertEqual(parse_cpu_list("0,2,4-7"), [0, 2, 4, 5, 6, 7])
+        self.assertEqual(_cpu_list_text([0, 2, 4, 5, 6, 7]), "0,2,4-7")
+        for bad in ("", "5-3", "-1", "a"):
+            with self.assertRaises(ValueError):
+                parse_cpu_list(bad)
+
+    def test_gate_limits_and_is_fifo(self):
+        import threading
+        import time as _t
+        from backend.runtime import InferenceGate
+        g = InferenceGate(1)
+        running, peak, order = [0], [0], []
+        lock = threading.Lock()
+
+        def work(i):
+            with g.slot():
+                with lock:
+                    running[0] += 1
+                    peak[0] = max(peak[0], running[0])
+                    order.append(i)
+                _t.sleep(0.03)
+                with lock:
+                    running[0] -= 1
+        ts = []
+        for i in range(5):
+            t = threading.Thread(target=work, args=(i,))
+            t.start()
+            ts.append(t)
+            _t.sleep(0.005)          # arrive in order 0..4
+        for t in ts:
+            t.join()
+        self.assertEqual(peak[0], 1)
+        self.assertEqual(order, [0, 1, 2, 3, 4])
+        self.assertGreaterEqual(g.stats()["callsThatWaited"], 3)
+        g.configure(0)                # unlimited = no-op
+        with g.slot() as s:
+            self.assertEqual(s.wait_ms, 0.0)
+
+    def test_settings_survive_ultralytics_model_load(self):
+        """Ultralytics sets torch threads to min(8, CPUs-1) on every model load - AIV_TORCH_THREADS must win."""
+        import subprocess
+        code = ("import sys,os; sys.path.insert(0, %r); os.chdir(%r)\n"
+                "from backend import config, runtime; runtime.apply()\n"
+                "import torch, cv2\nfrom ultralytics import YOLO\n"
+                "m = YOLO(%r); m.predict(cv2.imread(os.path.join(os.path.dirname(__import__('ultralytics').__file__), 'assets', 'bus.jpg')), verbose=False)\n"
+                "print('RESULT', torch.get_num_threads(), torch.get_num_interop_threads(), runtime.GATE.limit, cv2.getNumThreads())"
+                % (str(ROOT.parent), str(ROOT), str(ROOT / "models" / "yolov8n.pt")))
+        env = dict(os.environ, AIV_TORCH_THREADS="3", AIV_TORCH_INTEROP_THREADS="1", AIV_INFER_CONCURRENCY="2",
+                   AIV_CV_THREADS="2", AIV_ENGINE="pytorch")
+        env.pop("OMP_NUM_THREADS", None)
+        r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=300)
+        line = next((ln for ln in r.stdout.splitlines() if ln.startswith("RESULT")), None)
+        self.assertIsNotNone(line, r.stderr[-800:])
+        self.assertEqual(line.split()[1:], ["3", "1", "2", "2"])
+
+    def test_shared_person_pass_is_identical(self):
+        import cv2
+        import ultralytics
+        from backend.detection.pipeline import PersonVehiclePipeline
+        from backend.detection.human_count import HumanCounter
+        img = cv2.imread(os.path.join(os.path.dirname(ultralytics.__file__), "assets", "bus.jpg"))
+        for mods in (("human",), ("human", "vehicle"), ("vehicle",)):
+            outs = []
+            for shared in (False, True):
+                p = PersonVehiclePipeline(ROOT / "models" / "yolov8n.pt", ROOT / "models" / "bytetrack_stable.yaml")
+                c = HumanCounter(ROOT / "models" / "yolov8n.pt")
+                c.configure(module_config({}, "count"), [])
+                plan = p.build_plan(module_config({}, "human") if "human" in mods else None,
+                                    module_config({}, "vehicle") if "vehicle" in mods else None, [])
+                res = []
+                for k in range(4):
+                    _, dets, new, _ = p.process(img.copy(), plan, share_person_conf=c.detect_conf if shared else None)
+                    _, _, counted = c.process(img, img.copy(), 100.0 + k, dets=p.shared_persons if shared else None)
+                    res.append(([(d["trackId"], d["label"], d["confidence"], d["box"]) for d in dets],
+                                [n["label"] for n in new], c.current, c.unique, len(counted)))
+                    if shared:
+                        own = c.detector.detect(img, c.detect_conf)
+                        self.assertEqual(own.shape, p.shared_persons.shape)
+                        self.assertLess(float(abs(own - p.shared_persons).max()) if len(own) else 0.0, 1e-3)
+                outs.append(res)
+            self.assertEqual(outs[0], outs[1], f"modules {mods}")
+
+    def _tool(self, tmp):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pyrotech_perf", ROOT.parent / "scripts" / "perf" / "pyrotech_perf.py")
+        t = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(t)
+        t.ENV_FILE = os.path.join(tmp, ".env")
+        t.BACKEND_ENV_FILE = os.path.join(tmp, "backend.env")
+        t.PERF_DIR = os.path.join(tmp, "perf")
+        t.REPO = tmp
+        return t
+
+    def test_tool_env_backup_and_rollback(self):
+        tmp = tempfile.mkdtemp(prefix="aiv-perf-")
+        t = self._tool(tmp)
+        original = "PORT=5173\nAIV_TORCH_THREADS=8\n# comment\nAIV_LOG_LEVEL=INFO\n"
+        with open(t.ENV_FILE, "w") as f:
+            f.write(original)
+        b = t.write_env({"AIV_TORCH_THREADS": "4", "AIV_INFER_CONCURRENCY": "2"}, "test")
+        env = t.read_env(t.ENV_FILE)
+        self.assertEqual((env["AIV_TORCH_THREADS"], env["AIV_INFER_CONCURRENCY"], env["PORT"]), ("4", "2", "5173"))
+        self.assertEqual(Path(b).read_text(), original)                 # backup = the file before the change
+        self.assertEqual(Path(t.ENV_FILE).read_text().count("AIV_TORCH_THREADS="), 1)   # replaced in place, not duplicated
+        with self.assertRaises(ValueError):
+            t.write_env({"AIV_PORT": "1"}, "not a CPU key")
+        t.restore_env(b)
+        self.assertEqual(Path(t.ENV_FILE).read_text(), original)
+        os.remove(t.ENV_FILE)                                      # .env that did not exist: rollback removes it again
+        b2 = t.write_env({"AIV_TORCH_THREADS": "2"}, "test")
+        self.assertTrue(os.path.exists(t.ENV_FILE))
+        t.restore_env(b2)
+        self.assertFalse(os.path.exists(t.ENV_FILE))
+
+    def test_tool_candidates_never_oversubscribe(self):
+        t = self._tool(tempfile.mkdtemp(prefix="aiv-perf-"))
+        cur = {k: "" for k in t.KEYS}
+        for ncpu, streams in ((8, 3), (8, 1), (4, 2), (2, 3)):
+            cs = t.candidates({"cpus": ncpu, "cpusUsable": ncpu}, streams, cur)
+            self.assertEqual(cs[0]["name"], "current")
+            self.assertGreater(len(cs), 1)
+            for x in cs[1:]:
+                th, g = int(x["AIV_TORCH_THREADS"]), int(x["AIV_INFER_CONCURRENCY"] or 0)
+                if th > 1:
+                    self.assertLessEqual(th * (g or streams), ncpu, x)
+            if streams >= ncpu // 2:
+                self.assertTrue(any(x.get("AIV_TORCH_THREADS") == "1" and not x.get("AIV_INFER_CONCURRENCY") for x in cs),
+                                "one thread per call, all cameras at once, is measured when there are many cameras")
+
+    def test_tool_accuracy_compare_and_judge(self):
+        t = self._tool(tempfile.mkdtemp(prefix="aiv-perf-"))
+        ref = [[[10, 10, 50, 90, 0.80, 0], [100, 10, 150, 90, 0.36, 0]]]
+        same = [[[10.01, 10, 50, 90, 0.8001, 0], [100, 10, 150, 90, 0.3599, 0]]]
+        self.assertTrue(t.compare_detections(ref, same, 0.35)["ok"])
+        missing = [[[100, 10, 150, 90, 0.36, 0]]]
+        r = t.compare_detections(ref, missing, 0.35)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["mismatches"], 1)
+        border = [[[10, 10, 50, 90, 0.80, 0]]]                     # the 0.36 box (threshold 0.35) flipped: borderline
+        self.assertTrue(t.compare_detections(ref, border, 0.35)["ok"])
+        cam = lambda fps, rec=25.0: {"processedFps": fps, "receivedFps": rec, "state": "processing", "modules": ["human"]}
+        before = {"cameras": {"C1": cam(1.9)}, "processedFpsTotal": 1.9, "receivedFpsTotal": 25.0, "processRssMb": 3000, "processCpu": 400}
+        better = {"cameras": {"C1": cam(3.0)}, "processedFpsTotal": 3.0, "receivedFpsTotal": 25.0, "processRssMb": 3100, "processCpu": 600}
+        same_ = {"cameras": {"C1": cam(1.95)}, "processedFpsTotal": 1.95, "receivedFpsTotal": 25.0, "processRssMb": 3000, "processCpu": 400}
+        lost = {"cameras": {}, "processedFpsTotal": 0, "receivedFpsTotal": 0, "processRssMb": 3000, "processCpu": 100}
+        other_src = {"cameras": {"C1": cam(3.0, 12.0)}, "processedFpsTotal": 3.0, "receivedFpsTotal": 12.0, "processRssMb": 3000}
+        self.assertTrue(t.judge(before, better, 0.05)[0])
+        self.assertFalse(t.judge(before, same_, 0.05)[0])
+        self.assertFalse(t.judge(before, lost, 0.05)[0])
+        self.assertFalse(t.judge(before, other_src, 0.05)[0])

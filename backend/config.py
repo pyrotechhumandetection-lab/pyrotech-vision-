@@ -32,6 +32,13 @@ def _load_dotenv(path):
 _load_dotenv(BACKEND_DIR / ".env")
 _load_dotenv(REPO_ROOT / ".env")
 
+# CPU thread settings that the OpenMP runtime reads only when it starts (before torch is imported).
+# The other CPU settings (torch threads, inference concurrency, affinity) are applied by
+# backend/runtime.apply() at start-up - see that file.
+from backend import runtime as _runtime  # noqa: E402
+
+_runtime.early_env()
+
 # Self-contained runtime (applied before Ultralytics is imported anywhere): no connectivity probe,
 # no asset downloads, no automatic pip installs, settings file kept inside backend/.
 # .env / environment can override (YOLO_OFFLINE=0, YOLO_AUTOINSTALL=1).
@@ -134,6 +141,12 @@ HEAD_ENGINE = _env("AIV_HEAD_ENGINE", "auto").lower()
 # Frames from a running session are used for Capture & Count when they are at most this old (seconds);
 # otherwise a fresh frame is read from the camera.
 HEAD_MAX_FRAME_AGE_SEC = float(_env("AIV_HEAD_MAX_FRAME_AGE", "2"))
+
+# Human Detection and Human Count on the SAME camera: one person-detection pass of the shared yolov8n
+# weights serves both (the Human Count module used to run its own second pass on the same frame).
+# Detections are identical (same model, input and NMS; each module still applies its own thresholds and
+# tracker - see detection/pipeline.py). 0 = two separate passes as before.
+SHARED_PERSON_INFERENCE = _env("AIV_SHARED_PERSON_INFERENCE", "1").strip() not in ("0", "false", "no", "off")
 
 # --- camera / stream ---
 CONNECT_TIMEOUT_SEC = float(_env("AIV_CONNECT_TIMEOUT", "10"))

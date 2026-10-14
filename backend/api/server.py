@@ -16,9 +16,10 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-import cv2
+from backend import __version__, config          # first: reads .env and the CPU settings before torch / cv2 load
+from backend import runtime
 
-from backend import __version__, config
+import cv2
 
 BOOT_ID = str(int(time.time()))
 from backend.services.autostart import AutoStart
@@ -161,6 +162,10 @@ class App:
                 lat.append(mt["inferenceMs"])
             if mt["cameraFps"] is not None:
                 cam_fps.append(mt["cameraFps"])
+        out["runtime"] = {**runtime.snapshot(), "gate": runtime.GATE.stats(), "errors": runtime.STATE["errors"]}
+        ws = self.events.writer_stats
+        out["eventWriter"] = {"jobs": ws["jobs"], "msAvg": round(ws["msTotal"] / ws["jobs"], 1) if ws["jobs"] else None,
+                              "msMax": round(ws["msMax"], 1), "queued": self.events._jobs.qsize()}
         out["fps"] = round(sum(fps), 1) if fps else None
         out["latencyMs"] = round(sum(lat) / len(lat), 1) if lat else None
         out["cameraFps"] = round(sum(cam_fps), 1) if cam_fps else None
@@ -246,6 +251,16 @@ def health(app, q, body):
 @route("GET", r"/system/metrics")
 def metrics(app, q, body):
     return app.metrics()
+
+
+@route("GET", r"/system/runtime")
+def runtime_info(app, q, body):
+    """CPU settings in effect (thread pools, inference concurrency, affinity), as read back from the libraries."""
+    engine, _ = config.resolve_engine()
+    return {"requested": runtime.STATE["requested"], "applied": runtime.snapshot(), "errors": runtime.STATE["errors"],
+            "gate": runtime.GATE.stats(), "engine": {"openvino": "OpenVINO", "pytorch": "PyTorch"}[engine],
+            "sharedPersonInference": config.SHARED_PERSON_INFERENCE, "imgSize": config.IMG_SIZE,
+            "pid": os.getpid()}
 
 
 @route("GET", r"/system/storage")
@@ -741,6 +756,9 @@ class Handler(BaseHTTPRequestHandler):
                 if (q.get("source") or [""])[0] == "main":
                     return self._mjpeg_main(m.group(1))
                 return self._mjpeg(m.group(1))
+            m = re.match(r"^/api/cameras/([^/]+)/frame\.jpg$", path)
+            if method == "GET" and m:
+                return self._clean_frame(m.group(1))
             m = re.match(r"^/api/snapshots/([^/]+)/(image|original)$", path)
             if method == "GET" and m:
                 return self._snapshot_image(m.group(1), "download" in q, original=m.group(2) == "original")
@@ -768,6 +786,27 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(500, {"success": False, "error_code": "INTERNAL_ERROR", "code": "INTERNAL_ERROR", "message": redact(e)})
             except Exception:
                 pass
+
+    def _clean_frame(self, cid):
+        """Newest decoded frame of a running session, WITHOUT boxes, from the stream the AI analyses (JPEG,
+        quality 95). Used by scripts/perf/pyrotech_perf.py to benchmark on representative frames at the
+        real input resolution. No camera connection is opened for it."""
+        self.app.camera_or_404(cid)
+        s = self.app.sessions.get(cid)
+        raw = s.latest_raw if s is not None else None
+        if raw is None:
+            raise ApiError(409, "NOT_RUNNING", "No frame yet - the camera has no running detection session")
+        ok, buf = cv2.imencode(".jpg", raw, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        if not ok:
+            raise ApiError(500, "ENCODE_FAILED", "Frame could not be encoded")
+        data = buf.tobytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self._cors()
+        self.end_headers()
+        self.wfile.write(data)
 
     def _snapshot_image(self, sid, download, original=False):
         rec, p = (self.app.events.snapshot_original_file if original else self.app.events.snapshot_file)(sid)
@@ -861,6 +900,8 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve():
     config.setup_logging()
+    runtime.name_thread("api")        # HTTP threads inherit this OS thread name
+    runtime.apply(log)           # CPU thread settings - once, before any model is loaded
     app = App()
     Handler.app = app
     srv = ThreadingHTTPServer((config.HOST, config.PORT), Handler)

@@ -79,6 +79,15 @@ def run():
     if fails:
         return _done(fails, warns)
 
+    # CPU thread settings from .env (AIV_TORCH_THREADS, ...), applied the same way as the backend does
+    from backend import runtime
+    st = runtime.apply()
+    for e in st["errors"]:
+        line("WARN", f"CPU settings: {e}")
+    req = {k: v for k, v in st["requested"].items() if v}
+    line("OK", "CPU settings: " + (", ".join(f"{k}={v}" for k, v in req.items()) if req else "application defaults")
+         + f" ({os.cpu_count()} CPUs)")
+
     # 3. the existing pipeline on a real image (no camera needed)
     import cv2
     import ultralytics

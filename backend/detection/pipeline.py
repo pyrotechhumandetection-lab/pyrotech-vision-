@@ -33,6 +33,8 @@ import time
 import cv2
 import numpy as np
 
+from backend.runtime import gated
+
 log = logging.getLogger("aivision.pipeline")
 
 # ---- constants from the original script ------------------------------------
@@ -128,6 +130,10 @@ class PersonVehiclePipeline:
         self.img_size = img_size
         self.device = device
         self.far_model = None
+        self.last_stages = {}        # ms of the last frame: preprocess / inference / postprocess / tracking / gateWait
+        self.shared_persons = None   # person detections of the last frame for Human Count (see process(share_person_conf))
+        self._share = None           # active share request during one model call
+        self._share_cb_installed = False
         self.reset_tracking()
 
     def reset_tracking(self):
@@ -194,21 +200,47 @@ class PersonVehiclePipeline:
         }
 
     # ------------------------------------------------------------------ frame
-    def process(self, frame, plan):
+    def process(self, frame, plan, share_person_conf=None):
         """Run the original detection logic on one frame.
 
-        Returns (annotated_frame, detections, new_confirmations, inference_ms)
+        share_person_conf: Human Count runs on the same camera and needs person boxes above this
+        confidence - they are taken from this model pass (self.shared_persons, Nx5 xyxy+conf) instead of
+        a second pass. The boxes given to ByteTrack and everything below are unchanged.
+
+        Returns (annotated_frame, detections, new_confirmations, inference_ms)  (inference_ms = model +
+        tracker time, without time spent waiting for an inference slot)
         """
         h, w = frame.shape[:2]
+        self.shared_persons = None
+        self.last_stages = {}
         if not plan["coco"]:
             return frame, [], [], 0.0
 
-        kwargs = dict(imgsz=self.img_size, conf=plan["predict_conf"], classes=plan["coco"], verbose=False)
+        conf, classes = plan["predict_conf"], plan["coco"]
+        if share_person_conf is not None:
+            # One model pass for Human Detection AND Human Count: run at the lower of the two confidences
+            # with the union of the classes, hand the raw person boxes to Human Count, then give the
+            # tracker exactly the boxes the original call would have produced (see _split_shared).
+            self._install_share_callback()
+            self._share = {"conf": conf, "classes": set(classes), "person_conf": float(share_person_conf)}
+            conf = min(conf, float(share_person_conf))
+            classes = sorted(set(classes) | {PERSON_CLASS})
+        kwargs = dict(imgsz=self.img_size, conf=conf, classes=classes, verbose=False)
         if self.device is not None:
             kwargs["device"] = self.device
         t0 = time.perf_counter()
-        results = self.model.track(frame, persist=True, tracker=self.tracker_config, **kwargs)
-        inference_ms = (time.perf_counter() - t0) * 1000.0
+        try:
+            with gated() as slot:
+                t1 = time.perf_counter()
+                results = self.model.track(frame, persist=True, tracker=self.tracker_config, **kwargs)
+                t2 = time.perf_counter()
+        finally:
+            self._share = None
+        inference_ms = (time.perf_counter() - t0) * 1000.0 - slot.wait_ms
+        sp = getattr(results[0], "speed", None) or {}
+        pre, inf, post = (float(sp.get(k) or 0.0) for k in ("preprocess", "inference", "postprocess"))
+        self.last_stages = {"preprocess": pre, "inference": inf, "postprocess": post,
+                            "tracking": max(0.0, (t2 - t1) * 1000.0 - pre - inf - post), "gateWait": slot.wait_ms}
 
         thresholds = plan["thresholds"]
         person_boxes, two_wheeler_boxes, all_boxes = [], [], []
@@ -299,6 +331,33 @@ class PersonVehiclePipeline:
 
         return frame, detections, new_confirmations, inference_ms
 
+    # ------------------------------------------------------------ shared person pass
+    def _install_share_callback(self):
+        """Runs after NMS and BEFORE the tracker callback that model.track() registers."""
+        if self._share_cb_installed:
+            return
+        self.model.callbacks["on_predict_postprocess_end"].insert(0, self._split_shared)
+        self._share_cb_installed = True
+
+    def _split_shared(self, predictor):
+        req = self._share
+        if req is None:
+            return
+        res = predictor.results[0]
+        boxes = res.boxes
+        if boxes is None or not len(boxes):
+            self.shared_persons = np.zeros((0, 5), np.float32)
+            return
+        data = boxes.data.cpu().numpy()                 # x1 y1 x2 y2 conf cls (no ids yet)
+        conf, cls = data[:, 4], data[:, 5].astype(int)
+        # Ultralytics keeps boxes with conf > threshold (strict); greedy NMS is monotonic in the threshold
+        # and class-aware, so these subsets equal the boxes of separate calls at each threshold / class set.
+        pm = (cls == PERSON_CLASS) & (conf > req["person_conf"])
+        self.shared_persons = np.concatenate([data[pm, :4], data[pm, 4:5]], 1).astype(np.float32)
+        keep = (conf > req["conf"]) & np.isin(cls, list(req["classes"]))
+        if not keep.all():
+            predictor.results[0] = res[np.flatnonzero(keep)]
+
     def _far_pass(self, frame, person_boxes, plan, new_confirmations, detections):
         """Original 'Fix #1' far-person pass (upscaled top-region crop, person only)."""
         from ultralytics import YOLO
@@ -307,10 +366,11 @@ class PersonVehiclePipeline:
         h, w = frame.shape[:2]
         crop_h = int(h * FAR_REGION_FRACTION)
         far_resized = cv2.resize(frame[0:crop_h, 0:w], None, fx=FAR_UPSCALE, fy=FAR_UPSCALE)
-        t0 = time.perf_counter()
-        far_results = self.far_model.track(far_resized, persist=True, tracker=self.tracker_config,
-                                           imgsz=self.img_size, conf=FAR_CONF, classes=[PERSON_CLASS], verbose=False)
-        ms = (time.perf_counter() - t0) * 1000.0
+        with gated():
+            t0 = time.perf_counter()
+            far_results = self.far_model.track(far_resized, persist=True, tracker=self.tracker_config,
+                                               imgsz=self.img_size, conf=FAR_CONF, classes=[PERSON_CLASS], verbose=False)
+            ms = (time.perf_counter() - t0) * 1000.0
         main_boxes = [(x1, y1, x2, y2) for _, x1, y1, x2, y2 in person_boxes]
         for box in far_results[0].boxes:
             if box.id is None:

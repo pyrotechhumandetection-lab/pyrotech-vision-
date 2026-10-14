@@ -19,7 +19,7 @@ import time
 
 import cv2
 
-from backend import config
+from backend import config, runtime
 from backend.detection.frame_reader import LatestFrameReader
 from backend.detection.modules import MODULES, module_config
 from backend.detection.rtsp_probe import rtsp_describe
@@ -84,13 +84,14 @@ class CameraSession:
                         "receivedFps": None, "processedFps": None, "inferenceMsRecent": None, "latencyMs": None,
                         "latencyMsMax": None, "framePolicy": config.FRAME_POLICY, "queueLen": 0, "queueCapacity": None,
                         "queuePeak": 0, "framesDroppedOverload": 0, "cameraGaps": 0, "aiStream": None,
-                        "aiResolution": None, "viewResolution": None, "fireAnalysedFps": None, "fireSkipped": None}
+                        "aiResolution": None, "viewResolution": None, "fireAnalysedFps": None, "fireSkipped": None,
+                        "stageMs": None, "sharedPersonPass": None}
         self.current = {"human": {}, "vehicle": {}}             # label -> count visible in the latest frame
         self.last_detection_at = {"human": None, "vehicle": None, "count": None, "fire": None, "object": None}
         self._disconnect_alerted = False
 
     # ------------------------------------------------------------------ lifecycle
-    def _open_reader(self, source, timeout, report=True):
+    def _open_reader(self, source, timeout, report=True, tag=None):
         """Open one stream and wait for its first frame. report=False: failures are not shown as a camera error
         (used for the optional AI substream, which falls back to the main stream)."""
         def fail(code, msg):
@@ -103,7 +104,7 @@ class CameraSession:
             c, m, _ = rtsp_describe(source, min(timeout, 5))
             if c:
                 fail("AUTH_FAILED" if c == "AUTH_FAILED" else "CAMERA_UNAVAILABLE", m)
-        reader = LatestFrameReader(source, open_timeout_sec=timeout)
+        reader = LatestFrameReader(source, open_timeout_sec=timeout, tag=tag or f"rd:{self.camera_id}")
         if not reader.wait_first_frame(timeout):
             reader.release()
             code, msg = "CAMERA_UNAVAILABLE", "No frame could be read from the camera within %.0f s" % timeout
@@ -170,7 +171,7 @@ class CameraSession:
 
     def _open_view_reader(self):
         try:
-            r = self._open_reader(self.main_source, config.CONNECT_TIMEOUT_SEC, report=False)
+            r = self._open_reader(self.main_source, config.CONNECT_TIMEOUT_SEC, report=False, tag=f"hd:{self.camera_id}")
             if self.stopping:
                 r.release()
             else:
@@ -246,7 +247,7 @@ class CameraSession:
         if not fire_smoke.WEIGHTS.is_file():
             raise SessionError("MODEL_NOT_FOUND", "Fire & smoke model file not found: backend/models/fire_smoke/firedetect-11s.pt", 500)
         try:
-            self.fire = fire_smoke.FireEngine(self._fire_alert)
+            self.fire = fire_smoke.FireEngine(self._fire_alert, thread_name=f"fire:{self.camera_id}")
         except Exception as e:
             raise SessionError("ENGINE_FAILURE", f"Could not load the fire & smoke model: {e}", 500)
         log.info("camera %s: Fire & Smoke engine ready (%s)", self.camera_id, fire_smoke.WEIGHTS.name)
@@ -345,6 +346,9 @@ class CameraSession:
 
     # ------------------------------------------------------------------ main loop
     def _loop(self):
+        # OS thread name; the PyTorch / OpenMP threads this loop starts inherit it, so the perf monitor
+        # shows the CPU of this camera's AI as "ai:<camera id>"
+        runtime.name_thread(f"ai:{self.camera_id}")
         last_seq = -1
         win = self._new_window()
         win_read0 = self.reader.frames_read
@@ -402,14 +406,22 @@ class CameraSession:
                 if self.cfg_dirty:
                     self._rebuild_plan(active)
                 t_loop = time.perf_counter()
+                runtime.take_wait_ms()                       # reset this thread's slot-wait counter
                 inf_ms, new = 0.0, []
+                shared = pv_on and count_on and config.SHARED_PERSON_INFERENCE
                 if pv_on:
                     try:
-                        annotated, dets, new, inf_ms = self.pipeline.process(frame, self.plan)
+                        annotated, dets, new, inf_ms = self.pipeline.process(
+                            frame, self.plan, share_person_conf=self.counter.detect_conf if shared else None)
                     except Exception as e:     # engine failure: stop processing, keep the stream, tell the UI
                         log.exception("pipeline failure on %s", self.camera_id)
                         self._engine_failure(e)
                         continue
+                    st = self.pipeline.last_stages
+                    for k in ("preprocess", "inference", "postprocess", "tracking"):
+                        win["st_" + k] += st.get(k, 0.0)
+                    win["st_detect_n"] += 1 if st else 0
+                    win["st_draw"] += max(0.0, inf_ms - sum(st.get(k, 0.0) for k in ("preprocess", "inference", "postprocess", "tracking")))
                     counts = {"human": {}, "vehicle": {}}
                     for d in dets:
                         if d["inZone"] and d["module"] in active:
@@ -419,7 +431,14 @@ class CameraSession:
                     self.current = {"human": {}, "vehicle": {}}
                 if count_on:
                     try:   # inference on the clean frame, boxes drawn on the shared annotated frame
-                        annotated, c_ms, counted = self.counter.process(self.latest_raw, annotated, captured or now)
+                        pre_wait = runtime.take_wait_ms()
+                        persons = self.pipeline.shared_persons if shared else None
+                        annotated, c_ms, counted = self.counter.process(self.latest_raw, annotated, captured or now, dets=persons)
+                        c_wait = runtime.take_wait_ms()
+                        c_ms -= c_wait
+                        win["gate"] += pre_wait + c_wait
+                        win["st_count"] += c_ms
+                        win["shared"] += 1 if persons is not None else 0
                     except Exception as e:
                         log.exception("Human Count failure on %s", self.camera_id)
                         self._engine_failure(e)
@@ -430,20 +449,26 @@ class CameraSession:
                     try:   # Layer 1 on every frame (cheap), Layer 2 in its own thread
                         t_o = time.perf_counter()
                         annotated = obj_eng.process(self.latest_raw, annotated)
-                        inf_ms += (time.perf_counter() - t_o) * 1000.0
+                        o_ms = (time.perf_counter() - t_o) * 1000.0
+                        inf_ms += o_ms
+                        win["st_object"] += o_ms
                     except Exception as e:
                         log.exception("Object Monitoring failure on %s", self.camera_id)
                         self._engine_failure(e)
                         continue
                 if fire_on:      # hand the newest frame to the fire worker (skipped while it is busy), draw its boxes
+                    t_f = time.perf_counter()
                     fire_eng.submit(self.latest_raw, captured or now)
                     annotated = fire_eng.draw(annotated)
+                    win["st_fire"] += (time.perf_counter() - t_f) * 1000.0
+                win["gate"] += runtime.take_wait_ms()
                 win["proc"] += 1
                 win["inf"] += inf_ms
                 win["inf_last"] = inf_ms
                 win["age"] += (now - captured) * 1000.0 if captured else 0.0
                 self.metrics["framesProcessed"] += 1
                 self.state = "processing"
+                t_ev = time.perf_counter()
                 if new:
                     cam = self.mgr.registry.get(self.camera_id)
                     for item in new:
@@ -453,6 +478,7 @@ class CameraSession:
                             # encoding, disk writes and JSON persistence run on the event writer thread
                             self.mgr.events.on_confirmation(cam, item["module"], module_config(cam, item["module"]), item,
                                                             annotated, captured_at=captured, original=self.hd_original())
+                win["st_events"] += (time.perf_counter() - t_ev) * 1000.0
                 win["loop"] += (time.perf_counter() - t_loop) * 1000.0
                 win["n"] += 1
                 if captured:          # receive -> analysis finished (includes the time spent in the queue)
@@ -466,12 +492,16 @@ class CameraSession:
             self.latest_annotated = annotated
             if self.viewers > 0 and now - last_enc >= 1.0 / max(1.0, config.STREAM_MAX_FPS):
                 last_enc = now
+                t_e = time.perf_counter()
                 self._encode(annotated)
+                win["st_encode"] += (time.perf_counter() - t_e) * 1000.0
 
     @staticmethod
     def _new_window(t0=None):
         return {"t0": t0 or time.time(), "proc": 0, "inf": 0.0, "inf_last": None, "loop": 0.0, "age": 0.0, "n": 0,
-                "lat": 0.0, "lat_max": 0.0}
+                "lat": 0.0, "lat_max": 0.0, "gate": 0.0, "shared": 0, "st_detect_n": 0, "st_preprocess": 0.0,
+                "st_inference": 0.0, "st_postprocess": 0.0, "st_tracking": 0.0, "st_draw": 0.0, "st_count": 0.0,
+                "st_object": 0.0, "st_fire": 0.0, "st_events": 0.0, "st_encode": 0.0}
 
     def _update_rates(self, el, read0, w):
         m = self.metrics
@@ -492,6 +522,24 @@ class CameraSession:
             m["queuePeak"] = r.queue_peak
             m["framesDropped"] = m["framesDroppedOverload"] = r.queue_dropped
         m["cameraGaps"] = r.camera_gaps
+        # where the time of one analysed frame goes (ms per analysed frame, averaged over the last second)
+        dn = w["st_detect_n"]
+        stg = {"readerCpu": round(r.read_cpu_ms, 1) if r.read_cpu_ms is not None else None}
+        if n:
+            if dn:
+                for k in ("preprocess", "inference", "postprocess", "tracking"):
+                    stg[k] = round(w["st_" + k] / dn, 1)
+                stg["drawAndRules"] = round(w["st_draw"] / dn, 1)
+            for k, key in (("count", "humanCount"), ("object", "objectLayer1"), ("fire", "fireHandOver"),
+                           ("events", "events")):
+                if w["st_" + k]:
+                    stg[key] = round(w["st_" + k] / n, 1)
+            stg["slotWait"] = round(w["gate"] / n, 1)
+            stg["liveEncode"] = round(w["st_encode"] / max(1, n), 1) if w["st_encode"] else 0.0
+        m["stageMs"] = stg
+        both = self.counter is not None and self.pipeline is not None and "count" in self.modules and \
+            any(k in self.modules for k in ("human", "vehicle"))
+        m["sharedPersonPass"] = ((w["shared"] > 0) if n else m.get("sharedPersonPass")) if both else None
         if r.width:
             m["aiResolution"] = f"{r.width}x{r.height}"
         fe = self.fire

@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import statistics
 import threading
 import time
@@ -35,6 +34,7 @@ import cv2
 import numpy as np
 
 from backend import config
+from backend.runtime import gated, name_thread
 
 log = logging.getLogger("aivision.fire")
 
@@ -528,7 +528,7 @@ class FireEngine:
     while the model is still busy, as in the original); draw(annotated) paints the latest boxes and the
     alert banner on the shared annotated stream; confirmed alerts are reported through on_alert."""
 
-    def __init__(self, on_alert):
+    def __init__(self, on_alert, thread_name=None):
         if not WEIGHTS.is_file():
             raise FileNotFoundError(f"fire/smoke model missing: {WEIGHTS.relative_to(config.BACKEND_DIR)}")
         self.on_alert = on_alert
@@ -554,7 +554,8 @@ class FireEngine:
         self.last_error = None
         self.last_seen = {"fire": None, "smoke": None}
         self.current = {}
-        self._worker = threading.Thread(target=self._run, name="fire-worker", daemon=True)
+        self.thread_name = thread_name
+        self._worker = threading.Thread(target=self._run, name=thread_name or "fire-worker", daemon=True)
         self._worker.start()
 
     # ---- configuration (live, from the module config) ----
@@ -626,10 +627,10 @@ class FireEngine:
 
     # ---- worker ----
     def _run(self) -> None:
-        threads = int(os.environ.get("AIV_FIRE_THREADS", "0") or 0)
-        if threads > 0:
-            import torch
-            torch.set_num_threads(threads)
+        # Thread counts are no longer changed here while other cameras are running: AIV_FIRE_THREADS is
+        # applied once at start-up for the whole process (backend/runtime.py, same as AIV_TORCH_THREADS).
+        if self.thread_name:
+            name_thread(self.thread_name)
         while not self._stop.is_set():
             with self._lock:
                 while self._job is None and not self._stop.is_set():
@@ -639,8 +640,9 @@ class FireEngine:
                 (frame, captured_at, gen), self._job = self._job, None
                 self._busy = True
             try:
-                t0 = time.perf_counter()
-                dets = self.detector.detect(frame)
+                with gated():                  # waits for a free inference slot (AIV_INFER_CONCURRENCY)
+                    t0 = time.perf_counter()
+                    dets = self.detector.detect(frame)
                 if self.zones:
                     key = (frame.shape[:2], id(self.zones))
                     if self._polys_for != key:

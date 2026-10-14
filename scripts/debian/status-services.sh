@@ -98,6 +98,14 @@ if health:
         cores = met.get("cpuCores"); threads = met.get("cpuThreads")
         print(INFO, f"backend process: CPU {met['processCpu']}% of one core ({cores} cores / {threads} threads on this box), "
                     f"RAM {met.get('processRssMb')} MB; box RAM free {met.get('ramAvailableMb')} MB")
+    rt = met.get("runtime") or {}
+    if rt:
+        print(INFO, f"CPU settings in effect: PyTorch intra-op {rt.get('torchThreads') if rt.get('torchThreads') is not None else '(no model loaded yet)'}"
+                    f", inter-op {rt.get('torchInteropThreads') if rt.get('torchInteropThreads') is not None else '-'}"
+                    f", inference slots {rt.get('inferConcurrency') or 'unlimited'}, CPUs {rt.get('cpuAffinity')}"
+                    f" (tune: scripts/debian/perf-tune.sh)")
+        for e in rt.get("errors") or []:
+            print(WARN, f"CPU setting: {e}")
     print(INFO, f"{len(cams)} camera(s) configured, {len(sessions)} open")
     now = datetime.now(timezone.utc)
     for s in sessions:
@@ -125,6 +133,9 @@ if health:
         extra.append(f"dropped {s.get('framesDropped', 0)} (app), {s.get('cameraGaps', 0)} missing in stream")
         if s.get("fireAnalysedFps") is not None:
             extra.append(f"fire model {s['fireAnalysedFps']} fps")
+        stg = s.get("stageMs") or {}
+        if stg.get("inference") is not None:
+            extra.append(f"model {stg['inference']} ms + tracking {stg.get('tracking')} ms per frame")
         print("        " + " | ".join(extra))
     if not sessions:
         print(INFO, "no detection running (start one in the web UI; running detections resume after a restart)")

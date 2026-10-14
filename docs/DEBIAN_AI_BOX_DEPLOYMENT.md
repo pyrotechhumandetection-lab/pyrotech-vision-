@@ -186,6 +186,8 @@ Exit code 0 = both services active and the API answers.
 
 ---
 
+Performance: `scripts/debian/perf-tune.sh status | monitor | auto | rollback` - see §13.
+
 ## 6. Logs and diagnostics
 
 Logs go to the systemd journal (camera passwords are masked as `***:***@` in every message).
@@ -378,8 +380,8 @@ The AI box's sustainable rate is what `status-services.sh` / the Detection page 
 
 ### Remaining limits
 
-* **Human Detection + Human Count on the same camera** still run two person models per frame (different
-  tracking and thresholds); combining them would change the detection logic, so it was not done.
+* ~~Human Detection + Human Count on the same camera run two person models per frame~~ - since §13 they share one
+  model pass (identical detections, each module keeps its own thresholds and tracker).
 * The CPU is shared: adding cameras lowers each camera's processed fps once the cores are full.
 * Object Monitoring's own Layer 1 runs on the AI stream; on a low-resolution substream small objects are matched
   with fewer pixels.
@@ -427,3 +429,156 @@ access from a real second PC on your LAN, your real cameras, and the Debian 12 p
 Python 3.13. On the box, run `scripts/debian/check-environment.sh` and `status-services.sh` after
 installing, then reboot once (`sudo reboot`) and run `status-services.sh` again - the box is never
 rebooted automatically by these scripts.
+
+Performance tool and CPU settings (§13), same test box and test machine: 65 backend unit tests (incl. CPU settings
+surviving Ultralytics' model load, FIFO inference slots, identical shared person pass, `.env` backup / in-place
+update / rollback, candidate limits, accuracy comparison, keep / roll-back decisions), self-check, API test (21 checks)
+and UI test (15 checks) passed; on the systemd test box `status`, `monitor` (with log), `frames`, `bench` (idle
+priority and `--maintenance`), `auto` (kept a measured gain), `apply` (automatic rollback of a measured loss),
+`apply --keep`, `rollback`, `history`; without the services: `start`, `apply` with restart through `./start.sh`,
+`rollback`, `stop` (ports free afterwards); all modules (Human, Human Count, Object, Fire) running with every CPU
+setting set at once. **Not run on ARM64 hardware.**
+
+## 13. Performance monitor and CPU optimizer (ARM64 / CPU-only boxes)
+
+`scripts/debian/perf-tune.sh` (code: `scripts/perf/pyrotech_perf.py` + `bench_worker.py`) runs next to the
+application - it is not a second backend. It reads the backend's own metrics API and `/proc`, benchmarks CPU
+thread configurations in separate low-priority processes, and changes **only** the CPU keys in `.env`
+(always after a timestamped backup), followed by a controlled restart of the backend, a before/after measurement
+and an automatic rollback when the measurement does not confirm a gain.
+
+### What was found in the code (why the box shows ~500 ms per frame at 50-60 % CPU)
+
+| Finding | Effect | Change |
+|---|---|---|
+| **Ultralytics sets PyTorch's thread count itself.** Every model load calls `torch.set_num_threads(min(8, CPUs-1))` - 7 threads on an 8-CPU box - process-wide, also while other cameras are running inference. Each camera loop (and the fire / object workers) runs its model calls with that many threads **at the same time**: 3 cameras = 21 busy threads on 8 CPUs. Threads then wait for each other, OpenMP threads spin, and on ARM chips with fast and slow cores every call waits for its slowest core. That is the typical "long inference, CPU not full" picture. | longer inference per frame, CPU not used | `AIV_TORCH_THREADS` etc. (`backend/runtime.py`): read once at start-up, applied before the first model loads, and Ultralytics' loader is made to use the same value - nothing changes thread counts while inference runs. Defaults unchanged. |
+| No limit on how many model calls run at once | oversubscription grows with every camera | `AIV_INFER_CONCURRENCY`: at most N model calls at a time (all cameras + fire + object), FIFO so no camera starves. Default unlimited (as before). |
+| `AIV_FIRE_THREADS` called `torch.set_num_threads()` inside the fire worker while other cameras ran | process-wide change at run time | applied once at start-up instead (same meaning as `AIV_TORCH_THREADS`) |
+| **Human Detection + Human Count on one camera ran the same yolov8n twice per frame** | double model time on those cameras | one shared pass (`AIV_SHARED_PERSON_INFERENCE=1`, default): the pass runs at the lower confidence with both class sets, Human Count gets the person boxes, ByteTrack gets exactly the boxes of the original call. Proven identical on 520 test frames (3 videos, Human / Human+Vehicle / Vehicle-only plans, 2x2 mosaics with 4x more people) and in a unit test (same boxes, ids, confirmations, counts). |
+| No per-stage timing | bottleneck invisible | per camera `stageMs`: preprocess, model, postprocess, tracking, drawing/rules, Human Count, Object Layer 1, fire hand-over, events, inference-slot wait, live encode, reader CPU; event writer time; named OS threads (`ai:<camera>`, `rd:<camera>`, `hd:<camera>`, `fire:<camera>`, `obj-detector`, `evt-writer`, FFmpeg `av:*`) so CPU per camera / per stage is visible in `top -H` and the monitor |
+
+Not changed (would change detection results): input size (`AIV_IMG_SIZE=640`), models, thresholds, tracking.
+
+### Commands
+
+```
+cd ~/ui-system/pyrotech-vision
+git pull                                          # get the tool (or copy the files)
+sudo systemctl restart pyrotech-vision-backend    # the backend part of this update (or restart start.sh)
+
+scripts/debian/perf-tune.sh status                # hardware, CPU settings in effect, per camera fps / stages, findings
+scripts/debian/perf-tune.sh monitor               # live view every 2 s with timestamps (Ctrl+C ends it)
+scripts/debian/perf-tune.sh monitor --log backend/data/perf/monitor.jsonl     # ... and record it
+scripts/debian/perf-tune.sh auto --dry-run        # measure + benchmark + recommend, change nothing
+scripts/debian/perf-tune.sh auto                  # ... and apply the best configuration, validated live
+scripts/debian/perf-tune.sh auto --maintenance    # same, but pauses detection during the benchmark (exact numbers)
+scripts/debian/perf-tune.sh apply --threads 4 --concurrency 2     # set values yourself (same backup/validation)
+scripts/debian/perf-tune.sh rollback              # undo the last applied change (restores the .env backup, restarts)
+scripts/debian/perf-tune.sh rollback --list       # all applied changes; rollback --to <id>
+scripts/debian/perf-tune.sh history               # every change with its before/after measurement
+scripts/debian/perf-tune.sh start | stop | restart
+```
+
+Start, stop and restart use the existing start-up procedure: the systemd services when they are installed
+(asks for sudo), otherwise `./start.sh --no-browser`, which the tool then also stops cleanly (Ctrl+C semantics:
+the backend closes its sessions). A backend started by hand in another terminal is never killed - the tool tells you
+to restart it and then run `perf-tune.sh validate`.
+
+### What `auto` does
+
+1. starts the application if it is not running and waits for the detections to resume;
+2. **measures** the live application for `--measure` s (default 60): per camera received / analysed fps, model ms,
+   stages, queue, drops, system and per-core CPU, backend CPU / RAM / threads, load - and prints findings
+   (oversubscription, decoding share, HD-original decoding, Human+Count without shared pass, engine, fast/slow cores);
+3. saves **representative frames** from each running camera (`GET /api/cameras/<id>/frame.jpg`, the AI stream without
+   boxes, at its real resolution) to `backend/data/perf/frames/`;
+4. **benchmarks** configurations, each in a fresh process (PyTorch reads its pool sizes once), using the
+   application's own code: the same model and engine as the running backend, the Person/Vehicle pipeline with
+   ByteTrack, Human Count and the fire model when they run, one simulated stream per camera, all at the same time.
+   Candidates never put more busy threads than CPUs (threads per call x calls at once), e.g. on 8 CPUs with 3
+   cameras: 2 threads x all, 4 x 1, 6 x 1, 8 x 1, 2 x 2, 3 x 2, 4 x 2, plus the current setting as reference; then
+   OpenMP passive waiting and, on big.LITTLE chips, the fast cores only. Rounds are interleaved;
+5. checks **accuracy**: every configuration's raw detections on all saved frames must equal the reference (same
+   class, IoU >= 0.95, confidence within 0.02; only boxes within 0.02 of the threshold may flip). Configurations that
+   fail, use > 25 % more RAM, or have a 1.5x worse p95 latency are never chosen;
+6. recommends the best one only if it beats the current setting by at least `--min-gain` (5 %) **and** by more than
+   the measured round-to-round spread; otherwise it keeps the current setting and says why;
+7. **applies**: backup of `.env` (`backend/data/perf/backups/`), writes the keys (in place, or in a marked block),
+   refuses if `backend/.env` or the systemd unit would override them, restarts the backend, checks that the backend
+   reports the new values (`/api/system/runtime`), waits for all detections to run again;
+8. **validates live**: same measurement again; keeps the change only if analysed fps rose by >= 5 % with the cameras
+   delivering the same frame rate, no camera lost and RAM within limits - **otherwise restores the backup and
+   restarts automatically**; logs everything (`backend/data/perf/changes.jsonl`) and writes a report
+   (`backend/data/perf/reports/report-<id>.md`).
+
+**Production safety.** Benchmark processes run at `nice 19` + `SCHED_IDLE`: they only get CPU time the
+application leaves unused, so they cannot slow detection down (their numbers are then relative - fine for comparing
+configurations, and the live validation is what decides). With `--maintenance` the detections are paused through
+the API for the benchmark and resumed afterwards (also on Ctrl+C) - exact numbers, but no detection for some
+minutes. The monitor itself used **0.18 % of one core** at a 2 s interval (measured), runs at `nice 10` and only reads
+`/proc` and one API call per interval.
+
+### Measured results - test machine (NOT the AI box)
+
+2-core x86 test machine, PyTorch forced (`AIV_ENGINE=pytorch`, as on an ARM box without OpenVINO), test RTSP
+cameras 1080p / 640x360 at 20 fps, 30 s windows, quiet machine.
+
+Code changes, default settings (before = commit `2aa3a24`, after = this version):
+
+| Scenario | Before | After |
+|---|---|---|
+| 1 camera Human + Vehicle 1080p | 12.4 fps (80 ms) | 12.7 fps (78 ms) - unchanged, as expected |
+| **1 camera Human + Human Count 1080p** | **6.4 fps (155 ms)** | **12.5 fps (79 ms)** - shared person pass |
+| 3 cameras Human 1080p | 5.5 / 5.5 / 5.4 fps | 5.5 / 5.6 / 5.8 fps - unchanged |
+| 3 cameras Human, AI on 640x360 substream (2 runs each) | 21.1 / 20.6 fps total | 19.9 / 21.7 fps total - unchanged (run-to-run noise ~5 %) |
+
+Sub-stream with PyTorch: 3 cameras 16.4-16.9 fps total on the 1080p main streams vs 20-22 fps on the substreams
+(+18-32 %), mainly less decoding (FFmpeg threads 27 % -> 4 % CPU). So the AI substream is worth it on the box as
+well; with HD snapshot originals the main stream is decoded too (see §11 for that cost).
+
+Thread settings (the mechanism the tool tunes), benchmark worker, 3 simultaneous 1080p streams, 2 rounds:
+
+| Setting | fps total | Comment |
+|---|---|---|
+| 2 threads per call, all 3 at once (6 threads on 2 CPUs) | 20.7 / 18.5 | oversubscribed - like 7 threads x 3 cameras on 8 CPUs |
+| **1 thread per call, all 3 at once** | **22.3 / 23.0** | **+16 %** |
+| 2 threads per call, 1 call at a time | 13.5 / 14.1 | serialised: worse |
+
+Full workflow on the systemd test box (3 cameras: Human+Count, Human, Human+Vehicle), starting from an
+oversubscribed `.env` (`AIV_TORCH_THREADS=2`): `perf-tune.sh auto --maintenance` benchmarked 5 configurations
+(detections identical: 84 boxes, max confidence difference 0.0), chose 1 thread per call (+11.9 % in the benchmark),
+applied it, restarted, and **measured live 14.13 -> 15.44 fps analysed (+9.3 %) -> kept**. A deliberately bad
+setting (2 threads, 1 call at a time) measured 16.93 -> 9.46 fps and was **rolled back automatically**; a change
+kept with `--keep` was undone with `rollback`, and the backend reported the restored values.
+
+With 2 CPUs there is little room; on 2 CPUs Ultralytics' default (CPUs-1 = 1 thread) is already the best value,
+which is why `auto` keeps the defaults there.
+
+### Expected on the AI box (not measured - run the tool there)
+
+* Your box loads every model with 7 PyTorch threads. With several cameras plus fire / count, 14-28 threads compete
+  for 8 CPUs; the benchmark will show whether 2-4 threads per call (and possibly 2 calls at a time, or the fast cores
+  only) analyse more frames. Expect the gain to depend on the number of cameras; the tool only keeps what it measures.
+* Cameras with Human + Human Count: about half the model time per frame (measured above on x86).
+* OpenVINO: models run on PyTorch on your box. If `perf-tune.sh status` shows glibc 2.35 or newer (Debian 12 has
+  2.36), the OpenVINO aarch64 wheel can be installed into `backend/.venv` and the backend uses it automatically
+  (`AIV_ENGINE=auto`); on x86 it was about 3.5x faster than PyTorch for the same weights (yolov8n 23 vs 80 ms, fire 30 vs 102 ms). Measure with `status` before / after.
+
+### Why not every incoming frame can be analysed
+
+Analysing every frame of a 25 fps camera needs <= 40 ms for everything that camera runs per frame, and with N
+cameras the CPU must do N x 25 model passes per second. At the ~500 ms per frame reported for the box, that is out of reach by more than a factor of 10 -
+even a tuning gain of 2x would not close it; the frame queue then keeps the newest 0.5 s and drops
+(and counts) the rest. Options that change this - each has a cost and none is applied automatically: an AI substream
+with a **lower frame rate on the camera** (e.g. 10 fps: fewer frames decoded for nothing), OpenVINO (if the box's
+glibc allows it), fewer modules per camera, or a smaller model input (`AIV_IMG_SIZE=480`: model pass 45 instead of 73 ms on the x86 test machine, but
+small / distant people are detected less reliably - test it on your scenes before using it).
+
+### Rollback / removal
+
+* undo the last tuning: `scripts/debian/perf-tune.sh rollback` (or `--to <id>`); every backup stays in
+  `backend/data/perf/backups/` (the replaced `.env` is also kept before a rollback);
+* by hand: remove the `AIV_TORCH_*`, `AIV_INFER_CONCURRENCY`, `AIV_CV_THREADS`, `AIV_CPU_AFFINITY`,
+  `AIV_OMP_WAIT_POLICY` values from `.env` and restart the backend - the defaults are the previous behaviour;
+* shared person pass off: `AIV_SHARED_PERSON_INFERENCE=0`;
+* the tool's files: `backend/data/perf/` (frames, logs, reports - never needed by the application).

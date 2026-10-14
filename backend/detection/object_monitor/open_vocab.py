@@ -26,6 +26,8 @@ from pathlib import Path
 
 import numpy as np
 
+from backend.runtime import gated, name_thread
+
 from .common import Box, box_center, log
 
 # COCO names -> office vocabulary names (only used for the COCO baseline).
@@ -155,7 +157,8 @@ class OpenVocabDetector:
         return (self.prompt_names[cls] if cls < len(self.prompt_names) else raw), raw
 
     def _predict(self, image: np.ndarray, imgsz: int, conf: float, offset=(0, 0)) -> list[Det]:
-        res = self.model.predict(image, imgsz=imgsz, conf=conf, iou=self.iou, device="cpu", verbose=False)[0]
+        with gated():      # waits for a free inference slot (AIV_INFER_CONCURRENCY)
+            res = self.model.predict(image, imgsz=imgsz, conf=conf, iou=self.iou, device="cpu", verbose=False)[0]
         if res.boxes is None or len(res.boxes) == 0:
             return []
         ox, oy = offset
@@ -260,6 +263,7 @@ class DetectorWorker(threading.Thread):
         return [d.box for d in self.latest if d.name == "person"]
 
     def run(self) -> None:
+        name_thread("obj-detector")      # OS thread name: CPU of this worker shows up in the perf monitor
         next_run = 0.0
         while not self._stop_evt.is_set():
             with self._cond:

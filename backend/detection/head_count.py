@@ -28,6 +28,7 @@ import cv2
 import numpy as np
 
 from backend import config
+from backend.runtime import gated
 
 log = logging.getLogger("aivision.headcount")
 
@@ -151,7 +152,8 @@ class HeadDetector:
         if self.engine == "pytorch" and config.DEVICE is not None:
             kw["device"] = config.DEVICE
         with self.lock:
-            r = self.model.predict(img, **kw)[0]
+            with gated():  # waits for a free inference slot (AIV_INFER_CONCURRENCY)
+                r = self.model.predict(img, **kw)[0]
         if r.boxes is None or not len(r.boxes):
             return np.zeros((0, 5), np.float32)
         return np.concatenate([r.boxes.xyxy.cpu().numpy(), r.boxes.conf.cpu().numpy()[:, None]], 1).astype(np.float32)

@@ -37,6 +37,8 @@ from datetime import datetime, timezone
 import cv2
 import numpy as np
 
+from backend.runtime import gated
+
 log = logging.getLogger("aivision.humancount")
 
 PERSON_COCO_ID = 0
@@ -206,7 +208,8 @@ class PersonDetector:
         kwargs = dict(imgsz=self.img_size, conf=conf, classes=[PERSON_COCO_ID], verbose=False)
         if self.device is not None:
             kwargs["device"] = self.device
-        r = self.model.predict(frame, **kwargs)[0]
+        with gated():
+            r = self.model.predict(frame, **kwargs)[0]
         if r.boxes is None or not len(r.boxes):
             return np.zeros((0, 5), np.float32)
         return np.concatenate([r.boxes.xyxy.cpu().numpy(), r.boxes.conf.cpu().numpy()[:, None]], 1).astype(np.float32)
@@ -272,12 +275,20 @@ class HumanCounter:
         foot = (float((box[0] + box[2]) / 2), float(box[3]))       # people are counted where they stand
         return any(cv2.pointPolygonTest(p, foot, False) >= 0 for _, p in polys)
 
-    def process(self, raw, annotated, t):
+    @property
+    def detect_conf(self):
+        """Lowest person confidence the tracker uses (weaker boxes may continue an existing track)."""
+        return round(self.conf * LOW_CONF_FACTOR, 3)
+
+    def process(self, raw, annotated, t, dets=None):
         """raw: clean frame for inference; annotated: frame to draw on (may be the same array);
-        t: capture time of the frame. Returns (annotated, inference_ms, newly_counted)."""
+        t: capture time of the frame; dets: person boxes (Nx5 xyxy+conf, > detect_conf) already detected
+        on this frame by the Person/Vehicle pipeline (shared pass) - None = run the own detector.
+        Returns (annotated, inference_ms, newly_counted)."""
         h, w = raw.shape[:2]
         t0 = time.perf_counter()
-        dets = self.detector.detect(raw, round(self.conf * LOW_CONF_FACTOR, 3))
+        if dets is None:
+            dets = self.detector.detect(raw, self.detect_conf)
         inf_ms = (time.perf_counter() - t0) * 1000.0
         seen = self.tracker.update(dets, t, self.conf)
         polys = _zone_polys(self.zones, w, h)

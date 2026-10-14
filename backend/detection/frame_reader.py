@@ -22,12 +22,16 @@ from collections import deque
 
 import cv2
 
+from backend.runtime import name_thread
+
 log = logging.getLogger("aivision.reader")
 
 
 class LatestFrameReader:
-    def __init__(self, source, open_timeout_sec=10.0):
+    def __init__(self, source, open_timeout_sec=10.0, tag=None):
         self.source = source
+        self.tag = tag               # OS thread name of the reader (perf monitor), e.g. "rd:CAM-01"
+        self.read_cpu_ms = None      # CPU time of this reader thread per frame (demux + conversion; EMA)
         self.open_timeout_ms = int(open_timeout_sec * 1000)
         self.lock = threading.Lock()
         self.latest_frame = None
@@ -49,7 +53,7 @@ class LatestFrameReader:
         self.camera_gaps = 0         # frames missing in the stream's timestamps (camera / network side)
         self._last_pts = None
         self.cap = self._open()
-        self.thread = threading.Thread(target=self._update, name="frame-reader", daemon=True)
+        self.thread = threading.Thread(target=self._update, name=tag or "frame-reader", daemon=True)
         self.thread.start()
 
     def _open(self):
@@ -74,6 +78,8 @@ class LatestFrameReader:
         return cap
 
     def _update(self):
+        if self.tag:
+            name_thread(self.tag)
         while not self.stopped:
             if not self.cap.isOpened():
                 time.sleep(0.5)
@@ -81,7 +87,11 @@ class LatestFrameReader:
                     break
                 self.cap = self._open()
                 continue
+            c0 = time.thread_time()
             ok, frame = self.cap.read()
+            if ok:
+                c = (time.thread_time() - c0) * 1000.0
+                self.read_cpu_ms = c if self.read_cpu_ms is None else 0.9 * self.read_cpu_ms + 0.1 * c
             pts = None
             if ok:
                 try:

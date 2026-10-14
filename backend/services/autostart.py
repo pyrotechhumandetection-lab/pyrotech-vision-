@@ -83,6 +83,8 @@ class AutoStart:
         self.stop_event.set()
 
     def _run(self):
+        from backend.runtime import name_thread
+        name_thread("autostart")
         if self.stop_event.wait(FIRST_DELAY_S):
             return
         pending = {f"{c}|{m}": (c, m, 0.0, RETRY_MIN_S) for c, m in self.remembered()}

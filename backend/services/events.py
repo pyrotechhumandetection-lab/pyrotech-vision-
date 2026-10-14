@@ -28,7 +28,7 @@ from pathlib import Path
 
 import cv2
 
-from backend import config
+from backend import config, runtime
 from backend.services.util import JsonFile, camera_host, iso_from_ts, now_iso
 
 log = logging.getLogger("aivision.events")
@@ -62,6 +62,7 @@ class EventStore:
         self.version = 0          # bumps on every change (cheap change detection for pollers)
         self._reported = OrderedDict()   # (camera, module, trackId) already reported -> True (bounded)
         self._jobs = queue.Queue(maxsize=64)
+        self.writer_stats = {"jobs": 0, "msTotal": 0.0, "msMax": 0.0}   # snapshot / alert writing (perf monitor)
         self._writer = threading.Thread(target=self._write_loop, name="event-writer", daemon=True)
         self._writer.start()
 
@@ -257,8 +258,10 @@ class EventStore:
         return event
 
     def _write_loop(self):
+        runtime.name_thread("evt-writer")
         while True:
             job = self._jobs.get()
+            t0 = time.perf_counter()
             try:
                 if callable(job):
                     job()
@@ -267,6 +270,11 @@ class EventStore:
             except Exception:
                 log.exception("event writer failed")
             finally:
+                ms = (time.perf_counter() - t0) * 1000.0
+                ws = self.writer_stats
+                ws["jobs"] += 1
+                ws["msTotal"] += ms
+                ws["msMax"] = max(ws["msMax"], ms)
                 self._jobs.task_done()
 
     def _complete(self, camera, module, label, etype, item, frame, captured_at, event, want_snap, want_alert, acfg, original=None):
