@@ -127,11 +127,12 @@ def run():
     try:
         from backend.detection import fire_smoke as fs
         t0 = time.time()
-        det = fs.Detector(fs.WEIGHTS, 480, 0.45)
+        engine, mpath = fs.resolve_engine()
+        det = fs.Detector(fs.WEIGHTS, 480, 0.45, engine=engine, model_path=mpath)
         det.configure({"fire": 0.30, "smoke": 0.65}, {"smoke": 0.40}, 0.45, 480, True)
         det.enable_verifier(fs.VERIFIER_FILE, 0.40, 4)
         det.detect(img)
-        line("OK" if det.verifier else "WARN", f"Fire & Smoke model {fs.WEIGHTS.name} loaded, classes {sorted(det.names.values())}, "
+        line("OK" if det.verifier else "WARN", f"Fire & Smoke model {fs.WEIGHTS.name} ({'OpenVINO' if det.engine == 'openvino' else 'PyTorch'}) loaded, classes {sorted(det.names.values())}, "
              f"smoke verifier {'on' if det.verifier else 'NOT available: ' + str(det.verifier_error)} ({time.time() - t0:.1f}s)")
     except Exception as e:
         line("FAIL", f"Fire & Smoke model could not run: {e}")

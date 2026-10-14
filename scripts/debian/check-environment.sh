@@ -18,7 +18,14 @@ if [[ -r /etc/os-release ]]; then
 fi
 ARCH="$(uname -m)"
 GLIBC="$(ldd --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+$' || echo '?')"
-info "kernel $(uname -r), CPU architecture $ARCH, glibc $GLIBC, $(nproc) CPU cores"
+info "kernel $(uname -r), CPU architecture $ARCH, glibc $GLIBC"
+CPU_MODEL="$(lscpu 2>/dev/null | sed -n 's/^Model name:[[:space:]]*//p' | head -n1)"
+TPC="$(lscpu 2>/dev/null | sed -n 's/^Thread(s) per core:[[:space:]]*//p' | head -n1)"
+info "CPU: ${CPU_MODEL:-unknown}, $(nproc) logical CPUs, ${TPC:-?} thread(s) per core"
+if [[ "${TPC:-1}" -ge 2 ]]; then
+  note "2 threads per core: OpenVINO and PyTorch use the physical cores only, so 'top' shows about 50% CPU even when
+         the AI is fully busy. Judge the load by the per-camera 'processed fps' / queue in status-services.sh."
+fi
 case "$ARCH" in
   x86_64|aarch64) ok "64-bit architecture ($ARCH) - PyTorch wheels exist" ;;
   *) problem "architecture $ARCH: no PyTorch wheels (needs x86_64 or aarch64)" ;;

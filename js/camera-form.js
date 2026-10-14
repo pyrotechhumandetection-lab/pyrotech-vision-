@@ -68,6 +68,8 @@
     if (!(m.timeoutSec >= 1 && m.timeoutSec <= 120)) errs.timeoutSec = 'Timeout must be 1 – 120 seconds.';
     if (m.reconnect === 'auto' && !(m.reconnectIntervalSec >= 5 && m.reconnectIntervalSec <= 3600)) errs.reconnectIntervalSec = 'Interval must be 5 – 3600 seconds.';
     if (m.streamProfile === 'custom' && !m.customStream.trim()) errs.customStream = 'Enter the custom stream path or profile token.';
+    if (m.aiStream !== 'same' && m.type !== 'rtsp') errs.aiStream = 'A separate AI stream is only possible for RTSP cameras.';
+    if (m.aiStream === 'custom' && !String(m.aiCustomStream || '').trim()) errs.aiCustomStream = 'Enter the AI stream path, e.g. /Streaming/Channels/102.';
     return errs;
   }
 
@@ -108,7 +110,7 @@
     root.querySelector('#det-errors').innerHTML = modErr.map(function (t) { return '<div class="field-error">' + icon('alertCircle', 13) + '<span>' + esc(t) + '</span></div>'; }).join('');
   }
   function focusFirstError(errs) {
-    const order = ['id', 'name', 'type', 'sourceUrl', 'username', 'password', 'timeoutSec', 'reconnectIntervalSec', 'customStream', 'zones', 'confidence', 'preEventSec', 'postEventSec', 'retentionDays', 'maxStorageGb', 'snapshotClasses'];
+    const order = ['id', 'name', 'type', 'sourceUrl', 'username', 'password', 'timeoutSec', 'reconnectIntervalSec', 'customStream', 'aiStream', 'aiCustomStream', 'zones', 'confidence', 'preEventSec', 'postEventSec', 'retentionDays', 'maxStorageGb', 'snapshotClasses'];
     const k = order.find(function (x) { return errs[x]; });
     const el = k && (root.querySelector('[data-f="' + k + '"]') || root.querySelector('[data-err="' + k + '"]'));
     if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); if (el.focus) el.focus({ preventScroll: true }); }
@@ -202,6 +204,10 @@
       f('Location / Area', 'location', '<input class="input" id="cf-location" list="cf-locations" value="' + esc(m.location) + '" placeholder="e.g. Main Gate"><datalist id="cf-locations">' + cat.LOCATIONS.map(function (l) { return '<option value="' + esc(l) + '">'; }).join('') + '</datalist>') +
       f('Stream Profile', 'streamProfile', '<select class="select" id="cf-streamProfile"><option value="main"' + (m.streamProfile === 'main' ? ' selected' : '') + '>Main stream (full resolution)</option><option value="sub"' + (m.streamProfile === 'sub' ? ' selected' : '') + '>Substream (lower bandwidth)</option><option value="custom"' + (m.streamProfile === 'custom' ? ' selected' : '') + '>Custom stream</option></select>') +
       f('Custom stream path / token', 'customStream', '<input class="input" id="cf-customStream" data-f="customStream" value="' + esc(m.customStream) + '" placeholder="/Streaming/Channels/103">', { cls: 'cf-custom' + (m.streamProfile === 'custom' ? '' : ' hidden') }) +
+      f('AI detection stream', 'aiStream', '<select class="select" id="cf-aiStream"><option value="same"' + (m.aiStream === 'same' ? ' selected' : '') + '>Same as the viewing stream</option><option value="sub"' + (m.aiStream === 'sub' ? ' selected' : '') + '>Camera substream (Hikvision / Dahua URL)</option><option value="custom"' + (m.aiStream === 'custom' ? ' selected' : '') + '>Custom AI stream path</option></select>',
+        { hint: 'A low-resolution substream for detection saves CPU on the AI box (the model works at 640 px anyway). Falls back to the viewing stream if it cannot be opened.' }) +
+      f('AI stream path', 'aiCustomStream', '<input class="input" id="cf-aiCustomStream" data-f="aiCustomStream" value="' + esc(m.aiCustomStream) + '" placeholder="/Streaming/Channels/102">', { cls: 'cf-aicustom' + (m.aiStream === 'custom' ? '' : ' hidden') }) +
+      f('Snapshot image', 'snapshotSource', '<select class="select" id="cf-snapshotSource"><option value="main"' + (m.snapshotSource !== 'ai' ? ' selected' : '') + '>Boxes + full-resolution original</option><option value="ai"' + (m.snapshotSource === 'ai' ? ' selected' : '') + '>Boxes only (less CPU)</option></select>', { cls: 'cf-aisnap' + (m.aiStream === 'same' ? ' hidden' : ''), hint: 'The original needs the main stream decoded as well, which costs CPU (measured: 14% of the AI throughput at 1080p, 37% at 4 MP).' }) +
       f('Connection Timeout (s)', 'timeoutSec', '<input class="input" type="number" min="1" max="120" id="cf-timeoutSec" data-f="timeoutSec" value="' + esc(m.timeoutSec) + '">') +
       f('Reconnection', 'reconnect', '<select class="select" id="cf-reconnect"><option value="auto"' + (m.reconnect === 'auto' ? ' selected' : '') + '>Reconnect automatically</option><option value="manual"' + (m.reconnect === 'manual' ? ' selected' : '') + '>Manual reconnect only</option><option value="never"' + (m.reconnect === 'never' ? ' selected' : '') + '>Never reconnect</option></select>') +
       f('Retry interval (s)', 'reconnectIntervalSec', '<input class="input" type="number" min="5" max="3600" id="cf-reconnectIntervalSec" data-f="reconnectIntervalSec" value="' + esc(m.reconnectIntervalSec) + '">', { cls: 'cf-retry' + (m.reconnect === 'auto' ? '' : ' hidden') }) +
@@ -216,7 +222,7 @@
       q(id).addEventListener('input', function () { m[key] = num ? (q(id).value === '' ? NaN : +q(id).value) : q(id).value; clearErr(key); });
     };
     bindText('name', 'name'); bindText('username', 'username'); bindText('model', 'model'); bindText('location', 'location');
-    bindText('description', 'description'); bindText('customStream', 'customStream'); bindText('timeoutSec', 'timeoutSec', true);
+    bindText('description', 'description'); bindText('customStream', 'customStream'); bindText('aiCustomStream', 'aiCustomStream'); bindText('timeoutSec', 'timeoutSec', true);
     bindText('reconnectIntervalSec', 'reconnectIntervalSec', true); bindText('id', 'id');
     q('sourceUrl').addEventListener('input', function () { m.sourceUrl = q('sourceUrl').value; clearErr('sourceUrl'); q('sourceUrl-warn').textContent = ''; renderDaCam(); });
     q('sourceUrl').addEventListener('blur', function () {
@@ -247,6 +253,12 @@
     });
     q('brand').addEventListener('change', function () { m.brand = q('brand').value; });
     q('streamProfile').addEventListener('change', function () { m.streamProfile = q('streamProfile').value; root.querySelector('.cf-custom').classList.toggle('hidden', m.streamProfile !== 'custom'); });
+    q('aiStream').addEventListener('change', function () {
+      m.aiStream = q('aiStream').value;
+      root.querySelector('.cf-aicustom').classList.toggle('hidden', m.aiStream !== 'custom');
+      root.querySelector('.cf-aisnap').classList.toggle('hidden', m.aiStream === 'same');
+    });
+    q('snapshotSource').addEventListener('change', function () { m.snapshotSource = q('snapshotSource').value; });
     q('reconnect').addEventListener('change', function () { m.reconnect = q('reconnect').value; root.querySelector('.cf-retry').classList.toggle('hidden', m.reconnect !== 'auto'); });
     syncAuth();
   }

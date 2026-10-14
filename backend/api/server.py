@@ -16,6 +16,8 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+import cv2
+
 from backend import __version__, config
 
 BOOT_ID = str(int(time.time()))
@@ -60,6 +62,13 @@ class App:
             self._psutil = psutil
         except Exception:
             self._psutil = None
+        self._proc = None
+        if self._psutil:
+            try:    # prime the per-process CPU counter so the first reading is a real measurement
+                self._proc = self._psutil.Process()
+                self._proc.cpu_percent(interval=None)
+            except Exception:
+                self._proc = None
 
     # ------------------------------------------------------------------ helpers
     def camera_or_404(self, cam_id):
@@ -119,7 +128,19 @@ class App:
                "disconnections": 0, "sessions": []}
         if self._psutil:
             out["cpu"] = self._psutil.cpu_percent(interval=None)
-            out["ram"] = self._psutil.virtual_memory().percent
+            vm = self._psutil.virtual_memory()
+            out["ram"] = vm.percent
+            out["ramAvailableMb"] = round(vm.available / 1048576)
+            out["cpuCores"] = self._psutil.cpu_count(logical=False)
+            out["cpuThreads"] = self._psutil.cpu_count(logical=True)
+            try:      # this backend process: CPU in % of ONE core (200 = two cores busy), resident memory
+                if self._proc is None:
+                    self._proc = self._psutil.Process()
+                    self._proc.cpu_percent(interval=None)
+                out["processCpu"] = round(self._proc.cpu_percent(interval=None), 1)
+                out["processRssMb"] = round(self._proc.memory_info().rss / 1048576)
+            except Exception:
+                pass
         if self._gpu:
             try:
                 h = self._gpu.nvmlDeviceGetHandleByIndex(0)
@@ -269,7 +290,8 @@ def camera_put(app, q, body, cid):
         raise ApiError(422, "INVALID_CONFIG", "; ".join(errs))
     pub = app.registry.save(body, existing_id=cid)
     new = app.registry.get(cid)
-    changed = any(old.get(k) != new.get(k) for k in ("type", "sourceUrl", "username", "streamProfile", "customStream")) or bool((body or {}).get("password"))
+    changed = any(old.get(k) != new.get(k) for k in ("type", "sourceUrl", "username", "streamProfile", "customStream",
+                                                           "aiStream", "aiCustomStream", "snapshotSource")) or bool((body or {}).get("password"))
     app.sessions.camera_changed(cid, changed)
     return app.public_camera(new) if new else pub
 
@@ -716,6 +738,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             m = re.match(r"^/api/cameras/([^/]+)/stream\.mjpeg$", path)
             if method == "GET" and m:
+                if (q.get("source") or [""])[0] == "main":
+                    return self._mjpeg_main(m.group(1))
                 return self._mjpeg(m.group(1))
             m = re.match(r"^/api/snapshots/([^/]+)/(image|original)$", path)
             if method == "GET" and m:
@@ -788,6 +812,51 @@ class Handler(BaseHTTPRequestHandler):
             pass
         finally:
             self.app.sessions.remove_viewer(cid)
+
+
+    def _mjpeg_main(self, cid):
+        """Full-resolution MAIN stream without detection boxes (?source=main). Only differs from the normal
+        stream when the camera's AI uses a separate (sub)stream; otherwise the normal stream is sent."""
+        try:
+            s = self.app.sessions.add_viewer(cid, main=True)
+        except SessionError as e:
+            raise ApiError(e.status, e.code, e.message)
+        if not s._separate_ai_stream():
+            self.app.sessions.remove_viewer(cid, main=True)
+            return self._mjpeg(cid)
+        self.close_connection = True
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self._cors()
+            self.end_headers()
+            last, last_t = -1, 0.0
+            while s.state != "stopped":
+                vr = s.view_reader
+                if vr is None:                 # opening (or retrying) the main stream
+                    time.sleep(0.2)
+                    continue
+                ok, seq, frame, _t = vr.read_latest()
+                now = time.time()
+                if frame is None or seq == last or now - last_t < 1.0 / max(1.0, config.STREAM_MAX_FPS):
+                    time.sleep(0.01)
+                    continue
+                last, last_t = seq, now
+                h, w = frame.shape[:2]
+                if w > config.STREAM_MAX_WIDTH:
+                    frame = cv2.resize(frame, (config.STREAM_MAX_WIDTH, int(h * config.STREAM_MAX_WIDTH / w)))
+                ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, config.STREAM_JPEG_QUALITY])
+                if not ok:
+                    continue
+                jpg = buf.tobytes()
+                self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(jpg)).encode() + b"\r\n\r\n" + jpg + b"\r\n")
+                self.wfile.flush()
+        except (ConnectionError, OSError):
+            pass
+        finally:
+            self.app.sessions.remove_viewer(cid, main=True)
 
 
 def serve():

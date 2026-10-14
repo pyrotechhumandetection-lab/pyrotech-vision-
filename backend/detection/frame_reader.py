@@ -9,10 +9,16 @@ Additions for the API (behaviour of the read/reconnect loop is unchanged):
   * a sequence number so consumers can tell a new frame from the same one
   * the capture time of the newest frame (snapshots / events carry the time the frame was received)
   * the stream's own frame rate and resolution (reported next to the measured rate)
+  * optional FIFO queue (enable_queue): every decoded frame is queued for the detection loop instead of
+    only the newest one. The queue is bounded (frames and memory); when it is full the OLDEST queued
+    frame is discarded and counted (queue_dropped) - an explicit, measured overload policy.
+  * gaps in the stream's own timestamps (frames the camera / network never delivered) are counted
+    separately (camera_gaps), so application-side and camera-side frame loss can be told apart.
 """
 import logging
 import threading
 import time
+from collections import deque
 
 import cv2
 
@@ -35,6 +41,13 @@ class LatestFrameReader:
         self.nominal_fps = None      # frame rate announced by the stream (may be absent/wrong)
         self.width = self.height = None
         self.opened_once = False
+        self.queue = None            # deque of (seq, frame, capture time) when enable_queue() was called
+        self.queue_cap = 0
+        self.queue_dropped = 0       # frames discarded because the queue was full (application-side loss)
+        self.queue_peak = 0
+        self.qcond = threading.Condition(self.lock)
+        self.camera_gaps = 0         # frames missing in the stream's timestamps (camera / network side)
+        self._last_pts = None
         self.cap = self._open()
         self.thread = threading.Thread(target=self._update, name="frame-reader", daemon=True)
         self.thread.start()
@@ -69,6 +82,12 @@ class LatestFrameReader:
                 self.cap = self._open()
                 continue
             ok, frame = self.cap.read()
+            pts = None
+            if ok:
+                try:
+                    pts = float(self.cap.get(cv2.CAP_PROP_POS_MSEC))
+                except Exception:
+                    pts = None
             with self.lock:
                 was_ok = self.ok
                 self.ok = ok
@@ -77,6 +96,16 @@ class LatestFrameReader:
                     self.seq += 1
                     self.frames_read += 1
                     self.last_frame_time = self.latest_time = time.time()
+                    self._count_gap(pts)
+                    if self.queue is not None:
+                        if len(self.queue) >= self.queue_cap:
+                            self.queue.popleft()          # overload policy: drop the OLDEST, count it
+                            self.queue_dropped += 1
+                        self.queue.append((self.seq, frame, self.latest_time))
+                        self.queue_peak = max(self.queue_peak, len(self.queue))
+                        self.qcond.notify()
+                else:
+                    self._last_pts = None
             if not ok:
                 if was_ok:
                     self.disconnects += 1
@@ -89,6 +118,37 @@ class LatestFrameReader:
                     time.sleep(0.1)
                 if not self.stopped:
                     self.cap = self._open()
+
+    def _count_gap(self, pts):
+        """Frames missing between two consecutive stream timestamps (camera / network side)."""
+        if pts is None or pts <= 0 or not self.nominal_fps:
+            self._last_pts = pts if pts and pts > 0 else None
+            return
+        if self._last_pts is not None:
+            interval = 1000.0 / self.nominal_fps
+            gap = pts - self._last_pts
+            if interval * 1.5 < gap < 5000:            # > 5 s or backwards: a reconnect / timestamp reset
+                self.camera_gaps += int(round(gap / interval)) - 1
+        self._last_pts = pts
+
+    # ---------------------------------------------------------------- FIFO queue (detection loop)
+    def enable_queue(self, capacity):
+        with self.lock:
+            self.queue_cap = max(2, int(capacity))
+            if self.queue is None:
+                self.queue = deque()
+
+    def next_frame(self, timeout=0.2):
+        """Oldest queued (seq, frame, capture time) or None. The frame is shared with the reader - never
+        draw on it (copy first)."""
+        with self.qcond:
+            if not self.queue:
+                self.qcond.wait(timeout)
+            return self.queue.popleft() if self.queue else None
+
+    def queue_len(self):
+        with self.lock:
+            return len(self.queue) if self.queue is not None else 0
 
     def read(self):
         with self.lock:
@@ -121,6 +181,8 @@ class LatestFrameReader:
 
     def release(self):
         self.stopped = True
+        with self.qcond:
+            self.qcond.notify_all()
         self.thread.join(timeout=4)
         try:
             self.cap.release()

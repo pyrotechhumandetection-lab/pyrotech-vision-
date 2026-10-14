@@ -90,7 +90,13 @@ class HeadCountService:
     def capture_frame(self, cam):
         """(frame, captured_at, source) - newest session frame if fresh, else a new frame from the camera."""
         s = self.sessions.get(cam["id"])
-        reader = getattr(s, "reader", None) if s else None
+        reader = None
+        if s is not None:
+            # full resolution only: the main stream (HD reader when the AI uses a substream, else the session's)
+            if getattr(s, "view_reader", None) is not None:
+                reader = s.view_reader
+            elif (getattr(s, "ai_stream", None) or {}).get("active", "same") in ("same", "main"):
+                reader = getattr(s, "reader", None)
         if reader is not None:
             try:
                 ok, _seq, frame, captured = reader.read_latest()

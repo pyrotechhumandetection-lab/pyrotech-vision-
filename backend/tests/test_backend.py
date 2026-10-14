@@ -330,6 +330,79 @@ class HumanCountTests(unittest.TestCase):
         self.assertEqual(len(validate("count", bad, [])), 3)
 
 
+class FramePipelineTests(unittest.TestCase):
+    """Per-camera frame queue (explicit overload policy), camera-side gaps, AI stream selection, fire engine."""
+
+    def _reader(self, cap):
+        from backend.detection.frame_reader import LatestFrameReader
+        r = LatestFrameReader.__new__(LatestFrameReader)       # no camera: drive the queue logic directly
+        import threading
+        r.lock = threading.Lock(); r.qcond = threading.Condition(r.lock)
+        r.queue = None; r.queue_cap = 0; r.queue_dropped = 0; r.queue_peak = 0
+        r.camera_gaps = 0; r._last_pts = None; r.nominal_fps = 20.0
+        r.enable_queue(cap)
+        return r
+
+    def _push(self, r, seq):
+        import numpy as np
+        with r.lock:     # same steps as the reader thread
+            if len(r.queue) >= r.queue_cap:
+                r.queue.popleft(); r.queue_dropped += 1
+            r.queue.append((seq, np.zeros((2, 2, 3), np.uint8), float(seq)))
+            r.queue_peak = max(r.queue_peak, len(r.queue))
+
+    def test_queue_keeps_order_and_counts_overload(self):
+        r = self._reader(5)
+        for i in range(1, 9):
+            self._push(r, i)
+        self.assertEqual(r.queue_dropped, 3)                    # 8 frames into 5 places: 3 oldest dropped, counted
+        got = [r.next_frame(0)[0] for _ in range(5)]
+        self.assertEqual(got, [4, 5, 6, 7, 8])                  # FIFO, newest kept, no frame repeated
+        self.assertIsNone(r.next_frame(0))
+        self.assertEqual(r.queue_peak, 5)
+
+    def test_camera_gaps_from_stream_timestamps(self):
+        r = self._reader(4)
+        for pts in (50, 100, 150, 300, 350, 9000, 9050):       # 150 -> 300 = 2 frames missing; 350 -> 9000 = reconnect
+            r._count_gap(pts)
+        self.assertEqual(r.camera_gaps, 2)
+
+    def test_ai_stream_resolution(self):
+        reg = CameraRegistry()
+        base = {"id": "AI-1", "name": "AI one", "type": "rtsp", "requiresAuth": False, "enabled": True,
+                "sourceUrl": "rtsp://10.0.0.5:554/Streaming/Channels/101", "streamProfile": "main"}
+        self.assertEqual(reg.validate(dict(base)), [])
+        src, kind = reg.resolve_ai_source(dict(base))
+        self.assertEqual((src, kind), ("rtsp://10.0.0.5:554/Streaming/Channels/101", "same"))
+        src, kind = reg.resolve_ai_source(dict(base, aiStream="sub"))
+        self.assertEqual((src, kind), ("rtsp://10.0.0.5:554/Streaming/Channels/102", "sub"))
+        src, kind = reg.resolve_ai_source(dict(base, aiStream="custom", aiCustomStream="/Streaming/Channels/103"))
+        self.assertEqual((src, kind), ("rtsp://10.0.0.5:554/Streaming/Channels/103", "custom"))
+        # no substream is ever guessed for an unknown URL pattern
+        odd = dict(base, id="AI-2", name="AI two", sourceUrl="rtsp://10.0.0.6/live", aiStream="sub")
+        self.assertTrue(any("cannot derive the substream" in e for e in reg.validate(odd)))
+        self.assertTrue(any("AI stream path" in e for e in reg.validate(dict(base, aiStream="custom"))))
+        self.assertTrue(any("aiStream" in e for e in reg.validate(dict(base, aiStream="tiny"))))
+        self.assertTrue(any("snapshotSource" in e for e in reg.validate(dict(base, snapshotSource="x"))))
+
+    def test_fire_openvino_model_present_and_selected(self):
+        from backend.detection import fire_smoke as fs
+        self.assertTrue((fs.OV_DIR / "firedetect-11s.xml").is_file())
+        self.assertTrue((fs.OV_DIR / "firedetect-11s.bin").is_file())
+        old = os.environ.get("AIV_FIRE_ENGINE")
+        try:
+            os.environ["AIV_FIRE_ENGINE"] = "pytorch"
+            self.assertEqual(fs.resolve_engine(), ("pytorch", fs.WEIGHTS))
+            os.environ["AIV_FIRE_ENGINE"] = "auto"
+            want = "openvino" if config.openvino_available() else "pytorch"
+            self.assertEqual(fs.resolve_engine()[0], want)
+        finally:
+            if old is None:
+                os.environ.pop("AIV_FIRE_ENGINE", None)
+            else:
+                os.environ["AIV_FIRE_ENGINE"] = old
+
+
 class AutoStartTests(unittest.TestCase):
     """Detections that were running are resumed after a backend restart (AI box reboot)."""
 

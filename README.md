@@ -200,6 +200,9 @@ Real environment variables override `.env`. Relative backend paths resolve again
 | `AIV_CONNECT_TIMEOUT` | `10` | backend | camera open / first frame (s) |
 | `AIV_EVENT_COOLDOWN` / `AIV_SNAPSHOT_COOLDOWN` | `30` / `0` | backend | default cooldowns per class (s); snapshots `0` = one per confirmed vehicle |
 | `AIV_ENGINE` | `auto` | backend | `auto` (OpenVINO if installed, else PyTorch), `openvino`, `pytorch` — same yolov8n weights |
+| `AIV_FIRE_ENGINE` | `auto` | backend | Fire & Smoke model: `auto` (OpenVINO if installed, ~5x faster on CPU), `openvino`, `pytorch` |
+| `AIV_FRAME_POLICY` | `queue` | backend | `queue` = every decoded frame is analysed in order (FIFO per camera); `latest` = original newest-frame behaviour |
+| `AIV_FRAME_QUEUE_SECONDS` / `_MAX_MB` | `0.5` / `96` | backend | per-camera queue size; when full the oldest frames are dropped and counted ("dropped (queue full)") |
 | `AIV_HEAD_ENGINE` | `auto` | backend | Head count model engine: `auto` (OpenVINO FP16 if installed), `openvino`, `pytorch` |
 | `AIV_HEAD_MAX_FRAME_AGE` | `2` | backend | Head count uses the running stream's newest frame if it is at most this many seconds old, else reads a new frame |
 | `AIV_STREAM_MAX_FPS` / `_MAX_WIDTH` / `_JPEG_QUALITY` | `15` / `1280` / `75` | backend | MJPEG output |
@@ -207,6 +210,12 @@ Real environment variables override `.env`. Relative backend paths resolve again
 | `AIV_LOG_LEVEL` | `INFO` | backend | `DEBUG` for request logs |
 | `AIV_PYTHON` | *(empty)* | start-backend.cmd | another Python to use instead of `backend\.venv` (normally empty) |
 | `YOLO_OFFLINE` / `YOLO_AUTOINSTALL` | `1` / `0` | backend | Ultralytics offline mode, no automatic pip installs |
+
+**Per camera (camera form):** *AI detection stream* = same as viewing stream (default) / camera substream
+(Hikvision, Dahua URL patterns only) / custom AI stream path - the AI then analyses the low-resolution
+substream while the main stream stays the viewing stream; *Snapshot image* = boxes only, or boxes + a
+full-resolution original from the main stream. Measurements, costs and setup:
+[docs/DEBIAN_AI_BOX_DEPLOYMENT.md §11](docs/DEBIAN_AI_BOX_DEPLOYMENT.md).
 
 ## How it works
 

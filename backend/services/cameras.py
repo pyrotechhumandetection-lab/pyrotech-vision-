@@ -116,6 +116,9 @@ def apply_stream_profile(path, profile, custom):
     raise ValueError("cannot derive a substream for this URL - enter the substream URL directly or use a custom stream path")
 
 
+AI_STREAMS = ("same", "sub", "custom")
+
+
 # ------------------------------------------------------------------ registry
 class CameraRegistry:
     def __init__(self):
@@ -189,6 +192,23 @@ class CameraRegistry:
                 errs.append(f"sourceUrl: {e}")
         elif ctype == "webcam" and not (src.isdigit() or src.startswith("/dev/video") or src.startswith("video=")):
             errs.append("webcam source must be a device index, /dev/videoN or video=<name>")
+        # AI detection stream (optional): "same" = the viewing stream (default), "sub" = the camera's substream
+        # derived only for known vendor patterns, "custom" = a path entered by the user. Never guessed.
+        ai = body.get("aiStream", "same") or "same"
+        if ai not in AI_STREAMS:
+            errs.append("aiStream must be same, sub or custom")
+        elif ai != "same":
+            if ctype != "rtsp":
+                errs.append("a separate AI stream is only possible for RTSP cameras")
+            elif ai == "custom" and not (body.get("aiCustomStream") or "").strip():
+                errs.append("enter the AI stream path (e.g. /Streaming/Channels/102)")
+            elif ai == "sub" and src and not errs:
+                try:
+                    apply_stream_profile(split_rtsp(src)[4], "sub", "")
+                except ValueError:
+                    errs.append("cannot derive the substream from this URL - choose 'Custom' and enter the substream path")
+        if (body.get("snapshotSource") or "main") not in ("main", "ai"):
+            errs.append("snapshotSource must be main or ai")
         return errs
 
     def save(self, body, existing_id=None):
@@ -272,6 +292,15 @@ class CameraRegistry:
             c["updatedAt"] = now_iso()
             self.cams.save()
             return copy.deepcopy(cfg)
+
+    def resolve_ai_source(self, cam):
+        """(source for the AI detection stream, kind). kind "same" = identical to the viewing stream."""
+        kind = cam.get("aiStream") or "same"
+        if kind == "same" or cam.get("type") != "rtsp":
+            return self.resolve_source(cam), "same"
+        alt = dict(cam, streamProfile=kind, customStream=(cam.get("aiCustomStream") or "").strip())
+        src = self.resolve_source(alt)
+        return src, ("same" if src == self.resolve_source(cam) else kind)
 
     # -- source resolution (credentials stay inside the backend)
     def resolve_source(self, cam, password_override=None):

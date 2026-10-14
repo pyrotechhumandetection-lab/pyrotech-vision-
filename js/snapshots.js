@@ -133,7 +133,8 @@
         (s.cameraIp ? '<dt>Camera IP</dt><dd class="mono">' + esc(s.cameraIp) + '</dd>' : '') +
         (s.trackId != null ? '<dt>Track</dt><dd class="mono">#' + esc(s.trackId) + '</dd>' : '') +
         (s.type === 'head_count' ? '<dt>Heads detected</dt><dd><b>' + esc(s.headCount) + '</b>' + (s.roi && s.roi.length ? ' <span class="dim">in ' + esc(s.roi.map(function (z) { return z.name; }).join(', ')) + '</span>' : (s.fullFrame ? ' <span class="dim">in the whole frame</span>' : '')) + '</dd>' +
-          (s.originalUrl ? '<dt>Original frame</dt><dd><a href="' + esc(s.originalUrl) + '" target="_blank" rel="noopener">Open the unannotated frame</a></dd>' : '') : '') +
+          '' : '') +
+        (s.originalUrl ? '<dt>Original frame</dt><dd><a href="' + esc(s.originalUrl) + '" target="_blank" rel="noopener">' + (s.type === 'head_count' ? 'Open the unannotated frame' : 'Open the full-resolution original (main stream)') + '</a></dd>' : '') +
         '</dl>',
       actions: [
         { label: 'Delete', icon: 'trash', cls: 'btn-danger', close: false, onClick: function (m) { del(s).then(function (ok) { if (ok) m.close(); }); return false; } },

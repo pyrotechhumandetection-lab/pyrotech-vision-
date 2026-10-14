@@ -45,6 +45,9 @@ FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 MODEL_DIR = config.BACKEND_DIR / "models" / "fire_smoke"
 WEIGHTS = MODEL_DIR / "firedetect-11s.pt"
+# the same weights exported to OpenVINO (FP16, dynamic input size): about 5x faster on a CPU,
+# detections verified against the PyTorch model (see backend/models/README.md)
+OV_DIR = MODEL_DIR / "firedetect-11s_openvino_model"
 VERIFIER_FILE = MODEL_DIR / "smoke_verifier.npz"
 MODEL_NAME = "firedetect-11s.pt (leeyunjai/yolo11-firedetect)"
 
@@ -146,16 +149,40 @@ class SmokeVerifier:
         return z / z.sum(1, keepdims=True)
 
 
-class Detector:
-    """Ultralytics YOLO fire/smoke model running on the CPU (original Detector, settings from the module config)."""
+def resolve_engine():
+    """('openvino' | 'pytorch', model path). AIV_FIRE_ENGINE = auto (default) | openvino | pytorch."""
+    want = str(config._env("AIV_FIRE_ENGINE", "auto")).strip().lower()
+    gpu = config.DEVICE not in (None, "", "cpu")
+    if want == "openvino" or (want == "auto" and not gpu):
+        if (OV_DIR / f"{WEIGHTS.stem}.xml").is_file() and config.openvino_available():
+            return "openvino", OV_DIR
+        if want == "openvino":
+            log.warning("AIV_FIRE_ENGINE=openvino but the OpenVINO fire model or package is missing - using PyTorch")
+    return "pytorch", WEIGHTS
 
-    def __init__(self, weights: Path, imgsz: int, iou: float):
+
+class Detector:
+    """Ultralytics YOLO fire/smoke model running on the CPU (original Detector, settings from the module config).
+
+    Detection runs on OpenVINO when available (same weights, exported); the smoke verifier always uses
+    the PyTorch model's backbone, which is then loaded as well."""
+
+    def __init__(self, weights: Path, imgsz: int, iou: float, engine: str = "pytorch", model_path: Path | None = None):
         from ultralytics import YOLO  # heavy import (PyTorch): only when the module starts
 
         self.weights = weights
         self.imgsz = imgsz
         self.iou = iou
-        self.model = YOLO(str(weights), task="detect")
+        self.engine = engine
+        self._torch = None
+        if engine == "openvino":
+            try:
+                self.model = YOLO(str(model_path), task="detect")
+            except Exception as exc:  # noqa: BLE001 - broken export / runtime: fall back, never fail the module
+                log.warning("OpenVINO fire model could not be loaded (%s) - using PyTorch", exc)
+                self.engine = "pytorch"
+        if self.engine == "pytorch":
+            self.model = self._torch = YOLO(str(weights), task="detect")
         self.names = {int(k): str(v) for k, v in self.model.names.items()}
         self.label_of = {k: canonical_label(v) for k, v in self.names.items()}
         if not any(self.label_of.values()):
@@ -176,7 +203,10 @@ class Detector:
 
     def enable_verifier(self, path: Path, min_prob: float, max_boxes: int):
         try:
-            self.verifier = SmokeVerifier(path, self.model, self.weights, min_prob, max_boxes)
+            if self._torch is None:          # OpenVINO detection: the verifier needs the PyTorch backbone
+                from ultralytics import YOLO
+                self._torch = YOLO(str(self.weights), task="detect")
+            self.verifier = SmokeVerifier(path, self._torch, self.weights, min_prob, max_boxes)
             self.verifier_error = None
         except Exception as exc:
             self.verifier = None
@@ -502,7 +532,9 @@ class FireEngine:
         if not WEIGHTS.is_file():
             raise FileNotFoundError(f"fire/smoke model missing: {WEIGHTS.relative_to(config.BACKEND_DIR)}")
         self.on_alert = on_alert
-        self.detector = Detector(WEIGHTS, 480, 0.45)
+        engine, path = resolve_engine()
+        self.detector = Detector(WEIGHTS, 480, 0.45, engine=engine, model_path=path)
+        log.info("fire & smoke detection engine: %s", "OpenVINO" if self.detector.engine == "openvino" else "PyTorch")
         self.cfg = None
         self.zones = []
         self.window = None
@@ -518,6 +550,7 @@ class FireEngine:
         self.latency_ms = None
         self.runs = 0
         self.errors = 0
+        self.skipped = 0             # frames handed over while the model was still busy (not analysed)
         self.last_error = None
         self.last_seen = {"fire": None, "smoke": None}
         self.current = {}
@@ -569,7 +602,8 @@ class FireEngine:
             return
         with self._lock:
             if self._busy or self._job is not None:
-                return                                # model still busy: skip this frame (original behaviour)
+                self.skipped += 1                     # model still busy: skip this frame (original behaviour), counted
+                return
             self._job = (frame, captured_at, self.generation)
             self._since = 0
             self._lock.notify()
@@ -644,8 +678,9 @@ class FireEngine:
         w = self.window
         v = self.detector.verifier
         return {
-            "model": self.detector.label, "inferenceMs": round(self.latency_ms, 1) if self.latency_ms else None,
-            "runs": self.runs, "errors": self.errors,
+            "model": self.detector.label, "engine": "OpenVINO" if self.detector.engine == "openvino" else "PyTorch",
+            "inferenceMs": round(self.latency_ms, 1) if self.latency_ms else None,
+            "runs": self.runs, "errors": self.errors, "skippedBusy": self.skipped,
             "active": sorted(DISPLAY[l] for l in (w.active if w else ())),
             "alerts": {DISPLAY[k]: v2 for k, v2 in (w.counts if w else {}).items()},
             "thresholds": {DISPLAY[k]: round(v2, 2) for k, v2 in self.detector.thresholds.items()},

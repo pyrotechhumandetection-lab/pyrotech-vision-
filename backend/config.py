@@ -137,6 +137,15 @@ HEAD_MAX_FRAME_AGE_SEC = float(_env("AIV_HEAD_MAX_FRAME_AGE", "2"))
 
 # --- camera / stream ---
 CONNECT_TIMEOUT_SEC = float(_env("AIV_CONNECT_TIMEOUT", "10"))
+
+# Frames from the camera to the detection loop (per camera):
+#   queue  - every decoded frame is queued (FIFO) and analysed in order. The queue holds at most
+#            AIV_FRAME_QUEUE_SECONDS of video and AIV_FRAME_QUEUE_MAX_MB of memory; when it is full the
+#            OLDEST frame is discarded and counted ("dropped (overload)") - nothing is lost silently.
+#   latest - the original behaviour: always the newest frame (frames the AI is too slow for are skipped).
+FRAME_POLICY = str(_env("AIV_FRAME_POLICY", "queue")).strip().lower()
+FRAME_QUEUE_SECONDS = max(0.1, float(_env("AIV_FRAME_QUEUE_SECONDS", "0.5")))
+FRAME_QUEUE_MAX_MB = max(8.0, float(_env("AIV_FRAME_QUEUE_MAX_MB", "96")))
 STREAM_JPEG_QUALITY = int(_env("AIV_STREAM_JPEG_QUALITY", "75"))
 STREAM_MAX_WIDTH = int(_env("AIV_STREAM_MAX_WIDTH", "1280"))
 STREAM_MAX_FPS = float(_env("AIV_STREAM_MAX_FPS", "15"))

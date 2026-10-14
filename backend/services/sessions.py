@@ -45,7 +45,14 @@ class CameraSession:
         self.viewers = 0
         self.state = "connecting"
         self.error = None
-        self.reader = None
+        self.reader = None           # stream the detection loop analyses (AI stream)
+        self.view_reader = None      # main stream, only while needed (HD snapshot originals / HD viewing)
+        self.view_opening = False
+        self.view_retry_at = 0.0
+        self.main_viewers = 0        # browsers watching the raw main stream (stream.mjpeg?source=main)
+        self.main_source = None
+        self.snapshot_source = "main"
+        self.ai_stream = {"requested": "same", "active": "same", "reason": None}
         self.pipeline = None         # existing Person/Vehicle pipeline (human, vehicle modules)
         self.counter = None          # Human Count engine (count module) - its own detector + tracker
         self.count_cfg = None
@@ -68,45 +75,122 @@ class CameraSession:
         #   framesReceived / framesProcessed / framesDropped (received but not analysed - the AI was busy)
         #   inferenceMs    model + tracker time per analysed frame; loopMs = whole per-frame cost
         #   frameAgeMs     age of the frame when analysis starts (buffer latency)
+        #   queue mode (AIV_FRAME_POLICY=queue): framesDropped = frames discarded because the per-camera
+        #   queue was full (application-side), cameraGaps = frames missing in the stream's own timestamps
+        #   (camera / network side), latencyMs = time from receiving a frame to the end of its analysis
         self.metrics = {"cameraFps": None, "streamFps": None, "processingFps": None, "inferenceMs": None, "loopMs": None,
                         "frameAgeMs": None, "framesReceived": 0, "framesProcessed": 0, "framesDropped": 0,
-                        "disconnections": 0, "lastFrameAt": None, "engine": None, "resolution": None}
+                        "disconnections": 0, "lastFrameAt": None, "engine": None, "resolution": None,
+                        "receivedFps": None, "processedFps": None, "inferenceMsRecent": None, "latencyMs": None,
+                        "latencyMsMax": None, "framePolicy": config.FRAME_POLICY, "queueLen": 0, "queueCapacity": None,
+                        "queuePeak": 0, "framesDroppedOverload": 0, "cameraGaps": 0, "aiStream": None,
+                        "aiResolution": None, "viewResolution": None, "fireAnalysedFps": None, "fireSkipped": None}
         self.current = {"human": {}, "vehicle": {}}             # label -> count visible in the latest frame
         self.last_detection_at = {"human": None, "vehicle": None, "count": None, "fire": None, "object": None}
         self._disconnect_alerted = False
 
     # ------------------------------------------------------------------ lifecycle
-    def open(self, timeout):
-        cam = self.mgr.registry.get(self.camera_id)
-        try:
-            source = self.mgr.registry.resolve_source(cam)
-        except ValueError as e:
-            raise SessionError("INVALID_CONFIG", str(e))
+    def _open_reader(self, source, timeout, report=True):
+        """Open one stream and wait for its first frame. report=False: failures are not shown as a camera error
+        (used for the optional AI substream, which falls back to the main stream)."""
+        def fail(code, msg):
+            if report:
+                self.state, self.error = "error", {"code": code, "message": redact(msg)}
+                self.mgr.registry.update_status(self.camera_id, status="error", lastError=redact(msg))
+            raise SessionError(code, msg, 502)
         if isinstance(source, str) and source.lower().startswith("rtsp://"):
             # fast, specific failure (auth / wrong path / unreachable) before OpenCV starts retrying
             c, m, _ = rtsp_describe(source, min(timeout, 5))
             if c:
-                code = "AUTH_FAILED" if c == "AUTH_FAILED" else "CAMERA_UNAVAILABLE"
-                self.state, self.error = "error", {"code": code, "message": redact(m)}
-                self.mgr.registry.update_status(self.camera_id, status="error", lastError=redact(m))
-                raise SessionError(code, m, 502)
-        self.reader = LatestFrameReader(source, open_timeout_sec=timeout)
-        if not self.reader.wait_first_frame(timeout):
-            self.reader.release()
-            self.reader = None
+                fail("AUTH_FAILED" if c == "AUTH_FAILED" else "CAMERA_UNAVAILABLE", m)
+        reader = LatestFrameReader(source, open_timeout_sec=timeout)
+        if not reader.wait_first_frame(timeout):
+            reader.release()
             code, msg = "CAMERA_UNAVAILABLE", "No frame could be read from the camera within %.0f s" % timeout
             if isinstance(source, str) and source.lower().startswith("rtsp"):
                 c, m, _ = rtsp_describe(source, min(timeout, 5))
                 if c:
                     code, msg = ("AUTH_FAILED" if c == "AUTH_FAILED" else "CAMERA_UNAVAILABLE"), m
-            self.state = "error"
-            self.error = {"code": code, "message": redact(msg)}
-            self.mgr.registry.update_status(self.camera_id, status="error", lastError=redact(msg))
-            raise SessionError(code, msg, 502)
+            fail(code, msg)
+        return reader
+
+    def open(self, timeout):
+        cam = self.mgr.registry.get(self.camera_id)
+        try:
+            source = self.mgr.registry.resolve_source(cam)
+            ai_source, kind = self.mgr.registry.resolve_ai_source(cam)
+        except ValueError as e:
+            raise SessionError("INVALID_CONFIG", str(e))
+        self.main_source = source
+        self.snapshot_source = cam.get("snapshotSource") or "main"
+        self.ai_stream = {"requested": cam.get("aiStream") or "same", "active": "same", "reason": None}
+        if kind != "same":
+            try:
+                self.reader = self._open_reader(ai_source, timeout, report=False)
+                self.ai_stream["active"] = kind
+            except SessionError as e:
+                log.warning("camera %s: AI stream (%s) not available (%s) - detection uses the main stream",
+                            self.camera_id, kind, e.message)
+                self.ai_stream.update(active="main", reason=e.message)
+        if self.reader is None:
+            self.reader = self._open_reader(source, timeout)
+        self.metrics["aiStream"] = dict(self.ai_stream)
+        if config.FRAME_POLICY == "queue":
+            r = self.reader
+            frame_mb = max(0.05, (r.width or 1920) * (r.height or 1080) * 3 / 1e6)
+            fps = r.nominal_fps or 25.0
+            cap = max(2, min(int(round(fps * config.FRAME_QUEUE_SECONDS)), int(config.FRAME_QUEUE_MAX_MB / frame_mb)))
+            r.enable_queue(cap)
+            self.metrics["queueCapacity"] = cap
+            log.info("camera %s: frame queue %d frames (%.1f s at %.0f fps, %.0f MB max); AI stream %s %sx%s",
+                     self.camera_id, cap, cap / fps, fps, cap * frame_mb, self.ai_stream["active"], r.width, r.height)
         self.state = "connected"
         self.mgr.registry.update_status(self.camera_id, status="online", lastConnectedAt=now_iso(), lastError=None)
         self.thread = threading.Thread(target=self._loop, name=f"session-{self.camera_id}", daemon=True)
         self.thread.start()
+
+    # ---- main stream next to a separate AI stream (HD snapshot originals, HD viewing)
+    def _separate_ai_stream(self):
+        return self.ai_stream.get("active") not in ("same", "main")
+
+    def _manage_view_reader(self, now):
+        """Open the main stream while it is needed, close it when it is not (it costs decoding CPU)."""
+        active = any(not v["paused"] for v in self.modules.values())
+        need = self._separate_ai_stream() and not self.stopping and (
+            self.main_viewers > 0 or (self.snapshot_source == "main" and active))
+        vr = self.view_reader
+        if need and vr is None and not self.view_opening and now >= self.view_retry_at:
+            self.view_opening = True
+            threading.Thread(target=self._open_view_reader, name=f"view-{self.camera_id}", daemon=True).start()
+        elif not need and vr is not None:
+            self.view_reader = None
+            threading.Thread(target=vr.release, daemon=True).start()
+        if self.view_reader is not None and self.view_reader.width and not self.metrics.get("viewResolution"):
+            self.metrics["viewResolution"] = f"{self.view_reader.width}x{self.view_reader.height}"
+
+    def _open_view_reader(self):
+        try:
+            r = self._open_reader(self.main_source, config.CONNECT_TIMEOUT_SEC, report=False)
+            if self.stopping:
+                r.release()
+            else:
+                self.view_reader = r
+                log.info("camera %s: main stream open for HD snapshots / viewing (%sx%s)", self.camera_id, r.width, r.height)
+        except SessionError as e:
+            self.view_retry_at = time.time() + 60
+            log.warning("camera %s: main stream not available for HD snapshots (%s) - retrying in 60 s", self.camera_id, e.message)
+        finally:
+            self.view_opening = False
+
+    def hd_original(self):
+        """Newest main-stream frame (copy) for snapshot originals, or None (same stream / not open / stale)."""
+        if not self._separate_ai_stream() or self.snapshot_source != "main":
+            return None
+        vr = self.view_reader
+        if vr is None:
+            return None
+        _ok, _seq, frame, t = vr.read_latest()
+        return frame if frame is not None and time.time() - t <= 2.0 else None
 
     def ensure_pipeline(self):
         if self.pipeline is not None:
@@ -209,7 +293,7 @@ class CameraSession:
                (f" ({reason})" if reason else "") + f", confidence {conf:.2f}."
         self.mgr.events.on_module_alert(cam, "fire", label, name, snapshot, captured_at=captured_at, confidence=round(conf, 3),
                                         severity=sev, description=desc, alert=bool(acfg.get("enabled", True)),
-                                        extra={"boxes": boxes, "reason": reason or None})
+                                        extra={"boxes": boxes, "reason": reason or None}, original=self.hd_original())
 
     def _object_alert(self, view, kind, distance, image):
         cam = self.mgr.registry.get(self.camera_id)
@@ -226,7 +310,7 @@ class CameraSession:
                                         severity=acfg.get("severity", "high"), alert=bool(acfg.get("enabled", True)),
                                         description=f"{kind.upper()}: #{view['id']} '{view['name']}' {detail}.",
                                         extra={"objectId": view["id"], "objectName": view["name"], "kind": kind,
-                                               "distancePx": round(distance, 1)})
+                                               "distancePx": round(distance, 1)}, original=self.hd_original())
 
     def _object_info(self, text):
         if text.startswith("RESTORED"):
@@ -248,33 +332,53 @@ class CameraSession:
             self.close_engine(m)
         if self.reader:
             self.reader.release()
+        if self.view_reader:
+            self.view_reader.release()
+            self.view_reader = None
         self.state = "stopped"
         with self.cond:
             self.cond.notify_all()
         log.info("session %s closed", self.camera_id)
 
     def in_use(self):
-        return bool(self.modules) or self.viewers > 0
+        return bool(self.modules) or self.viewers > 0 or self.main_viewers > 0
 
     # ------------------------------------------------------------------ main loop
     def _loop(self):
         last_seq = -1
-        win_t0, win_proc, inf_sum, loop_sum, age_sum, n = time.time(), 0, 0.0, 0.0, 0.0, 0
+        win = self._new_window()
         win_read0 = self.reader.frames_read
         last_enc = 0.0
         last_seen = time.time()
+        queue_mode = self.reader.queue is not None
         while not self.stopping:
-            ok, seq, frame, captured = self.reader.read_latest()
-            now = time.time()
-            if now - win_t0 >= 1.0:
-                self._update_rates(now - win_t0, win_read0, win_proc, inf_sum, loop_sum, age_sum, n)
-                win_t0, win_proc, inf_sum, loop_sum, age_sum, n = now, 0, 0.0, 0.0, 0.0, 0
-                win_read0 = self.reader.frames_read
-            if frame is None or seq == last_seq:
-                if now - last_seen > max(5.0, config.CONNECT_TIMEOUT_SEC) and self.state != "disconnected":
-                    self._on_disconnect()
-                time.sleep(0.003)
-                continue
+            if queue_mode:
+                # every decoded frame, oldest first (FIFO); the shared frame is never drawn on
+                item = self.reader.next_frame(0.2)
+                now = time.time()
+                if now - win["t0"] >= 1.0:
+                    self._update_rates(now - win["t0"], win_read0, win)
+                    win, win_read0 = self._new_window(now), self.reader.frames_read
+                    self._manage_view_reader(now)
+                if item is None:
+                    if now - last_seen > max(5.0, config.CONNECT_TIMEOUT_SEC) and self.state != "disconnected":
+                        self._on_disconnect()
+                    continue
+                seq, raw, captured = item
+                frame = raw.copy()
+            else:
+                ok, seq, frame, captured = self.reader.read_latest()
+                now = time.time()
+                if now - win["t0"] >= 1.0:
+                    self._update_rates(now - win["t0"], win_read0, win)
+                    win, win_read0 = self._new_window(now), self.reader.frames_read
+                    self._manage_view_reader(now)
+                if frame is None or seq == last_seq:
+                    if now - last_seen > max(5.0, config.CONNECT_TIMEOUT_SEC) and self.state != "disconnected":
+                        self._on_disconnect()
+                    time.sleep(0.003)
+                    continue
+                raw = None
             active = {m: v for m, v in self.modules.items() if not v["paused"]}
             pv_on = any(m in ("human", "vehicle") for m in active) and self.pipeline is not None   # Person/Vehicle pipeline
             count_on = "count" in active and self.counter is not None                 # Human Count engine
@@ -282,7 +386,7 @@ class CameraSession:
             fire_on = "fire" in active and fire_eng is not None                       # Fire & Smoke engine
             obj_on = "object" in active and obj_eng is not None                       # Object Monitoring engine
             any_on = pv_on or count_on or fire_on or obj_on
-            if (pv_on or count_on or obj_on) and seq - last_seq > 1 and last_seq >= 0:
+            if not queue_mode and (pv_on or count_on or obj_on) and seq - last_seq > 1 and last_seq >= 0:
                 self.metrics["framesDropped"] += seq - last_seq - 1     # decoded, but the AI was still busy
             last_seq, last_seen = seq, now
             if self.state == "disconnected":
@@ -291,7 +395,7 @@ class CameraSession:
             self.metrics["lastFrameAt"] = now_iso()
             if self.reader.width and not self.metrics["resolution"]:
                 self.metrics["resolution"] = f"{self.reader.width}x{self.reader.height}"
-            self.latest_raw = frame.copy()
+            self.latest_raw = raw if raw is not None else frame.copy()     # clean frame (never drawn on)
 
             annotated = frame
             if any_on:
@@ -334,9 +438,10 @@ class CameraSession:
                 if fire_on:      # hand the newest frame to the fire worker (skipped while it is busy), draw its boxes
                     fire_eng.submit(self.latest_raw, captured or now)
                     annotated = fire_eng.draw(annotated)
-                win_proc += 1
-                inf_sum += inf_ms
-                age_sum += (now - captured) * 1000.0 if captured else 0.0
+                win["proc"] += 1
+                win["inf"] += inf_ms
+                win["inf_last"] = inf_ms
+                win["age"] += (now - captured) * 1000.0 if captured else 0.0
                 self.metrics["framesProcessed"] += 1
                 self.state = "processing"
                 if new:
@@ -347,9 +452,13 @@ class CameraSession:
                             # the frame that triggered the confirmation, stamped with its capture time;
                             # encoding, disk writes and JSON persistence run on the event writer thread
                             self.mgr.events.on_confirmation(cam, item["module"], module_config(cam, item["module"]), item,
-                                                            annotated, captured_at=captured)
-                loop_sum += (time.perf_counter() - t_loop) * 1000.0
-                n += 1
+                                                            annotated, captured_at=captured, original=self.hd_original())
+                win["loop"] += (time.perf_counter() - t_loop) * 1000.0
+                win["n"] += 1
+                if captured:          # receive -> analysis finished (includes the time spent in the queue)
+                    lat = (time.time() - captured) * 1000.0
+                    win["lat"] += lat
+                    win["lat_max"] = max(win["lat_max"], lat)
             else:
                 self.state = "connected"
                 self.current = {"human": {}, "vehicle": {}}
@@ -359,14 +468,41 @@ class CameraSession:
                 last_enc = now
                 self._encode(annotated)
 
-    def _update_rates(self, el, read0, proc, inf_sum, loop_sum, age_sum, n):
+    @staticmethod
+    def _new_window(t0=None):
+        return {"t0": t0 or time.time(), "proc": 0, "inf": 0.0, "inf_last": None, "loop": 0.0, "age": 0.0, "n": 0,
+                "lat": 0.0, "lat_max": 0.0}
+
+    def _update_rates(self, el, read0, w):
+        m = self.metrics
         active = any(not v["paused"] for v in self.modules.values())
-        self.metrics["cameraFps"] = round((self.reader.frames_read - read0) / el, 1)
-        self.metrics["streamFps"] = self.reader.nominal_fps
-        self.metrics["processingFps"] = round(proc / el, 1) if active else None
-        self.metrics["inferenceMs"] = round(inf_sum / n, 1) if n else None
-        self.metrics["loopMs"] = round(loop_sum / n, 1) if n else None
-        self.metrics["frameAgeMs"] = round(age_sum / n, 1) if n else None
+        n = w["n"]
+        m["cameraFps"] = m["receivedFps"] = round((self.reader.frames_read - read0) / el, 1)
+        m["streamFps"] = self.reader.nominal_fps
+        m["processingFps"] = m["processedFps"] = round(w["proc"] / el, 1) if active else None
+        m["inferenceMs"] = round(w["inf"] / n, 1) if n else None
+        m["inferenceMsRecent"] = round(w["inf_last"], 1) if w["inf_last"] is not None else None
+        m["loopMs"] = round(w["loop"] / n, 1) if n else None
+        m["frameAgeMs"] = round(w["age"] / n, 1) if n else None
+        m["latencyMs"] = round(w["lat"] / n, 1) if n else None
+        m["latencyMsMax"] = round(w["lat_max"], 1) if n else None
+        r = self.reader
+        if r.queue is not None:
+            m["queueLen"] = r.queue_len()
+            m["queuePeak"] = r.queue_peak
+            m["framesDropped"] = m["framesDroppedOverload"] = r.queue_dropped
+        m["cameraGaps"] = r.camera_gaps
+        if r.width:
+            m["aiResolution"] = f"{r.width}x{r.height}"
+        fe = self.fire
+        if fe is not None:
+            runs0 = getattr(self, "_fire_runs0", None)
+            m["fireAnalysedFps"] = round((fe.runs - runs0) / el, 1) if runs0 is not None and runs0 <= fe.runs else None
+            m["fireSkipped"] = fe.skipped
+            self._fire_runs0 = fe.runs
+        else:
+            m["fireAnalysedFps"] = m["fireSkipped"] = None
+            self._fire_runs0 = None
 
     def _rebuild_plan(self, active):
         cam = self.mgr.registry.get(self.camera_id) or {}
@@ -622,20 +758,26 @@ class SessionManager:
             else:
                 s.cfg_dirty = True
 
-    def add_viewer(self, cam_id):
+    def add_viewer(self, cam_id, main=False):
         with self.lock:
             self._check_camera(cam_id)
             s = self._get_or_open(cam_id)
-            s.viewers += 1
+            if main:
+                s.main_viewers += 1          # raw main stream: no annotated JPEG encoding needed
+            else:
+                s.viewers += 1
             s.idle_since = None
             return s
 
-    def remove_viewer(self, cam_id):
+    def remove_viewer(self, cam_id, main=False):
         with self.lock:
             s = self.sessions.get(cam_id)
             if not s:
                 return
-            s.viewers = max(0, s.viewers - 1)
+            if main:
+                s.main_viewers = max(0, s.main_viewers - 1)
+            else:
+                s.viewers = max(0, s.viewers - 1)
             if not s.in_use():
                 s.idle_since = time.time()
 

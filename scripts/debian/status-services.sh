@@ -92,7 +92,12 @@ if health:
     st, body = get(f"http://127.0.0.1:{api}/api/cameras")
     cams = {c["id"]: c for c in (json.loads(body) if st == 200 else [])}
     st, body = get(f"http://127.0.0.1:{api}/api/system/metrics")
-    sessions = json.loads(body).get("sessions", []) if st == 200 else []
+    met = json.loads(body) if st == 200 else {}
+    sessions = met.get("sessions", [])
+    if met.get("processCpu") is not None:
+        cores = met.get("cpuCores"); threads = met.get("cpuThreads")
+        print(INFO, f"backend process: CPU {met['processCpu']}% of one core ({cores} cores / {threads} threads on this box), "
+                    f"RAM {met.get('processRssMb')} MB; box RAM free {met.get('ramAvailableMb')} MB")
     print(INFO, f"{len(cams)} camera(s) configured, {len(sessions)} open")
     now = datetime.now(timezone.utc)
     for s in sessions:
@@ -111,6 +116,16 @@ if health:
         detail = (f"camera {'connected' if connected else 'NOT connected'}{res}, AI {model}, "
                   f"inference {infer}, frames analysed {s.get('framesProcessed') or 0}")
         print(tag, f"{cid} {name} [{mods}]: state {state} - {detail}")
+        ai = s.get("aiStream") or {}
+        extra = [f"AI stream {ai.get('active', 'same')} {s.get('aiResolution') or ''}".strip()]
+        if ai.get("requested") not in (None, "same") and ai.get("active") == "main":
+            extra.append(f"FALLBACK to main ({ai.get('reason')})")
+        if s.get("queueCapacity"):
+            extra.append(f"queue {s.get('queueLen', 0)}/{s['queueCapacity']}, latency {s.get('latencyMs')} ms")
+        extra.append(f"dropped {s.get('framesDropped', 0)} (app), {s.get('cameraGaps', 0)} missing in stream")
+        if s.get("fireAnalysedFps") is not None:
+            extra.append(f"fire model {s['fireAnalysedFps']} fps")
+        print("        " + " | ".join(extra))
     if not sessions:
         print(INFO, "no detection running (start one in the web UI; running detections resume after a restart)")
     a = health.get("autostart") or {}

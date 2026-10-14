@@ -222,6 +222,8 @@
         '<dt>Credentials</dt><dd>' + (c.source === 'backend' ? 'Managed by the backend' : (c.username ? 'User "' + esc(c.username) + '" — password not stored in browser' : 'None')) + (c.urlHadCredentials ? '<div class="dim" style="font-size:12px">Credentials embedded in the URL were stripped before saving.</div>' : '') + '</dd>' +
         '<dt>Brand / model</dt><dd>' + esc([c.brand, c.model].filter(Boolean).join(' ') || '—') + '</dd><dt>Location</dt><dd>' + esc(c.location || '—') + '</dd>' +
         '<dt>Stream profile</dt><dd>' + esc({ main: 'Main stream', sub: 'Substream', custom: 'Custom: ' + (c.customStream || '') }[c.streamProfile] || c.streamProfile) + '</dd>' +
+        '<dt>AI detection stream</dt><dd>' + esc({ same: 'Same as viewing stream', sub: 'Substream', custom: 'Custom: ' + (c.aiCustomStream || '') }[c.aiStream || 'same'] || c.aiStream) +
+          ((c.aiStream || 'same') !== 'same' ? ' <span class="dim">· snapshots ' + (c.snapshotSource === 'ai' ? 'from the AI stream' : 'with a full-resolution original') + '</span>' : '') + '</dd>' +
         '<dt>Timeout / reconnect</dt><dd>' + esc(c.timeoutSec) + ' s · ' + esc({ auto: 'Auto every ' + c.reconnectIntervalSec + ' s', manual: 'Manual', never: 'Never' }[c.reconnect] || c.reconnect) + '</dd>' +
         '<dt>Detection</dt><dd>' + (mods.length ? mods.map(function (m) { return esc(cat.moduleById(m).name) + ' (' + Number(c.detection.modules[m].confidence).toFixed(2) + ')'; }).join(', ') : 'None') + '</dd>' +
         '<dt>Zones</dt><dd>' + (c.zones.length ? c.zones.map(function (z) { return '<span class="badge badge-muted" style="margin:0 4px 4px 0"><span class="dot" style="color:' + esc(z.color) + '"></span>' + esc(z.name) + '</span>'; }).join('') : 'Full frame') + '</dd>' +

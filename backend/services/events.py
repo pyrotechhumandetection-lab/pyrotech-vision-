@@ -221,7 +221,7 @@ class EventStore:
             return a
 
     # ------------------------------------------------------------------ detection pipeline hook
-    def on_confirmation(self, camera, module, cfg, item, frame, captured_at=None):
+    def on_confirmation(self, camera, module, cfg, item, frame, captured_at=None, original=None):
         """Called by the session for each NEW confirmed track, with the frame that confirmed it.
 
         Decides synchronously (dedupe, cooldowns), copies the frame, and queues the disk work.
@@ -252,7 +252,7 @@ class EventStore:
         want_snap = scfg.get("mode") == "new_track" and (label in (scfg.get("labels") or []) or want_alert) and \
             (want_alert or self._cooldown_ok(("snap", camera["id"], module, label), float(scfg.get("cooldownSec", 0))))
         job = (dict(camera), module, label, etype, dict(item), frame.copy() if want_snap and frame is not None else None,
-               captured_at, event, want_snap, want_alert, dict(acfg))
+               captured_at, event, want_snap, want_alert, dict(acfg), original if want_snap else None)
         self._jobs.put(job)      # blocks only if 64 events are already waiting (back-pressure, nothing is lost)
         return event
 
@@ -269,7 +269,7 @@ class EventStore:
             finally:
                 self._jobs.task_done()
 
-    def _complete(self, camera, module, label, etype, item, frame, captured_at, event, want_snap, want_alert, acfg):
+    def _complete(self, camera, module, label, etype, item, frame, captured_at, event, want_snap, want_alert, acfg, original=None):
         snap = None
         if want_snap:
             try:
@@ -277,7 +277,8 @@ class EventStore:
                 if module == "vehicle":
                     extra["vehicleClass"] = VEHICLE_CATEGORY.get(label)
                 snap = self.save_snapshot(frame, camera, module, label, confidence=item.get("confidence"), event_id=event["id"],
-                                          severity=acfg.get("severity") if want_alert else None, captured_at=captured_at, extra=extra)
+                                          severity=acfg.get("severity") if want_alert else None, captured_at=captured_at, extra=extra,
+                                          original=original)
                 event["snapshotId"], event["image"] = snap["id"], snap["image"]
             except OSError as e:
                 log.error("snapshot failed for %s: %s", camera["id"], e)
@@ -314,7 +315,8 @@ class EventStore:
         return True
 
     def on_module_alert(self, camera, module, etype, label, frame, captured_at=None, confidence=None, severity="high",
-                        description="", alert=True, snapshot=True, extra=None, cooldown_key=None, cooldown_sec=0):
+                        description="", alert=True, snapshot=True, extra=None, cooldown_key=None, cooldown_sec=0,
+                        original=None):
         """Fire & Smoke / Object Monitoring: one confirmed event -> detection record + snapshot of the frame
         that confirmed it + (optional) alert, written in order by the event writer thread.
         The module decides WHEN (its own confirmation rules); this only stores the result."""
@@ -337,7 +339,8 @@ class EventStore:
                 try:
                     snap = self.save_snapshot(img, cam, module, label or etype, confidence=confidence, event_id=event["id"],
                                               severity=severity if alert else None, captured_at=captured_at,
-                                              etype=etype, extra=dict(extra or {}, detectedAt=detected, description=description))
+                                              etype=etype, extra=dict(extra or {}, detectedAt=detected, description=description),
+                                              original=original if snapshot else None)
                     event["snapshotId"], event["image"] = snap["id"], snap["image"]
                 except OSError as e:
                     log.error("snapshot failed for %s: %s", cam["id"], e)

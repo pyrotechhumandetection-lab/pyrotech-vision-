@@ -84,7 +84,7 @@
   function newCamera() {
     return {
       id: '', name: '', type: 'rtsp', sourceUrl: '', location: '', brand: '', model: '', username: '',
-      description: '', streamProfile: 'main', customStream: '', timeoutSec: 10, reconnect: 'auto', reconnectIntervalSec: 15,
+      description: '', streamProfile: 'main', customStream: '', aiStream: 'same', aiCustomStream: '', snapshotSource: 'main', timeoutSec: 10, reconnect: 'auto', reconnectIntervalSec: 15,
       enabled: true, status: 'unverified', lastConnectedAt: null, lastError: null,
       detection: defaultDetection(), zones: [], zonesEnabled: true, recording: defaultRecording(),
       createdAt: null, updatedAt: null

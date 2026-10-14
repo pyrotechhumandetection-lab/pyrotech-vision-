@@ -53,7 +53,7 @@ Why no Nginx / Docker / PM2: not needed. `server.js` already does the only rever
 (`/api` → `127.0.0.1:8000`), and systemd covers start at boot, restart and logging.
 
 Security consequence: the **backend listens only on 127.0.0.1**. Only the web UI port (5173) has to
-be reachable from the network; port 8000 cannot be reached from other PCs (verified, see §11).
+be reachable from the network; port 8000 cannot be reached from other PCs (verified, see §12).
 
 ---
 
@@ -294,7 +294,99 @@ is ignored by older versions.
 
 ---
 
-## 11. Validation performed
+## 11. Camera streams and AI performance on the box (CPU only)
+
+### What limits the frame rate (measured, not assumed)
+
+Measured on a 2-core x86 test machine with 8 GB RAM (the AI box has more cores, so its absolute numbers are
+higher; the relations are the same). Test cameras: 1080p and 4 MP main streams, 640x360 substreams, 20 fps,
+real people in the picture.
+
+| Cause | Measurement |
+|---|---|
+| **Fire & Smoke ran on PyTorch** | 95-102 ms per analysed frame alone, 200 ms next to two other cameras: only **3.8-7.1 fps** analysed |
+| **Every camera decodes and analyses its full-resolution stream** | the model works at 640 px anyway; 3 cameras at 4 MP: decoding alone ~50% of a core, **9 fps** each |
+| **All cameras share the CPU** | 1 camera: 22-25 ms per frame (all 20 fps analysed); 3 cameras: 70-100 ms each - no lock between cameras, the cores are simply full |
+| **Human + Count on one camera = two person models per frame** | 143-179 ms per frame, **5-7 fps** |
+| "~50% CPU" in `top` | OpenVINO / PyTorch use the physical cores; on a CPU with 2 threads per core that shows as ~50% while the AI is fully busy (`check-environment.sh` reports threads per core) |
+
+### What was changed
+
+1. **Fire & Smoke runs on OpenVINO** (`backend/models/fire_smoke/firedetect-11s_openvino_model`, same weights):
+   30 ms instead of 102 ms per frame. Detections verified against PyTorch (272 of 275 frames identical, the
+   other 3 differ only at confidence 0.300 vs 0.299; identical alerts in a real-time replay). `AIV_FIRE_ENGINE=pytorch`
+   switches back.
+2. **AI detection stream per camera** (camera form: *AI detection stream*): the AI can analyse the camera's
+   substream while the main stream stays the viewing stream. *Substream* is only offered for URL patterns
+   that are documented by the vendor (Hikvision `/Streaming/Channels/101` -> `102`, `/h264/ch1/main/av_stream` ->
+   `sub`, Dahua `subtype=0` -> `1`); for any other camera enter the path under *Custom AI stream path*. Nothing
+   is guessed. If the AI stream cannot be opened, detection uses the main stream and the status shows
+   *Fallback* with the reason.
+3. **Snapshots with a full-resolution original** (camera form: *Snapshot image*): with a separate AI stream
+   the snapshot is the AI frame with boxes **plus** the newest main-stream frame as the original (the
+   Snapshots page shows it). This keeps the main stream decoded while detection runs - see the cost below;
+   choose *Boxes only* where CPU matters more. Head Count always captures from the main stream.
+4. **Live view in full resolution**: `GET /api/cameras/<id>/stream.mjpeg?source=main` sends the main stream
+   without boxes (the detection pages keep the annotated AI stream).
+5. **Per-camera frame queue** (`AIV_FRAME_POLICY=queue`, default): every decoded frame enters a FIFO queue and is
+   analysed in order - no frame is skipped while the AI keeps up, short bursts are absorbed. The queue holds at
+   most `AIV_FRAME_QUEUE_SECONDS` (0.5 s) / `AIV_FRAME_QUEUE_MAX_MB` (96 MB) per camera. **Overload policy:** when a
+   camera's AI cannot keep up for longer, the queue fills and the **oldest** frames are dropped and counted
+   (*dropped (queue full)*); that camera then runs up to 0.5 s behind live. `AIV_FRAME_POLICY=latest` restores
+   the original newest-frame behaviour (lowest delay, frames skipped instead). One camera's queue never blocks
+   another camera.
+6. **Measurements per camera** (Detection pages, `GET /api/system/metrics`, `scripts/debian/status-services.sh`):
+   received fps, processed fps, inference time (average + latest), queue length / capacity / peak, latency from
+   receiving a frame to the end of its analysis, frames dropped in the application (queue full) and frames
+   missing in the camera stream itself (gaps in the stream's timestamps = camera / network side), the fire
+   model's own analysed fps and skipped frames, the AI and main stream resolutions, and the backend process'
+   CPU and RAM. The frame counters run since the camera was connected: frames dropped while a model loads and
+   runs its first (slower) inference right after Start are included.
+
+### Before / after (same test machine, same scenarios, measured back to back)
+
+| Scenario (20 fps cameras) | Before | After, main stream | After, AI on substream |
+|---|---|---|---|
+| Fire & Smoke alone - fire frames analysed | 7.1 fps (102 ms) | **10.0 fps** (30 ms; = every 2nd frame, the configured maximum) | - |
+| Fire next to 2 other cameras | 3.8 fps | 8.5 fps | **9.9 fps** |
+| 3 cameras Human, 1080p - processed fps | 10.2 / 10.9 / 12.2 | 11.7 / 12.6 / 14.1 | **13.9 / 15.5 / 18.4** |
+| 3 cameras Human, 4 MP | 8.7 / 9.0 / 9.4 | 9.2 / 9.4 / 9.8 | **14.0 / 15.7 / 18.7** |
+| Human + Count camera (mixed load) | 5.4 | 6.9 | **9.3** |
+| Backend RAM, 3 cameras 4 MP | 1557 MB | 1738 MB | **1029 MB** |
+| 1 camera Human 1080p | 20 of 20 fps | 20 of 20 fps, 25 ms receive -> result | - |
+
+Cost of *Boxes + full-resolution original* (main stream decoded as well): 3 cameras Human 1080p 13.7 instead of
+15.9 fps on average (-14%); 4 MP 10.2 instead of 16.1 fps (-37%).
+
+**When the cores are full** (3 cameras on 2 cores above) not every frame can be analysed - no setting changes
+that; the metrics show it (*dropped (queue full)*, queue at capacity, *Bottleneck: AI inference (overloaded)*).
+The AI box's sustainable rate is what `status-services.sh` / the Detection page report there.
+
+### Recommended camera setup on the AI box
+
+1. In the camera's own web page, enable its **substream** (e.g. Hikvision: Configuration -> Video -> Sub Stream):
+   H.264, 640x360 or 704x576, the same frame rate as the main stream if detection should see every moment, and
+   an **I-frame (keyframe) interval of 1-2 s** (e.g. 25-50 frames at 25 fps). A new connection can only decode
+   from the next keyframe: with a 10 s interval, starting a detection or reconnecting can exceed the camera's
+   connection timeout (seen with a test video that had a keyframe every 10 s).
+2. In PYROTECH VISION edit the camera: *AI detection stream* = *Camera substream* (Hikvision/Dahua URLs) or
+   *Custom AI stream path* (e.g. `/Streaming/Channels/102`). Save; running detections restart on the substream.
+3. *Snapshot image*: *Boxes + full-resolution original* only where the high-resolution picture is needed.
+4. Check the Detection page: *AI stream* = Substream 640x360, *processed fps* close to *received fps*,
+   *dropped (queue full)* not growing. If it grows, the box is overloaded: fewer modules per camera (Human and
+   Count both run a person model), fewer cameras, or *Boxes only* snapshots.
+
+### Remaining limits
+
+* **Human Detection + Human Count on the same camera** still run two person models per frame (different
+  tracking and thresholds); combining them would change the detection logic, so it was not done.
+* The CPU is shared: adding cameras lowers each camera's processed fps once the cores are full.
+* Object Monitoring's own Layer 1 runs on the AI stream; on a low-resolution substream small objects are matched
+  with fewer pixels.
+* The optional far-person pass (Human Detection, *Person (far)*) upscales part of the frame; on a substream it
+  has less detail to work with - keep the main stream as AI stream for cameras that need it.
+
+## 12. Validation performed
 
 Tested on a test box: a systemd container (systemd 255, Ubuntu 24.04 userland, x86_64), project at
 `/home/aibox/ui-system/pyrotech-vision` owned by a normal user `aibox`, installed with
@@ -323,7 +415,14 @@ network link (box address 10.77.0.2). Results:
 | - | an unrelated unit file with the same name is not overwritten | passed |
 | - | unit tests of the backend incl. the new resume logic (54 tests) | passed |
 
-**Not tested** (needs the real box): Debian itself and ARM64 hardware, a physical power cut,
+Stream / performance changes (§11), tested on the 2-core test machine with test RTSP cameras (1080p and 4 MP main
+streams, 640x360 substreams, the fire test video): before/after measurements in §11; API test (21 checks: AI on the
+substream, fallback to the main stream with reason, no guessed substream URL, HD snapshot original 1920x1080,
+annotated live stream 640 px vs `?source=main`, Head Count from the main stream, fire on OpenVINO with alert, per-camera
+metrics, process CPU/RAM) and UI test (15 checks: camera form fields save, status rows, fire model fps, snapshot
+original link, pages without console errors) passed; 58 backend unit tests passed.
+
+**Not tested** (needs the real box): Debian itself and ARM64 hardware, your cameras' substreams, a physical power cut,
 access from a real second PC on your LAN, your real cameras, and the Debian 12 path that fetches
 Python 3.13. On the box, run `scripts/debian/check-environment.sh` and `status-services.sh` after
 installing, then reboot once (`sudo reboot`) and run `status-services.sh` again - the box is never

@@ -107,16 +107,29 @@
   /** Frames received from the camera / analysed by the AI / skipped while the AI was busy (all measured). */
   function framesLine(m) {
     if (!m.framesReceived) return '<span class="dim">Unavailable</span>';
+    const queue = m.framePolicy === 'queue';
     const total = (m.framesProcessed || 0) + (m.framesDropped || 0);
     const pct = total ? Math.round(m.framesDropped / total * 100) : 0;
-    return esc(m.framesReceived) + ' received since connect · ' + esc(m.framesProcessed || 0) + ' analysed · ' + esc(m.framesDropped || 0) + ' skipped' +
-      (total ? ' <span class="dim">(' + pct + '% skipped)</span>' : '');
+    return esc(m.framesReceived) + ' received since connect · ' + esc(m.framesProcessed || 0) + ' analysed · ' + esc(m.framesDropped || 0) +
+      (queue ? ' dropped (queue full)' : ' skipped') + (total ? ' <span class="dim">(' + pct + '%)</span>' : '') +
+      (m.cameraGaps ? ' <span class="dim">· ' + esc(m.cameraGaps) + ' missing in the camera stream</span>' : '');
+  }
+  /** Which stream the AI analyses (substream for detection, main for viewing / HD snapshots). */
+  function aiStreamLine(m) {
+    const a = m.aiStream || {};
+    const names = { same: 'Viewing stream', sub: 'Substream', custom: 'Custom AI stream', main: 'Main stream' };
+    let out = esc(names[a.active] || 'Viewing stream') + (m.aiResolution ? ' <span class="dim">· ' + esc(m.aiResolution) + '</span>' : '');
+    if (a.requested && a.requested !== 'same' && a.active === 'main') out += ' <span class="badge badge-warning">Fallback</span> <span class="dim">' + esc(names[a.requested]) + ' not available: ' + esc(a.reason || '') + '</span>';
+    if (m.viewResolution) out += ' <span class="dim">· main stream ' + esc(m.viewResolution) + ' for HD snapshots</span>';
+    return out;
   }
   /** Which stage limits the frame rate, from the measured numbers only. */
   function bottleneck(m, k) {
     if (k !== 'processing' || m.cameraFps == null) return '<span class="dim">Shown while detection is running</span>';
     if (m.streamFps && m.cameraFps < m.streamFps * 0.85)
       return '<span class="badge badge-warning">Camera / network / decoding</span> <span class="dim">receiving ' + esc(m.cameraFps) + ' of ' + esc(m.streamFps) + ' fps the stream announces</span>';
+    if (m.framePolicy === 'queue' && m.queueCapacity && m.queueLen >= m.queueCapacity * 0.8)
+      return '<span class="badge badge-warning">AI inference (overloaded)</span> <span class="dim">frame queue ' + esc(m.queueLen) + ' of ' + esc(m.queueCapacity) + ' frames; the oldest are dropped and counted</span>';
     if (m.processingFps != null && m.processingFps >= m.cameraFps * 0.9)
       return '<span class="badge badge-success">None</span> <span class="dim">the AI analyses every frame the camera sends</span>';
     return '<span class="badge badge-warning">AI inference</span> <span class="dim">' + esc(m.loopMs != null ? m.loopMs : m.inferenceMs) + ' ms per analysed frame, the camera sends a frame every ' +
@@ -139,10 +152,16 @@
       (mod.id === 'fire' ? fireRows(s) :
       '<dt>Confirmed tracks</dt><dd>' + (s.uniqueCounts && Object.keys(s.uniqueCounts).length ? counts(s.uniqueCounts) + '<div class="dim" style="font-size:11.5px">Since start. ByteTrack can re-assign an ID after occlusion.</div>' : '<span class="dim">—</span>') + '</dd>') +
       '<dt>Camera FPS (received)</dt><dd>' + fmt(m.cameraFps, ' fps') + (m.streamFps ? ' <span class="dim">· stream reports ' + esc(m.streamFps) + ' fps</span>' : '') + (m.resolution ? ' <span class="dim">· ' + esc(m.resolution) + '</span>' : '') + '</dd>' +
-      '<dt>AI processing FPS</dt><dd>' + fmt(m.processingFps, ' fps') + '</dd>' +
+      '<dt>AI stream</dt><dd>' + aiStreamLine(m) + '</dd>' +
+      (mod.id === 'fire'
+        ? '<dt>Fire model FPS</dt><dd>' + fmt(m.fireAnalysedFps, ' fps analysed') + (s.fire && s.fire.engine ? ' <span class="dim">· ' + esc(s.fire.engine) + ', ' + esc(s.fire.inferenceMs) + ' ms</span>' : '') +
+          (m.fireSkipped ? ' <span class="dim">· ' + esc(m.fireSkipped) + ' frames skipped while the model was busy</span>' : '') + '</dd>'
+        : '<dt>AI processing FPS</dt><dd>' + fmt(m.processingFps, ' fps') + '</dd>') +
       '<dt>Frames</dt><dd>' + framesLine(m) + '</dd>' +
-      '<dt>AI inference time</dt><dd>' + fmt(m.inferenceMs, ' ms') + (m.engine ? ' <span class="dim">· ' + esc(m.engine) + ' (CPU)</span>' : '') + (m.loopMs != null ? ' <span class="dim">· ' + esc(m.loopMs) + ' ms per frame incl. tracking/drawing</span>' : '') + '</dd>' +
-      '<dt>Frame age at analysis</dt><dd>' + fmt(m.frameAgeMs, ' ms') + (m.disconnections ? ' <span class="dim">· ' + m.disconnections + ' disconnection(s)</span>' : '') + '</dd>' +
+      '<dt>AI inference time</dt><dd>' + fmt(m.inferenceMs, ' ms') + (m.inferenceMsRecent != null ? ' <span class="dim">· latest ' + esc(m.inferenceMsRecent) + ' ms</span>' : '') + (m.engine ? ' <span class="dim">· ' + esc(m.engine) + ' (CPU)</span>' : '') + (m.loopMs != null ? ' <span class="dim">· ' + esc(m.loopMs) + ' ms per frame incl. tracking/drawing</span>' : '') + '</dd>' +
+      (m.framePolicy === 'queue'
+        ? '<dt>Queue / latency</dt><dd>' + esc(m.queueLen || 0) + ' of ' + fmt(m.queueCapacity, ' frames') + ' waiting <span class="dim">(peak ' + esc(m.queuePeak || 0) + ')</span> · ' + fmt(m.latencyMs, ' ms') + ' receive → analysed' + (m.latencyMsMax != null ? ' <span class="dim">(max ' + esc(m.latencyMsMax) + ' ms)</span>' : '') + (m.disconnections ? ' <span class="dim">· ' + m.disconnections + ' disconnection(s)</span>' : '') + '</dd>'
+        : '<dt>Frame age at analysis</dt><dd>' + fmt(m.frameAgeMs, ' ms') + (m.disconnections ? ' <span class="dim">· ' + m.disconnections + ' disconnection(s)</span>' : '') + '</dd>') +
       '<dt>Bottleneck</dt><dd>' + bottleneck(m, k) + '</dd>' +
       '<dt>Last ' + mod.noun + ' detected</dt><dd>' + (s.lastDetectionAt ? esc(ui.fmtTime(s.lastDetectionAt)) + ' <span class="dim">(' + esc(ui.relTime(s.lastDetectionAt)) + ')</span>' : '<span class="dim">None yet</span>') + '</dd>' +
       '</dl>' + (s.error && s.error.message ? '<div class="notice notice-danger mt-12">' + icon('alertCircle', 16) + '<div><b>' + esc(s.error.code || 'Error') + '</b> ' + esc(s.error.message) + '</div></div>' : '');
