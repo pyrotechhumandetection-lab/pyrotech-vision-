@@ -35,7 +35,7 @@ import urllib.request
 import zipfile
 
 MTX_VERSION = "v1.9.3"          # config keys below are for this version
-HOME = os.path.join(os.path.expanduser("~"), ".pyrotech-relay")
+HOME = os.environ.get("PYROTECH_RELAY_DIR") or os.path.join(os.path.expanduser("~"), ".pyrotech-relay")
 CONF = os.path.join(HOME, "mediamtx.yml")
 INFO = os.path.join(HOME, "relay.json")
 RELAY_PORT = 8554
@@ -195,7 +195,10 @@ def load_info():
         with open(INFO, encoding="utf-8") as f:
             return json.load(f)
     except (OSError, ValueError):
-        die("relay not set up yet - run: python scripts/colab/local_relay.py setup")
+        import getpass as _g
+        die(f"relay not set up for user '{_g.getuser()}': {INFO} not found.\n"
+            f"  setup / start / test / show must run as the SAME user (all with sudo or all without).\n"
+            f"  find it: sudo ls -l /root/.pyrotech-relay ~/.pyrotech-relay   - or run: python3 scripts/colab/local_relay.py setup")
 
 
 def cmd_show(a):
