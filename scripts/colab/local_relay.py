@@ -116,6 +116,7 @@ def write_config(listen_ip, cams, read_pass, userspace=False):
         "logDestinations: [stdout]",
         "readTimeout: 10s",
         "writeTimeout: 10s",
+        "writeQueueSize: 2048          # absorbs keyframe bursts on a slow upload link",
         "authMethod: internal",
         "authInternalUsers:",
         f"- user: {q(RELAY_USER)}",
