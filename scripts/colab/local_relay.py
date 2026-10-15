@@ -147,6 +147,8 @@ def write_config(listen_ip, cams, read_pass, userspace=False):
 
 
 def cmd_setup(a):
+    global RELAY_PORT
+    RELAY_PORT = a.port
     os.makedirs(HOME, exist_ok=True)
     private(HOME)
     ip = tailscale_ip()
@@ -222,17 +224,26 @@ def cmd_start(a):
         die(f"this computer's Tailscale address changed ({load_info()['tailscaleIp']} -> {cur}): run setup again")
     info = load_info()
     bind_ip = "127.0.0.1" if info.get("userspace") else cur
+    port = info.get("port", RELAY_PORT)
     with socket.socket() as t:                       # can the relay bind its address? (fails in userspace mode)
         try:
             t.bind((bind_ip, 0))
         except OSError:
             die(f"{bind_ip} is not an address of this computer: Tailscale runs in userspace mode (no TUN).\n"
                 f"  fix: python3 scripts/colab/local_relay.py setup --userspace   (then start again)")
+    for host in (bind_ip, "0.0.0.0"):                # is the port already taken (an old relay still running?)
+        with socket.socket() as t:
+            try:
+                t.bind((host, port))
+            except OSError:
+                die(f"port {port} is already in use on this computer - an earlier relay is probably still running.\n"
+                    f"  Windows: taskkill /IM mediamtx.exe /F      Linux: pkill -x mediamtx      then start again.\n"
+                    f"  If another program needs {port}: setup --port 8654 (and RELAY_PORT=8654 in Colab).")
     with open(CONF, encoding="utf-8") as f:
         if f"rtspAddress: {bind_ip}:" not in f.read():
             die("the relay config does not match the setup mode - run setup again"
                 + (" with --userspace" if info.get("userspace") else ""))
-    print(f"relay running on {bind_ip}:{RELAY_PORT} -> reachable as {cur}:{RELAY_PORT} on Tailscale only. Ctrl+C stops it.")
+    print(f"relay running on {bind_ip}:{port} -> reachable as {cur}:{port} on Tailscale only. Ctrl+C stops it.")
     try:
         sys.exit(subprocess.call([exe, CONF]))
     except KeyboardInterrupt:
@@ -289,6 +300,7 @@ def cmd_test(a):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("cmd", choices=("setup", "start", "test", "show"))
+    ap.add_argument("--port", type=int, default=8554, help="setup: relay port (default 8554; use another one if it is taken)")
     ap.add_argument("--userspace", action="store_true",
                     help="setup: Tailscale runs without a TUN device (tailscaled --tun=userspace-networking)")
     a = ap.parse_args()

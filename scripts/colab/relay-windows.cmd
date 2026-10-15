@@ -6,7 +6,7 @@ REM    scripts\colab\relay-windows.cmd setup     once: camera URL / user / passw
 REM    scripts\colab\relay-windows.cmd start     run the relay (keep the window open, Ctrl+C stops it)
 REM    scripts\colab\relay-windows.cmd test      second window: relay -> camera check, must say OK
 REM    scripts\colab\relay-windows.cmd show      values to enter in Colab (RELAY_HOST, RELAY_PASSWORD, paths)
-REM    scripts\colab\relay-windows.cmd firewall  (run as Administrator, once) allow the relay ONLY from Tailscale
+REM    scripts\colab\relay-windows.cmd firewall [port]  (as Administrator, once) allow the relay ONLY from Tailscale
 REM
 REM  Needs: Tailscale for Windows installed and logged in (https://tailscale.com/download/windows).
 REM  The camera password stays on this PC (%USERPROFILE%\.pyrotech-relay). Nothing is opened on the LAN.
@@ -57,8 +57,10 @@ if not exist "%EXE%" (
   exit /b 1
 )
 netsh advfirewall firewall delete rule name="PYROTECH VISION relay (Tailscale only)" >nul 2>&1
+set "RPORT=%~2"
+if "%RPORT%"=="" set "RPORT=8554"
 netsh advfirewall firewall add rule name="PYROTECH VISION relay (Tailscale only)" dir=in action=allow ^
-  program="%EXE%" protocol=TCP localport=8554 remoteip=100.64.0.0/10 profile=any
+  program="%EXE%" protocol=TCP localport=%RPORT% remoteip=100.64.0.0/10 profile=any
 if errorlevel 1 exit /b 1
-echo OK: inbound TCP 8554 to MediaMTX allowed only from Tailscale addresses (100.64.0.0/10).
+echo OK: inbound TCP %RPORT% to MediaMTX allowed only from Tailscale addresses (100.64.0.0/10).
 exit /b 0
