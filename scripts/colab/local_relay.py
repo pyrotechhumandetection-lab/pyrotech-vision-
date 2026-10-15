@@ -281,4 +281,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except PermissionError as e:
+        where = e.filename or "?"
+        die(f"permission denied on {where} ({e.strerror}).\n"
+            f"  - files in {HOME} created earlier with sudo? fix: sudo chown -R $USER: {HOME}\n"
+            f"  - running from a folder you cannot write? run as your normal user, WITHOUT sudo\n"
+            f"  - mediamtx not executable? fix: chmod +x {mtx_binary()}")
