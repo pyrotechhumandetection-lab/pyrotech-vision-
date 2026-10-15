@@ -168,8 +168,13 @@ def cmd_setup(a):
         if p.scheme not in ("rtsp", "rtsps") or not p.hostname:
             print("  not an rtsp:// URL - try again")
             continue
-        user = input("  camera user name: ").strip()
-        pw = getpass.getpass("  camera password (not shown): ")
+        url_user = urllib.parse.unquote(p.username) if p.username else ""
+        url_pw = urllib.parse.unquote(p.password) if p.password else ""
+        user = input(f"  camera user name{' [' + url_user + ' from the URL]' if url_user else ''}: ").strip() or url_user
+        pw = getpass.getpass("  camera password (not shown)" + (" [Enter = the one in the URL]" if url_pw else "") + ": ") or url_pw
+        if not user or not pw:
+            print("  the camera needs a user name AND a password (an empty one gives 401 Unauthorized) - try again")
+            continue
         path = input(f"  relay path name [cam{n}]: ").strip() or f"cam{n}"
         if not path.replace("_", "").replace("-", "").isalnum():
             print("  path: letters, digits, - and _ only - try again")
