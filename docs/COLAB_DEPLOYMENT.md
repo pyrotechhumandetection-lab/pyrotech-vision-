@@ -130,3 +130,19 @@ python3 scripts/colab/local_relay.py test       # 2nd terminal: must say OK
 Colab side: unchanged (it already runs Tailscale in userspace mode). Tested here: relay config with `--userspace`
 (listens only on 127.0.0.1, wrong password 401, right password 200 with a camera stream). **Not tested:** Tailscale
 delivering tailnet connections to the 127.0.0.1 relay.
+
+## Windows PC as the relay (recommended when Debian has no TUN)
+
+Tailscale for Windows uses its own network adapter (no TUN/userspace issue). In `D:\ui` (Command Prompt):
+
+```
+git pull
+scripts\colab\relay-windows.cmd setup       # camera URL (prefer the substream), user, password; downloads MediaMTX
+scripts\colab\relay-windows.cmd firewall    # ONCE, in a Command Prompt "Run as administrator"
+scripts\colab\relay-windows.cmd start       # keep this window open
+scripts\colab\relay-windows.cmd test        # 2nd window: must say OK
+scripts\colab\relay-windows.cmd show        # RELAY_HOST + RELAY_PASSWORD for the Colab notebook
+```
+
+The relay listens only on the PC's Tailscale address, and the firewall rule allows port 8554 only from Tailscale
+addresses (100.64.0.0/10). Keep the PC awake (Power settings: sleep = never) while Colab runs.
