@@ -43,7 +43,7 @@ if not exist "C:\Program Files\Tailscale\tailscale.exe" (
 
 if /i "%CMD%"=="firewall" goto firewall
 
-%PY% scripts\colab\local_relay.py %CMD%
+%PY% scripts\colab\local_relay.py %*
 exit /b %ERRORLEVEL%
 
 :firewall
