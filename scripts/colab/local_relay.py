@@ -217,7 +217,19 @@ def cmd_start(a):
     cur = tailscale_ip()
     if cur != load_info()["tailscaleIp"]:
         die(f"this computer's Tailscale address changed ({load_info()['tailscaleIp']} -> {cur}): run setup again")
-    print(f"relay running on {cur}:{RELAY_PORT} (Tailscale only). Ctrl+C stops it.")
+    info = load_info()
+    bind_ip = "127.0.0.1" if info.get("userspace") else cur
+    with socket.socket() as t:                       # can the relay bind its address? (fails in userspace mode)
+        try:
+            t.bind((bind_ip, 0))
+        except OSError:
+            die(f"{bind_ip} is not an address of this computer: Tailscale runs in userspace mode (no TUN).\n"
+                f"  fix: python3 scripts/colab/local_relay.py setup --userspace   (then start again)")
+    with open(CONF, encoding="utf-8") as f:
+        if f"rtspAddress: {bind_ip}:" not in f.read():
+            die("the relay config does not match the setup mode - run setup again"
+                + (" with --userspace" if info.get("userspace") else ""))
+    print(f"relay running on {bind_ip}:{RELAY_PORT} -> reachable as {cur}:{RELAY_PORT} on Tailscale only. Ctrl+C stops it.")
     try:
         sys.exit(subprocess.call([exe, CONF]))
     except KeyboardInterrupt:
