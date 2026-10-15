@@ -296,7 +296,7 @@ def describe(path, user, pw, timeout=25):
 
 def cmd_test_camera():
     need_env("RELAY_PASSWORD", "RELAY_PATHS")
-    user, pw = os.environ.get("RELAY_USER", "aivision"), os.environ["RELAY_PASSWORD"]
+    user, pw = os.environ.get("RELAY_USER", "aivision").strip(), os.environ["RELAY_PASSWORD"].strip()
     if not port_open(BRIDGE_PORT):
         fail("bridge not running - run: bridge")
     bad = 0
@@ -380,7 +380,7 @@ def cmd_add_camera():
     for i, path in enumerate([p.strip() for p in os.environ["RELAY_PATHS"].split(",") if p.strip()], 1):
         cid = f"COLAB-{path.upper()}"[:32]
         body = {"id": cid, "name": f"{path} (via relay)", "type": "rtsp", "sourceUrl": f"rtsp://127.0.0.1:{BRIDGE_PORT}/{path}",
-                "requiresAuth": True, "username": user, "password": os.environ["RELAY_PASSWORD"], "enabled": True,
+                "requiresAuth": True, "username": user, "password": os.environ["RELAY_PASSWORD"].strip(), "enabled": True,
                 "timeoutSec": 20, "streamProfile": "main", "zones": [], "detection": {"modules": {}}}
         st, r = api("/cameras", "POST", body, timeout=30)
         if st == 409 or (st and st >= 400 and "exists" in str(r).lower()):
