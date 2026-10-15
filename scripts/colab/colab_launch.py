@@ -267,9 +267,10 @@ def cmd_bridge():
         fail("VPN not running - run: vpn")
     if port_open(BRIDGE_PORT) and not alive("bridge"):
         fail(f"port {BRIDGE_PORT} is used by another process")
-    # local TCP port -> 'tailscale nc' -> relay on your PC (RTSP over TCP only; the backend forces TCP)
-    spawn("bridge", ["socat", f"TCP-LISTEN:{BRIDGE_PORT},bind=127.0.0.1,fork,reuseaddr",
-                     f"EXEC:tailscale --socket={TS_SOCK} nc {os.environ['RELAY_HOST']} {port}"])
+    # local TCP port -> tailscaled's SOCKS5 proxy -> relay on your PC (RTSP over TCP; the backend forces TCP)
+    stop_proc("bridge", signal.SIGTERM, 5)          # restart with the current RELAY_HOST / RELAY_PORT
+    spawn("bridge", [sys.executable, os.path.join(REPO, "scripts", "colab", "socks_bridge.py"),
+                     str(BRIDGE_PORT), os.environ["RELAY_HOST"], port, "1055"])
     time.sleep(1.5)
     if not port_open(BRIDGE_PORT):
         print(tail("bridge"))
