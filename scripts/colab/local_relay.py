@@ -10,6 +10,7 @@ network and reads the relay - never the camera.
                                                   downloads MediaMTX v1.9.3, writes the relay config
     python scripts/colab/local_relay.py start     run the relay (keep this window open; Ctrl+C stops it)
     python scripts/colab/local_relay.py test      check the relay -> camera chain (RTSP DESCRIBE, like Colab will)
+    python scripts/colab/local_relay.py setup --userspace   the same when Tailscale runs WITHOUT a TUN device
     python scripts/colab/local_relay.py show      print what to enter in Colab (relay address, path, user, password)
 
 Needs: Python 3.8+, Tailscale installed and logged in on this computer (https://tailscale.com/download).
@@ -106,7 +107,7 @@ def download_mediamtx():
     return exe
 
 
-def write_config(listen_ip, cams, read_pass):
+def write_config(listen_ip, cams, read_pass, userspace=False):
     """cams: [(path, source_url_with_credentials)]. Only RTSP over TCP on the Tailscale address; everything else off."""
     q = lambda s: json.dumps(s)          # YAML accepts JSON strings: safe quoting of passwords / URLs
     lines = [
@@ -119,7 +120,8 @@ def write_config(listen_ip, cams, read_pass):
         "authInternalUsers:",
         f"- user: {q(RELAY_USER)}",
         f"  pass: {q(read_pass)}",
-        "  ips: ['100.64.0.0/10', 'fd7a:115c:a1e0::/48']   # Tailscale addresses only",
+        ("  ips: ['127.0.0.1/32']   # userspace Tailscale delivers tailnet connections from 127.0.0.1"
+         if userspace else "  ips: ['100.64.0.0/10', 'fd7a:115c:a1e0::/48']   # Tailscale addresses only"),
         "  permissions:",
         "  - action: read",
         "    path:",
@@ -127,7 +129,7 @@ def write_config(listen_ip, cams, read_pass):
         "rtsp: yes",
         "protocols: [tcp]",
         "encryption: \"no\"",
-        f"rtspAddress: {listen_ip}:{RELAY_PORT}",
+        f"rtspAddress: {'127.0.0.1' if userspace else listen_ip}:{RELAY_PORT}",
         "rtspAuthMethods: [basic]",
         "rtmp: no", "hls: no", "webrtc: no", "srt: no",
         "pathDefaults:",
@@ -148,7 +150,11 @@ def cmd_setup(a):
     os.makedirs(HOME, exist_ok=True)
     private(HOME)
     ip = tailscale_ip()
-    print(f"Tailscale address of this computer: {ip} (the relay listens ONLY there)")
+    if a.userspace:
+        print(f"Tailscale address of this computer: {ip} (userspace mode, no TUN): the relay listens on 127.0.0.1 only;"
+              f" Tailscale hands tailnet connections to {ip}:{RELAY_PORT} to it. Nothing is opened on the LAN.")
+    else:
+        print(f"Tailscale address of this computer: {ip} (the relay listens ONLY there)")
     cams = []
     while True:
         n = len(cams) + 1
@@ -173,9 +179,9 @@ def cmd_setup(a):
         die("no camera entered")
     read_pass = secrets.token_urlsafe(18)
     download_mediamtx()
-    write_config(ip, cams, read_pass)
+    write_config(ip, cams, read_pass, a.userspace)
     info = {"tailscaleIp": ip, "port": RELAY_PORT, "user": RELAY_USER, "password": read_pass,
-            "paths": [c[0] for c in cams]}
+            "paths": [c[0] for c in cams], "userspace": bool(a.userspace)}
     with open(INFO, "w", encoding="utf-8") as f:
         json.dump(info, f, indent=1)
     private(INFO)
@@ -244,7 +250,8 @@ def cmd_test(a):
     bad = 0
     for path in i["paths"]:
         try:
-            code, body = rtsp_describe(i["tailscaleIp"], i["port"], path, i["user"], i["password"])
+            host = "127.0.0.1" if i.get("userspace") else i["tailscaleIp"]
+            code, body = rtsp_describe(host, i["port"], path, i["user"], i["password"])
         except OSError as e:
             print(f"FAIL {path}: relay not reachable ({e}) - is 'start' running?")
             bad += 1
@@ -267,6 +274,8 @@ def cmd_test(a):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("cmd", choices=("setup", "start", "test", "show"))
+    ap.add_argument("--userspace", action="store_true",
+                    help="setup: Tailscale runs without a TUN device (tailscaled --tun=userspace-networking)")
     a = ap.parse_args()
     {"setup": cmd_setup, "start": cmd_start, "test": cmd_test, "show": cmd_show}[a.cmd](a)
 

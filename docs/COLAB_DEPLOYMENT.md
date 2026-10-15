@@ -105,3 +105,28 @@ line, not the runtime type.
 Limits: the stream crosses your PC's upload bandwidth (a 640x360 substream needs ~0.5-1 Mbit/s, a 1080p main stream
 2-6 Mbit/s); detection latency adds the internet round trip; Colab sessions end after idle time / ~12 h and the VM is
 wiped (cameras, snapshots, `.venv` are not kept unless you work from a mounted Google Drive folder).
+
+## Debian PC without a TUN device (Tailscale userspace mode)
+
+If `tailscaled` fails with "no TUN" / `/dev/net/tun` missing, first try `sudo modprobe tun` (`ls -l /dev/net/tun`).
+If the kernel has no TUN module (container, some VMs / ARM boards), run Tailscale in **userspace networking mode** -
+free, no kernel module. Inbound tailnet connections are then handed to programs listening on 127.0.0.1, so the relay
+listens on 127.0.0.1 only (setup option `--userspace`) and accepts only 127.0.0.1 + the relay password. Nothing is
+opened on the LAN; Colab still connects to `100.x.y.z:8554`.
+
+```
+# Debian PC terminal
+curl -fsSL https://tailscale.com/install.sh | sh
+echo 'FLAGS="--tun=userspace-networking"' | sudo tee -a /etc/default/tailscaled
+sudo systemctl restart tailscaled
+sudo tailscale up                     # opens a login link - log in with the same Tailscale account
+tailscale ip -4                       # 100.x.y.z  = RELAY_HOST for Colab
+cd ~/ui-system/pyrotech-vision
+python3 scripts/colab/local_relay.py setup --userspace
+python3 scripts/colab/local_relay.py start      # keep open
+python3 scripts/colab/local_relay.py test       # 2nd terminal: must say OK
+```
+
+Colab side: unchanged (it already runs Tailscale in userspace mode). Tested here: relay config with `--userspace`
+(listens only on 127.0.0.1, wrong password 401, right password 200 with a camera stream). **Not tested:** Tailscale
+delivering tailnet connections to the 127.0.0.1 relay.
