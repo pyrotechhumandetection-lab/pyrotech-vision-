@@ -6,7 +6,7 @@ MediaMTX pulls the camera's RTSP stream on the LAN and re-serves it ONLY on this
 (VPN) address, to ONE read-only relay user with a random password. Colab joins the same Tailscale
 network and reads the relay - never the camera.
 
-    python scripts/colab/local_relay.py setup     once: camera URL + password (asked, not stored in the project),
+    python scripts/colab/local_relay.py setup     once: camera RTSP URL(s) only (login inside the URL if needed),
                                                   downloads MediaMTX v1.9.3, writes the relay config
     python scripts/colab/local_relay.py add       add cameras later (keeps the relay password)
     python scripts/colab/local_relay.py start     run the relay (keep this window open; Ctrl+C stops it)
@@ -19,7 +19,6 @@ Files: %USERPROFILE%\\.pyrotech-relay (Windows) or ~/.pyrotech-relay (Linux) - o
 """
 import argparse
 import base64
-import getpass
 import io
 import json
 import os
@@ -148,36 +147,41 @@ def write_config(listen_ip, cams, read_pass, userspace=False):
 
 
 def ask_cameras(existing_paths):
-    """Ask for cameras until an empty URL. Returns [(path, source URL with credentials)]."""
+    """Ask only for camera RTSP URLs until an empty line. Credentials, if the camera needs them, are part of
+    the URL (rtsp://user:password@192.168.0.64:554/...). Relay paths are numbered cam1, cam2, ...
+    Returns [(path, source URL)]."""
     cams = []
     taken = set(existing_paths)
     while True:
         n = len(taken) + len(cams) + 1
-        url = input(f"Camera {n} RTSP URL WITHOUT password, e.g. rtsp://192.168.0.64:554/Streaming/Channels/102 "
+        url = input(f"Camera {n} RTSP URL, e.g. rtsp://admin:password@192.168.0.64:554/Streaming/Channels/102 "
                     f"(empty = done): ").strip()
         if not url:
             break
-        p = urllib.parse.urlsplit(url)
-        if p.scheme not in ("rtsp", "rtsps") or not p.hostname:
+        scheme, sep, rest = url.partition("://")
+        user = pw = None
+        if "@" in rest:                   # user:password@host...  - the password may contain @ # : / etc.
+            cred, _, rest = rest.rpartition("@")
+            user, colon, pw = cred.partition(":")
+            pw = pw if colon else None
+        p = urllib.parse.urlsplit(f"{scheme.lower()}://{rest}")
+        if not sep or p.scheme not in ("rtsp", "rtsps") or not p.hostname:
             print("  not an rtsp:// URL - try again")
             continue
-        url_user = urllib.parse.unquote(p.username) if p.username else ""
-        url_pw = urllib.parse.unquote(p.password) if p.password else ""
-        user = input(f"  camera user name{' [' + url_user + ' from the URL]' if url_user else ''}: ").strip() or url_user
-        pw = getpass.getpass("  camera password (not shown)" + (" [Enter = the one in the URL]" if url_pw else "") + ": ") or url_pw
-        if not user or not pw:
-            print("  the camera needs a user name AND a password (an empty one gives 401 Unauthorized) - try again")
+        try:
+            port = p.port or 554
+        except ValueError:
+            print("  invalid port in the URL - try again")
             continue
-        default = next(f"cam{i}" for i in range(1, 999) if f"cam{i}" not in taken and f"cam{i}" not in [c[0] for c in cams])
-        path = input(f"  relay path name [{default}]: ").strip() or default
-        if not path.replace("_", "").replace("-", "").isalnum():
-            print("  path: letters, digits, - and _ only - try again")
-            continue
-        if path in taken or path in [c[0] for c in cams]:
-            print(f"  path {path} already exists - choose another name")
-            continue
-        netloc = f"{urllib.parse.quote(user, safe='')}:{urllib.parse.quote(pw, safe='')}@{p.hostname}:{p.port or 554}"
-        cams.append((path, urllib.parse.urlunsplit((p.scheme, netloc, p.path, p.query, ""))))
+        userinfo = ""
+        if user:                          # URL-encode so special characters survive in the relay config
+            userinfo = urllib.parse.quote(urllib.parse.unquote(user), safe="")
+            if pw is not None:
+                userinfo += ":" + urllib.parse.quote(urllib.parse.unquote(pw), safe="")
+            userinfo += "@"
+        path = next(f"cam{i}" for i in range(1, 999) if f"cam{i}" not in taken and f"cam{i}" not in [c[0] for c in cams])
+        cams.append((path, urllib.parse.urlunsplit((p.scheme, f"{userinfo}{p.hostname}:{port}", p.path, p.query, ""))))
+        print(f"  -> {path}" + ("" if user else "  (no user/password in the URL: camera without login)"))
     return cams
 
 

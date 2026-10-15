@@ -2,7 +2,7 @@
 REM ============================================================================================
 REM  PYROTECH VISION - camera relay on this WINDOWS PC for the Google Colab backend (GPU)
 REM
-REM    scripts\colab\relay-windows.cmd setup     once: camera URL / user / password, downloads MediaMTX
+REM    scripts\colab\relay-windows.cmd setup     once: camera RTSP URL(s) only, downloads MediaMTX
 REM    scripts\colab\relay-windows.cmd start     run the relay (keep the window open, Ctrl+C stops it)
 REM    scripts\colab\relay-windows.cmd test      second window: relay -> camera check, must say OK
 REM    scripts\colab\relay-windows.cmd show      values to enter in Colab (RELAY_HOST, RELAY_PASSWORD, paths)
