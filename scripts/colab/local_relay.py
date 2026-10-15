@@ -8,6 +8,7 @@ network and reads the relay - never the camera.
 
     python scripts/colab/local_relay.py setup     once: camera URL + password (asked, not stored in the project),
                                                   downloads MediaMTX v1.9.3, writes the relay config
+    python scripts/colab/local_relay.py add       add cameras later (keeps the relay password)
     python scripts/colab/local_relay.py start     run the relay (keep this window open; Ctrl+C stops it)
     python scripts/colab/local_relay.py test      check the relay -> camera chain (RTSP DESCRIBE, like Colab will)
     python scripts/colab/local_relay.py setup --userspace   the same when Tailscale runs WITHOUT a TUN device
@@ -146,20 +147,12 @@ def write_config(listen_ip, cams, read_pass, userspace=False):
     private(CONF)
 
 
-def cmd_setup(a):
-    global RELAY_PORT
-    RELAY_PORT = a.port
-    os.makedirs(HOME, exist_ok=True)
-    private(HOME)
-    ip = tailscale_ip()
-    if a.userspace:
-        print(f"Tailscale address of this computer: {ip} (userspace mode, no TUN): the relay listens on 127.0.0.1 only;"
-              f" Tailscale hands tailnet connections to {ip}:{RELAY_PORT} to it. Nothing is opened on the LAN.")
-    else:
-        print(f"Tailscale address of this computer: {ip} (the relay listens ONLY there)")
+def ask_cameras(existing_paths):
+    """Ask for cameras until an empty URL. Returns [(path, source URL with credentials)]."""
     cams = []
+    taken = set(existing_paths)
     while True:
-        n = len(cams) + 1
+        n = len(taken) + len(cams) + 1
         url = input(f"Camera {n} RTSP URL WITHOUT password, e.g. rtsp://192.168.0.64:554/Streaming/Channels/102 "
                     f"(empty = done): ").strip()
         if not url:
@@ -175,13 +168,53 @@ def cmd_setup(a):
         if not user or not pw:
             print("  the camera needs a user name AND a password (an empty one gives 401 Unauthorized) - try again")
             continue
-        path = input(f"  relay path name [cam{n}]: ").strip() or f"cam{n}"
+        default = next(f"cam{i}" for i in range(1, 999) if f"cam{i}" not in taken and f"cam{i}" not in [c[0] for c in cams])
+        path = input(f"  relay path name [{default}]: ").strip() or default
         if not path.replace("_", "").replace("-", "").isalnum():
             print("  path: letters, digits, - and _ only - try again")
             continue
-        netloc = f"{urllib.parse.quote(user, safe='')}:{urllib.parse.quote(pw, safe='')}@{p.hostname}:{p.port or 554}" \
-            if user else f"{p.hostname}:{p.port or 554}"
+        if path in taken or path in [c[0] for c in cams]:
+            print(f"  path {path} already exists - choose another name")
+            continue
+        netloc = f"{urllib.parse.quote(user, safe='')}:{urllib.parse.quote(pw, safe='')}@{p.hostname}:{p.port or 554}"
         cams.append((path, urllib.parse.urlunsplit((p.scheme, netloc, p.path, p.query, ""))))
+    return cams
+
+
+def cmd_add(a):
+    """Add cameras to an existing relay: same relay password, same address - only new paths."""
+    i = load_info()
+    if not os.path.exists(CONF):
+        die("relay config missing - run setup")
+    print(f"existing cameras: {', '.join(i['paths'])}")
+    cams = ask_cameras(i["paths"])
+    if not cams:
+        die("no camera entered")
+    q = lambda v: json.dumps(v)
+    with open(CONF, "a", encoding="utf-8") as f:          # 'paths:' is the last section of the config
+        for path, src in cams:
+            f.write(f"  {path}:\n    source: {q(src)}\n")
+    private(CONF)
+    i["paths"] += [c[0] for c in cams]
+    with open(INFO, "w", encoding="utf-8") as f:
+        json.dump(i, f, indent=1)
+    private(INFO)
+    print(f"added: {', '.join(c[0] for c in cams)}. Restart the relay (Ctrl+C in its window, then start), then test.")
+    print(f"In Colab: RELAY_PATHS = \"{','.join(i['paths'])}\"  (relay password unchanged)")
+
+
+def cmd_setup(a):
+    global RELAY_PORT
+    RELAY_PORT = a.port
+    os.makedirs(HOME, exist_ok=True)
+    private(HOME)
+    ip = tailscale_ip()
+    if a.userspace:
+        print(f"Tailscale address of this computer: {ip} (userspace mode, no TUN): the relay listens on 127.0.0.1 only;"
+              f" Tailscale hands tailnet connections to {ip}:{RELAY_PORT} to it. Nothing is opened on the LAN.")
+    else:
+        print(f"Tailscale address of this computer: {ip} (the relay listens ONLY there)")
+    cams = ask_cameras([])
     if not cams:
         die("no camera entered")
     read_pass = secrets.token_urlsafe(18)
@@ -304,12 +337,12 @@ def cmd_test(a):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("cmd", choices=("setup", "start", "test", "show"))
+    ap.add_argument("cmd", choices=("setup", "add", "start", "test", "show"))
     ap.add_argument("--port", type=int, default=8554, help="setup: relay port (default 8554; use another one if it is taken)")
     ap.add_argument("--userspace", action="store_true",
                     help="setup: Tailscale runs without a TUN device (tailscaled --tun=userspace-networking)")
     a = ap.parse_args()
-    {"setup": cmd_setup, "start": cmd_start, "test": cmd_test, "show": cmd_show}[a.cmd](a)
+    {"setup": cmd_setup, "add": cmd_add, "start": cmd_start, "test": cmd_test, "show": cmd_show}[a.cmd](a)
 
 
 if __name__ == "__main__":
