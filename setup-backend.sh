@@ -138,6 +138,20 @@ if [[ "$(cat "$STAMP" 2>/dev/null)" == "$WANT_STAMP" ]]; then
   exit 0
 fi
 
+# A venv without pip (interrupted earlier run, or created without --seed): add pip, else rebuild it with uv
+if ! "$PY" -m pip --version >/dev/null 2>&1; then
+  warn "$VENV has no pip - adding it"
+  if ! "$PY" -m ensurepip --upgrade >/dev/null 2>&1; then
+    UVDIR="$PWD/backend/.uv"
+    if [[ ! -x "$UVDIR/bin/uv" ]]; then python3 -m venv "$UVDIR" && "$UVDIR/bin/pip" install -q --disable-pip-version-check uv; fi
+    PYVER="$("$PY" -c 'import sys;print("%d.%d"%sys.version_info[:2])')"
+    rm -rf "$VENV"
+    export UV_PYTHON_INSTALL_DIR="$UVDIR/python"
+    "$UVDIR/bin/uv" python install "$PYVER"
+    "$UVDIR/bin/uv" venv --seed --python "$PYVER" "$VENV"
+  fi
+  "$PY" -m pip --version >/dev/null 2>&1 || die "could not add pip to $VENV - delete backend/.venv and run again"
+fi
 PIP=("$PY" -m pip --disable-pip-version-check)
 SRC=()
 if (( OFFLINE )); then
