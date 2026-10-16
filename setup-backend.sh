@@ -57,7 +57,17 @@ has_lib() { "$LDCONFIG" -p 2>/dev/null | grep -F "$1" >/dev/null; }
 
 need=()
 command -v python3 >/dev/null 2>&1 || need+=(python3)
-python3 -c 'import venv, ensurepip' >/dev/null 2>&1 || need+=(python3-venv)
+# venv needs the ensurepip package of the python3 actually in use (e.g. python3.13-venv when python3 is a
+# deadsnakes 3.13, as on Google Colab) - the generic python3-venv only covers the distribution's own Python
+if command -v python3 >/dev/null 2>&1; then
+  PY3V="$(python3 -c 'import sys;print("%d.%d"%sys.version_info[:2])')"
+  _vt="$(mktemp -d)"
+  if ! python3 -m venv "$_vt/v" >/dev/null 2>&1; then
+    need+=(python3-venv)
+    pv="$(apt_pick "python${PY3V}-venv")"; [[ -n "$pv" ]] && need+=("$pv")
+  fi
+  rm -rf "$_vt"
+fi
 command -v node >/dev/null 2>&1 || need+=(nodejs)
 command -v curl >/dev/null 2>&1 || need+=(curl)
 command -v ss >/dev/null 2>&1 || need+=(iproute2)
@@ -151,6 +161,11 @@ if ! "$PY" -m pip --version >/dev/null 2>&1; then
     "$UVDIR/bin/uv" venv --seed --python "$PYVER" "$VENV"
   fi
   "$PY" -m pip --version >/dev/null 2>&1 || die "could not add pip to $VENV - delete backend/.venv and run again"
+fi
+# a venv left without pip by an interrupted earlier run: add pip, else ask to rebuild
+if ! "$PY" -m pip --version >/dev/null 2>&1; then
+  warn "$VENV has no pip - adding it"
+  "$PY" -m ensurepip --upgrade >/dev/null 2>&1 || { rm -rf "$VENV"; die "$VENV was broken (no pip) and has been removed - run this script again"; }
 fi
 PIP=("$PY" -m pip --disable-pip-version-check)
 SRC=()
