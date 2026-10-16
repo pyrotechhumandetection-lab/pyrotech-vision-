@@ -11,6 +11,9 @@ backend + frontend, camera registration, GPU verification. Used by notebooks/AIV
     python scripts/colab/colab_launch.py start            backend (GPU if available) + frontend, health checks
     python scripts/colab/colab_launch.py add-camera       register relay path(s) as camera(s) (password from the environment)
     python scripts/colab/colab_launch.py status           services, GPU use by the backend, cameras, detections
+    python scripts/colab/colab_launch.py monitor [SEC]    one line per camera every SEC s (default 10) + logs/monitor.csv:
+                                                          camera / analysed / live-view fps, latency, queue, drops, GPU
+                                                          util + memory, host RAM; says WHY when the backend stops
     python scripts/colab/colab_launch.py stop             clean shutdown of everything this script started
 
 Settings come from environment variables (set them in the notebook - never write them into files):
@@ -21,6 +24,8 @@ Settings come from environment variables (set them in the notebook - never write
     RELAY_PASSWORD  printed by local_relay.py setup (store it as a Colab secret)    test-camera / add-camera
     RELAY_PATHS     cam1[,cam2...]                                                  test-camera / add-camera
     AIV_GPU         auto | on | off   (default auto: use the GPU when nvidia-smi shows one)
+    AIV_IMG_SIZE / AIV_HALF / AIV_NMS_IOU    model input size, FP16, NMS IoU - measure with scripts/colab/bench_vehicle.py
+    AIV_FRAME_MAX_LAG_MS  latency budget of the frame queue (default here 200 ms; 0 = analyse every frame in order)
 
 Nothing is exposed to the internet: the backend listens on 127.0.0.1:8000, the web UI on 127.0.0.1:5173 and is opened
 through Colab's own authenticated proxy (only your Google account), the camera stream arrives over Tailscale.
@@ -344,6 +349,10 @@ def cmd_start():
     if use_gpu:
         # explicit CUDA device -> the person/vehicle/count model runs on PyTorch CUDA (config.resolve_engine)
         env.update(AIV_DEVICE="0", AIV_ENGINE="pytorch")
+    # live view close to real time: frames that waited longer than this are skipped (counted), not analysed late
+    env.setdefault("AIV_FRAME_MAX_LAG_MS", "200")
+    log("backend settings: " + ", ".join(f"{k}={env[k]}" for k in ("AIV_DEVICE", "AIV_ENGINE", "AIV_IMG_SIZE", "AIV_HALF",
+                                                                      "AIV_NMS_IOU", "AIV_FRAME_MAX_LAG_MS") if env.get(k)))
     spawn("backend", [VENV_PY, "backend/main.py"], env=env, cwd=REPO)
     for _ in range(60):
         st, h = api("/system/health", timeout=3)
@@ -424,12 +433,87 @@ def cmd_status():
     else:
         warn("GPU present but the backend holds no GPU memory - no PyTorch model on the GPU yet (start a Human/Vehicle "
              "detection) or the CUDA build is missing (install log)")
+    g = m.get("gpuInfo") or {}
+    if g:
+        log(f"GPU {g.get('name')}: {g.get('utilPercent')}% busy, {g.get('memUsedMb')}/{g.get('memTotalMb')} MiB used "
+            f"(backend {g.get('processMemMb')} MiB, PyTorch allocated {g.get('torchAllocatedMb')} MiB)")
     for s in m.get("sessions", []):
-        stg = s.get("stageMs") or {}
-        log(f"{s['cameraId']}: {s.get('state')} {','.join(s.get('modules') or [])} - received {s.get('receivedFps')} fps, "
-            f"analysed {s.get('processedFps')} fps, model {stg.get('inference')} ms, AI {s.get('aiResolution')}")
+        log(session_line(s))
+        if s.get("lastDisconnectReason"):
+            warn(f"{s['cameraId']}: last disconnect: {s['lastDisconnectReason']}")
     if not m.get("sessions"):
         log("no camera session running")
+
+
+def session_line(s):
+    stg = s.get("stageMs") or {}
+    return (f"{s['cameraId']}: {s.get('state')} {','.join(s.get('modules') or [])} | camera {s.get('receivedFps')} fps"
+            f" | analysed {s.get('processedFps')} fps, model {stg.get('inference')} ms ({s.get('device')}, {s.get('precision')},"
+            f" {s.get('imgSize')} px) | live view {s.get('displayFps')} fps | latency {s.get('latencyMs')} ms"
+            f" (max {s.get('latencyMsMax')}) | queue {s.get('queueLen')}/{s.get('queueCapacity')}"
+            f" | dropped {s.get('framesDroppedOverload')} full + {s.get('framesStale')} stale | disconnects {s.get('disconnections')}"
+            f" | AI {s.get('aiResolution')}")
+
+
+def cmd_monitor():
+    """Sample the running system; on a backend stop, report the evidence (exit, last log lines, RAM)."""
+    every = float(sys.argv[2]) if len(sys.argv) > 2 else 10.0
+    csv_path = os.path.join(LOGS, "monitor.csv")
+    new = not os.path.exists(csv_path)
+    cols = ["time", "camera", "state", "cameraFps", "analysedFps", "displayFps", "inferenceMs", "latencyMs", "latencyMsMax",
+            "queueLen", "droppedFull", "droppedStale", "disconnections", "gpuUtil", "gpuMemMb", "backendGpuMb", "rssMb",
+            "hostRamFreeMb", "lastDisconnectReason"]
+    f = open(csv_path, "a")
+    if new:
+        f.write(",".join(cols) + "\n")
+    log(f"monitoring every {every:.0f} s (Ctrl+C / stop the cell to end) -> {csv_path}")
+    fails = 0
+    try:
+        while True:
+            ts = time.strftime("%H:%M:%S")
+            free = None
+            try:
+                free = next(int(ln.split()[1]) // 1024 for ln in open("/proc/meminfo") if ln.startswith("MemAvailable"))
+            except Exception:
+                pass
+            st, m = api("/system/metrics", timeout=8)
+            if st != 200:
+                fails += 1
+                pid = alive("backend")
+                if not pid:
+                    warn(f"{ts} BACKEND STOPPED. host RAM available {free} MB. Last log lines:")
+                    print(tail("backend", 25))
+                    t = tail("backend", 400)
+                    for sig, why in (("CUDA out of memory", "GPU memory exhausted (CUDA OOM)"), ("Killed", "killed by the OS (RAM)"),
+                                     ("Traceback", "Python exception - see the traceback above"),
+                                     ("KeyboardInterrupt", "stopped by Ctrl+C / interrupt")):
+                        if sig in t:
+                            warn("probable cause: " + why)
+                            break
+                    else:
+                        warn("no error in the log: killed from outside (Colab runtime limit / OOM killer, check 'host RAM' "
+                             "in monitor.csv before the stop) or the runtime was restarted")
+                    return
+                warn(f"{ts} backend running (PID {pid}) but /system/metrics did not answer ({fails}x) - busy or blocked")
+            else:
+                fails = 0
+                g = m.get("gpuInfo") or {}
+                for s in m.get("sessions", []):
+                    print(f"{ts} {session_line(s)} | GPU {g.get('utilPercent')}% {g.get('memUsedMb')} MiB", flush=True)
+                    row = [ts, s["cameraId"], s.get("state"), s.get("receivedFps"), s.get("processedFps"), s.get("displayFps"),
+                           s.get("inferenceMs"), s.get("latencyMs"), s.get("latencyMsMax"), s.get("queueLen"),
+                           s.get("framesDroppedOverload"), s.get("framesStale"), s.get("disconnections"), g.get("utilPercent"),
+                           g.get("memUsedMb"), g.get("processMemMb"), m.get("processRssMb"), free,
+                           '"' + str(s.get("lastDisconnectReason") or "").replace('"', "'") + '"']
+                    f.write(",".join("" if v is None else str(v) for v in row) + "\n")
+                f.flush()
+                if not m.get("sessions"):
+                    print(f"{ts} no camera session running | GPU {g.get('utilPercent')}% | host RAM free {free} MB", flush=True)
+            time.sleep(every)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        f.close()
 
 
 def cmd_stop():
@@ -444,10 +528,10 @@ def cmd_stop():
 
 
 COMMANDS = {"check": cmd_check, "install": cmd_install, "vpn": cmd_vpn, "bridge": cmd_bridge, "test-camera": cmd_test_camera,
-            "start": cmd_start, "add-camera": cmd_add_camera, "status": cmd_status, "stop": cmd_stop}
+            "start": cmd_start, "add-camera": cmd_add_camera, "status": cmd_status, "monitor": cmd_monitor, "stop": cmd_stop}
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2 or sys.argv[1] not in COMMANDS:
+    if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS or (len(sys.argv) > 2 and sys.argv[1] != "monitor"):
         print(__doc__)
         sys.exit(2)
     os.makedirs(RUN, exist_ok=True)

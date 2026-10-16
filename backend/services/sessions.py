@@ -65,6 +65,12 @@ class CameraSession:
         self.idle_since = None
         self.jpeg = None
         self.jpeg_seq = 0
+        # live view: the AI loop publishes its newest annotated frame, the encoder thread turns it into JPEG
+        self.enc_cond = threading.Condition()
+        self.enc_frame = None
+        self.enc_seq = 0
+        self.enc_thread = None
+        self.enc_stats = {"encoded": 0, "skipped": 0, "ms": 0.0}    # cumulative; rates per second in _update_rates
         self.latest_annotated = None
         self.latest_raw = None
         self.plan = None
@@ -85,7 +91,9 @@ class CameraSession:
                         "latencyMsMax": None, "framePolicy": config.FRAME_POLICY, "queueLen": 0, "queueCapacity": None,
                         "queuePeak": 0, "framesDroppedOverload": 0, "cameraGaps": 0, "aiStream": None,
                         "aiResolution": None, "viewResolution": None, "fireAnalysedFps": None, "fireSkipped": None,
-                        "stageMs": None, "sharedPersonPass": None}
+                        "stageMs": None, "sharedPersonPass": None, "displayFps": None, "displayEncodeMs": None,
+                        "displaySkipped": 0, "device": None, "precision": None, "imgSize": None,
+                        "lastDisconnectReason": None}
         self.current = {"human": {}, "vehicle": {}}             # label -> count visible in the latest frame
         self.last_detection_at = {"human": None, "vehicle": None, "count": None, "fire": None, "object": None}
         self._disconnect_alerted = False
@@ -149,6 +157,9 @@ class CameraSession:
         self.mgr.registry.update_status(self.camera_id, status="online", lastConnectedAt=now_iso(), lastError=None)
         self.thread = threading.Thread(target=self._loop, name=f"session-{self.camera_id}", daemon=True)
         self.thread.start()
+        if config.STREAM_ENCODER_THREAD:
+            self.enc_thread = threading.Thread(target=self._encode_loop, name=f"enc-{self.camera_id}", daemon=True)
+            self.enc_thread.start()
 
     # ---- main stream next to a separate AI stream (HD snapshot originals, HD viewing)
     def _separate_ai_stream(self):
@@ -214,7 +225,12 @@ class CameraSession:
             except Exception as e2:
                 raise SessionError("ENGINE_FAILURE", f"Could not load the detection model: {e2}", 500)
         self.metrics["engine"] = {"openvino": "OpenVINO", "pytorch": "PyTorch"}[engine]
-        log.info("camera %s: inference engine %s (%s)", self.camera_id, self.metrics["engine"], path if engine != "pytorch" else config.MODEL_PATH)
+        gpu = engine == "pytorch" and config.DEVICE not in (None, "cpu")
+        self.metrics["device"] = f"GPU cuda:{config.DEVICE}" if gpu else "CPU"
+        self.metrics["precision"] = "FP16" if self.pipeline.half else "FP32"
+        self.metrics["imgSize"] = config.IMG_SIZE
+        log.info("camera %s: inference engine %s on %s, %s, imgsz %d (%s)", self.camera_id, self.metrics["engine"],
+                 self.metrics["device"], self.metrics["precision"], config.IMG_SIZE, path if engine != "pytorch" else config.MODEL_PATH)
 
     def ensure_counter(self):
         """Load the Human Count engine (same shipped yolov8n weights, separate model instance)."""
@@ -327,8 +343,12 @@ class CameraSession:
 
     def close(self):
         self.stopping = True
+        with self.enc_cond:
+            self.enc_cond.notify_all()
         if self.thread:
             self.thread.join(timeout=5)
+        if self.enc_thread:
+            self.enc_thread.join(timeout=2)
         for m in ("fire", "object"):
             self.close_engine(m)
         if self.reader:
@@ -358,7 +378,7 @@ class CameraSession:
         while not self.stopping:
             if queue_mode:
                 # every decoded frame, oldest first (FIFO); the shared frame is never drawn on
-                item = self.reader.next_frame(0.2)
+                item = self.reader.next_frame(0.2, config.FRAME_MAX_LAG_MS / 1000.0 or None)
                 now = time.time()
                 if now - win["t0"] >= 1.0:
                     self._update_rates(now - win["t0"], win_read0, win)
@@ -476,8 +496,13 @@ class CameraSession:
                             self.last_detection_at[item["module"]] = now_iso()
                             # the frame that triggered the confirmation, stamped with its capture time;
                             # encoding, disk writes and JSON persistence run on the event writer thread
+                            # original = HD main-stream frame when the AI uses a substream, else the clean
+                            # (unannotated) copy of this very frame
+                            orig = self.hd_original()
+                            if orig is None:
+                                orig = self.latest_raw
                             self.mgr.events.on_confirmation(cam, item["module"], module_config(cam, item["module"]), item,
-                                                            annotated, captured_at=captured, original=self.hd_original())
+                                                            annotated, captured_at=captured, original=orig)
                 win["st_events"] += (time.perf_counter() - t_ev) * 1000.0
                 win["loop"] += (time.perf_counter() - t_loop) * 1000.0
                 win["n"] += 1
@@ -490,7 +515,15 @@ class CameraSession:
                 self.current = {"human": {}, "vehicle": {}}
 
             self.latest_annotated = annotated
-            if self.viewers > 0 and now - last_enc >= 1.0 / max(1.0, config.STREAM_MAX_FPS):
+            if self.enc_thread is not None:
+                if self.viewers > 0:          # hand over the newest frame; never waits for the encoder
+                    with self.enc_cond:
+                        if self.enc_frame is not None:
+                            self.enc_stats["skipped"] += 1      # previous frame replaced before it was encoded
+                        self.enc_frame = annotated
+                        self.enc_seq += 1
+                        self.enc_cond.notify()
+            elif self.viewers > 0 and now - last_enc >= 1.0 / max(1.0, config.STREAM_MAX_FPS):
                 last_enc = now
                 t_e = time.perf_counter()
                 self._encode(annotated)
@@ -520,7 +553,10 @@ class CameraSession:
         if r.queue is not None:
             m["queueLen"] = r.queue_len()
             m["queuePeak"] = r.queue_peak
-            m["framesDropped"] = m["framesDroppedOverload"] = r.queue_dropped
+            m["framesDropped"] = r.queue_dropped + r.queue_stale
+            m["framesDroppedOverload"] = r.queue_dropped        # queue full
+            m["framesStale"] = r.queue_stale                     # older than AIV_FRAME_MAX_LAG_MS
+            m["maxLagMs"] = config.FRAME_MAX_LAG_MS or None
         m["cameraGaps"] = r.camera_gaps
         # where the time of one analysed frame goes (ms per analysed frame, averaged over the last second)
         dn = w["st_detect_n"]
@@ -537,6 +573,13 @@ class CameraSession:
             stg["slotWait"] = round(w["gate"] / n, 1)
             stg["liveEncode"] = round(w["st_encode"] / max(1, n), 1) if w["st_encode"] else 0.0
         m["stageMs"] = stg
+        es = self.enc_stats
+        e0 = getattr(self, "_enc0", None) or {"encoded": 0, "skipped": 0, "ms": 0.0}
+        n_enc = es["encoded"] - e0["encoded"]
+        m["displayFps"] = round(n_enc / el, 1) if self.viewers > 0 else None
+        m["displayEncodeMs"] = round((es["ms"] - e0["ms"]) / n_enc, 1) if n_enc else None
+        m["displaySkipped"] = es["skipped"]
+        self._enc0 = dict(es)
         both = self.counter is not None and self.pipeline is not None and "count" in self.modules and \
             any(k in self.modules for k in ("human", "vehicle"))
         m["sharedPersonPass"] = ((w["shared"] > 0) if n else m.get("sharedPersonPass")) if both else None
@@ -583,6 +626,37 @@ class CameraSession:
             if cam:
                 self.mgr.events.on_count_alert(cam, alert, self.counter.current, annotated, captured_at=captured)
 
+    def _encode_loop(self):
+        """Live-view encoder (own thread): newest annotated frame -> JPEG, at most STREAM_MAX_FPS.
+        Frames published faster than that are replaced (counted as displaySkipped), never queued."""
+        runtime.name_thread(f"enc:{self.camera_id}")
+        period = 1.0 / max(1.0, config.STREAM_MAX_FPS)
+        last = 0.0
+        while not self.stopping:
+            with self.enc_cond:
+                while self.enc_frame is None and not self.stopping:
+                    self.enc_cond.wait(0.5)
+                if self.stopping:
+                    break
+                wait = last + period - time.time()
+                if wait > 0:              # rate limit: wait, then take whatever frame is newest by then
+                    self.enc_cond.wait(wait)
+                    if self.stopping:
+                        break
+                frame, self.enc_frame = self.enc_frame, None
+            if frame is None:
+                continue
+            last = time.time()
+            t0 = time.perf_counter()
+            try:
+                self._encode(frame)
+            except Exception:
+                log.exception("live-view encoding failed on %s", self.camera_id)
+                time.sleep(0.5)
+                continue
+            self.enc_stats["encoded"] += 1
+            self.enc_stats["ms"] += (time.perf_counter() - t0) * 1000.0
+
     def _encode(self, frame):
         h, w = frame.shape[:2]
         if w > config.STREAM_MAX_WIDTH:
@@ -597,13 +671,17 @@ class CameraSession:
     def _on_disconnect(self):
         self.state = "disconnected"
         self.metrics["disconnections"] += 1
+        r = self.reader
+        reason = f"no frame for >{max(5.0, config.CONNECT_TIMEOUT_SEC):.0f} s" + \
+            "".join(f"; {x}" for x in ((r.last_error, r.last_reopen_error) if r else ()) if x)
+        self.metrics["lastDisconnectReason"] = reason
         self.mgr.registry.update_status(self.camera_id, status="offline", lastError="Stream disconnected - reconnecting")
         cam = self.mgr.registry.get(self.camera_id)
         if cam and not self._disconnect_alerted:
             self._disconnect_alerted = True
             self.mgr.events.raise_alert(cam, "camera_disconnected", "medium", "No frames received; the reader is reconnecting.",
                                         cooldown_key=(self.camera_id, "disconnected"), cooldown_sec=300)
-        log.warning("camera %s disconnected", self.camera_id)
+        log.warning("camera %s disconnected (%s)", self.camera_id, reason)
 
     def _on_reconnect(self):
         self._disconnect_alerted = False

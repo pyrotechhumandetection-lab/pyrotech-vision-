@@ -107,6 +107,28 @@ IMG_SIZE = int(_env("AIV_IMG_SIZE", "640"))
 _dev = _env("AIV_DEVICE", "")
 DEVICE = None if _dev == "" else (int(_dev) if _dev.isdigit() else _dev)   # None = auto, "cpu", 0 = first CUDA GPU
 
+
+def _flag(name, default):
+    v = str(_env(name, default)).strip().lower()
+    return None if v in ("", "auto") else v not in ("0", "false", "no", "off")
+
+
+# GPU tuning (PyTorch on CUDA only; ignored on CPU / OpenVINO):
+#   AIV_HALF        FP16 inference. auto (default) = on when AIV_DEVICE is a CUDA device. Measure first:
+#                   scripts/colab/bench_vehicle.py compares FP32/FP16 detections on your own footage.
+#   AIV_NMS_IOU     NMS IoU threshold passed to the model (empty = Ultralytics default 0.7).
+#   AIV_GPU_WARMUP  dummy passes at model load so the first camera frames do not pay CUDA/cuDNN start-up.
+HALF = _flag("AIV_HALF", "auto")
+_iou = str(_env("AIV_NMS_IOU", "")).strip()
+NMS_IOU = float(_iou) if _iou else None
+GPU_WARMUP = int(_env("AIV_GPU_WARMUP", "3"))
+
+
+def use_half():
+    """FP16 for the PyTorch model: only on a CUDA device."""
+    cuda = DEVICE not in (None, "cpu") and str(DEVICE) != "mps"
+    return bool(cuda and (HALF is None or HALF))
+
 # Inference engine for the SAME yolov8n weights:
 #   auto     - OpenVINO when the openvino package and models/yolov8n_openvino_model exist, else PyTorch
 #   openvino - OpenVINO (falls back to PyTorch with a warning if it cannot be loaded)
@@ -159,9 +181,16 @@ CONNECT_TIMEOUT_SEC = float(_env("AIV_CONNECT_TIMEOUT", "10"))
 FRAME_POLICY = str(_env("AIV_FRAME_POLICY", "queue")).strip().lower()
 FRAME_QUEUE_SECONDS = max(0.1, float(_env("AIV_FRAME_QUEUE_SECONDS", "0.5")))
 FRAME_QUEUE_MAX_MB = max(8.0, float(_env("AIV_FRAME_QUEUE_MAX_MB", "96")))
+# Latency budget of the queue (ms, 0 = off): when the AI falls behind, queued frames older than this are
+# skipped (counted as framesStale) instead of being analysed late - keeps the live view close to real time.
+# Off by default (every frame is analysed in order, as before); scripts/colab/colab_launch.py start sets 300.
+FRAME_MAX_LAG_MS = max(0.0, float(_env("AIV_FRAME_MAX_LAG_MS", "0")))
 STREAM_JPEG_QUALITY = int(_env("AIV_STREAM_JPEG_QUALITY", "75"))
 STREAM_MAX_WIDTH = int(_env("AIV_STREAM_MAX_WIDTH", "1280"))
 STREAM_MAX_FPS = float(_env("AIV_STREAM_MAX_FPS", "15"))
+# Live-view JPEG encoding runs in its own thread per camera (enc:<camera id>) and always encodes the
+# NEWEST annotated frame, so a slow browser / encoder never delays inference. 0 = encode in the AI loop (old).
+STREAM_ENCODER_THREAD = _env("AIV_STREAM_ENCODER_THREAD", "1").strip() not in ("0", "false", "no", "off")
 PREVIEW_IDLE_RELEASE_SEC = float(_env("AIV_PREVIEW_IDLE_RELEASE", "10"))
 
 # --- events ---

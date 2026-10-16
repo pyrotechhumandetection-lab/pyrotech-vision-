@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import signal
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -124,6 +125,36 @@ class App:
             base["lastDetectionAt"] = last["timestamp"] if last else None
         return base
 
+    def _gpu_info(self, h):
+        """GPU 0 (NVML): utilisation, memory of the whole GPU and of THIS process, PyTorch allocator."""
+        nv = self._gpu
+        mem = nv.nvmlDeviceGetMemoryInfo(h)
+        util = nv.nvmlDeviceGetUtilizationRates(h)
+        info = {"name": None, "utilPercent": float(util.gpu), "memUtilPercent": float(util.memory),
+                "memUsedMb": round(mem.used / 1048576), "memTotalMb": round(mem.total / 1048576),
+                "processMemMb": None, "torchAllocatedMb": None, "torchReservedMb": None, "temperatureC": None}
+        try:
+            n = nv.nvmlDeviceGetName(h)
+            info["name"] = n.decode() if isinstance(n, bytes) else n
+            info["temperatureC"] = nv.nvmlDeviceGetTemperature(h, nv.NVML_TEMPERATURE_GPU)
+        except Exception:
+            pass
+        try:
+            me = os.getpid()
+            for p in nv.nvmlDeviceGetComputeRunningProcesses(h):
+                if p.pid == me and p.usedGpuMemory is not None:
+                    info["processMemMb"] = round(p.usedGpuMemory / 1048576)
+        except Exception:
+            pass
+        torch = sys.modules.get("torch")          # only if a model already loaded it - never import here
+        try:
+            if torch is not None and torch.cuda.is_initialized():
+                info["torchAllocatedMb"] = round(torch.cuda.memory_allocated() / 1048576)
+                info["torchReservedMb"] = round(torch.cuda.memory_reserved() / 1048576)
+        except Exception:
+            pass
+        return info
+
     def metrics(self):
         out = {"cpu": None, "ram": None, "gpu": None, "fps": None, "latencyMs": None, "cameraFps": None, "framesDropped": 0,
                "disconnections": 0, "sessions": []}
@@ -146,6 +177,7 @@ class App:
             try:
                 h = self._gpu.nvmlDeviceGetHandleByIndex(0)
                 out["gpu"] = float(self._gpu.nvmlDeviceGetUtilizationRates(h).gpu)
+                out["gpuInfo"] = self._gpu_info(h)
             except Exception:
                 out["gpu"] = None
         fps, lat, cam_fps = [], [], []
@@ -165,7 +197,10 @@ class App:
         out["runtime"] = {**runtime.snapshot(), "gate": runtime.GATE.stats(), "errors": runtime.STATE["errors"]}
         ws = self.events.writer_stats
         out["eventWriter"] = {"jobs": ws["jobs"], "msAvg": round(ws["msTotal"] / ws["jobs"], 1) if ws["jobs"] else None,
-                              "msMax": round(ws["msMax"], 1), "queued": self.events._jobs.qsize()}
+                              "msMax": round(ws["msMax"], 1), "queued": self.events._jobs.qsize(),
+                              # detection snapshots: capture of the triggering frame -> files written
+                              "snapshotCaptureToSavedMsAvg": round(ws["snapMsTotal"] / ws["snapN"], 1) if ws.get("snapN") else None,
+                              "snapshotCaptureToSavedMsMax": round(ws["snapMsMax"], 1) if ws.get("snapN") else None}
         out["fps"] = round(sum(fps), 1) if fps else None
         out["latencyMs"] = round(sum(lat) / len(lat), 1) if lat else None
         out["cameraFps"] = round(sum(cam_fps), 1) if cam_fps else None

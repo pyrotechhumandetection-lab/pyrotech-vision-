@@ -28,7 +28,7 @@
     error: ['badge-danger', 'Backend error']
   };
 
-  let root, mod, camId, status, cfgResp, timer, evTimer, busy = false, streamOn = false, unsub = [], lastEvSig = '';
+  let root, mod, camId, status, cfgResp, timer, evTimer, busy = false, streamOn = false, unsub = [], lastEvSig = '', pollFails = 0, retryN = 0, retryTimer = null;
 
   function prefKey() { return 'detCamera_' + mod.id; }
 
@@ -83,8 +83,16 @@
     if (!camId) { status = { state: 'no_camera' }; cfgResp = null; paint(); renderSettings(); renderEvents([]); return; }
     try {
       status = await api.detection.status(mod.id, camId);
+      pollFails = 0;
       if (withConfig) { cfgResp = await api.detection.config(mod.id, camId); renderSettings(); loadEvents(); }
     } catch (e) {
+      // a single slow / failed status poll keeps the running stream and the last status (no flicker);
+      // the error is shown after 3 failures in a row or when it is a real backend answer (HTTP error)
+      pollFails++;
+      if (streamOn && status && status.startedAt && e.kind !== 'http' && pollFails < 3) {
+        console.warn('[PYROTECH] status poll failed (' + pollFails + '), keeping the live view:', e.message);
+        return;
+      }
       status = { state: 'error', error: { code: e.code || e.kind, message: e.message } };
     }
     paint();
@@ -157,8 +165,10 @@
         ? '<dt>Fire model FPS</dt><dd>' + fmt(m.fireAnalysedFps, ' fps analysed') + (s.fire && s.fire.engine ? ' <span class="dim">· ' + esc(s.fire.engine) + ', ' + esc(s.fire.inferenceMs) + ' ms</span>' : '') +
           (m.fireSkipped ? ' <span class="dim">· ' + esc(m.fireSkipped) + ' frames skipped while the model was busy</span>' : '') + '</dd>'
         : '<dt>AI processing FPS</dt><dd>' + fmt(m.processingFps, ' fps') + '</dd>') +
+      '<dt>Live view FPS</dt><dd>' + fmt(m.displayFps, ' fps sent') + (m.displayEncodeMs != null ? ' <span class="dim">· ' + esc(m.displayEncodeMs) + ' ms JPEG encode (own thread)</span>' : '') + '</dd>' +
+      (m.lastDisconnectReason ? '<dt>Last disconnect</dt><dd class="dim">' + esc(m.lastDisconnectReason) + '</dd>' : '') +
       '<dt>Frames</dt><dd>' + framesLine(m) + '</dd>' +
-      '<dt>AI inference time</dt><dd>' + fmt(m.inferenceMs, ' ms') + (m.inferenceMsRecent != null ? ' <span class="dim">· latest ' + esc(m.inferenceMsRecent) + ' ms</span>' : '') + (m.engine ? ' <span class="dim">· ' + esc(m.engine) + ' (CPU)</span>' : '') + (m.loopMs != null ? ' <span class="dim">· ' + esc(m.loopMs) + ' ms per frame incl. tracking/drawing</span>' : '') + '</dd>' +
+      '<dt>AI inference time</dt><dd>' + fmt(m.inferenceMs, ' ms') + (m.inferenceMsRecent != null ? ' <span class="dim">· latest ' + esc(m.inferenceMsRecent) + ' ms</span>' : '') + (m.engine ? ' <span class="dim">· ' + esc(m.engine) + ' (' + esc(m.device || 'CPU') + (m.precision ? ', ' + esc(m.precision) : '') + (m.imgSize ? ', ' + esc(m.imgSize) + ' px' : '') + ')</span>' : '') + (m.loopMs != null ? ' <span class="dim">· ' + esc(m.loopMs) + ' ms per frame incl. tracking/drawing</span>' : '') + '</dd>' +
       (m.framePolicy === 'queue'
         ? '<dt>Queue / latency</dt><dd>' + esc(m.queueLen || 0) + ' of ' + fmt(m.queueCapacity, ' frames') + ' waiting <span class="dim">(peak ' + esc(m.queuePeak || 0) + ')</span> · ' + fmt(m.latencyMs, ' ms') + ' receive → analysed' + (m.latencyMsMax != null ? ' <span class="dim">(max ' + esc(m.latencyMsMax) + ' ms)</span>' : '') + (m.disconnections ? ' <span class="dim">· ' + m.disconnections + ' disconnection(s)</span>' : '') + '</dd>'
         : '<dt>Frame age at analysis</dt><dd>' + fmt(m.frameAgeMs, ' ms') + (m.disconnections ? ' <span class="dim">· ' + m.disconnections + ' disconnection(s)</span>' : '') + '</dd>') +
@@ -204,9 +214,15 @@
     el.querySelector('#dl-img').addEventListener('error', function () {
       if (!streamOn) return;
       detachStream();
+      // reconnect automatically (2, 4, 8 … max 15 s) while detection is still running
+      retryN = Math.min(retryN + 1, 4);
+      const wait = Math.min(15, Math.pow(2, retryN));
       const ph = root && root.querySelector('#dl-ph');
-      if (ph) ph.innerHTML = icon('wifiOff', 26) + '<b>Stream interrupted</b><span>The MJPEG stream closed. Use Refresh Stream to reconnect.</span>';
+      if (ph) ph.innerHTML = icon('wifiOff', 26) + '<b>Stream interrupted</b><span>Reconnecting in ' + wait + ' s… (or use Refresh Stream)</span>';
+      clearTimeout(retryTimer);
+      retryTimer = setTimeout(function () { if (root && !streamOn) refresh(false); }, wait * 1000);
     });
+    el.querySelector('#dl-img').addEventListener('load', function () { retryN = 0; });
     window.AV.icons.hydrate(el);
     renderCameraSelect();
   }
@@ -515,7 +531,7 @@
   }
 
   function destroy() {
-    clearInterval(timer); clearInterval(evTimer);
+    clearInterval(timer); clearInterval(evTimer); clearTimeout(retryTimer);
     detachStream();
     unsub.forEach(function (f) { f(); }); unsub = [];
     root = null;

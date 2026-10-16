@@ -282,12 +282,22 @@ class EventStore:
         if want_snap:
             try:
                 extra = {"trackId": item.get("trackId"), "box": item.get("box"), "detectedAt": event["timestamp"]}
+                if item.get("hits") is not None:
+                    extra["trackHits"] = item["hits"]            # frames of this track up to the confirming frame
+                if item.get("firstSeenToConfirmMs") is not None:
+                    extra["firstSeenToConfirmMs"] = item["firstSeenToConfirmMs"]   # tracker confirmation delay
                 if module == "vehicle":
                     extra["vehicleClass"] = VEHICLE_CATEGORY.get(label)
                 snap = self.save_snapshot(frame, camera, module, label, confidence=item.get("confidence"), event_id=event["id"],
                                           severity=acfg.get("severity") if want_alert else None, captured_at=captured_at, extra=extra,
                                           original=original)
                 event["snapshotId"], event["image"] = snap["id"], snap["image"]
+                if captured_at:      # capture of the triggering frame -> both JPEGs on disk
+                    d = (time.time() - captured_at) * 1000.0
+                    ws = self.writer_stats
+                    ws["snapN"] = ws.get("snapN", 0) + 1
+                    ws["snapMsTotal"] = ws.get("snapMsTotal", 0.0) + d
+                    ws["snapMsMax"] = max(ws.get("snapMsMax", 0.0), d)
             except OSError as e:
                 log.error("snapshot failed for %s: %s", camera["id"], e)
                 self.raise_alert(camera, "snapshot_failed", "medium", f"Could not save snapshot: {e}",

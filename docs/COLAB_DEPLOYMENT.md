@@ -146,3 +146,51 @@ scripts\colab\relay-windows.cmd show        # RELAY_HOST + RELAY_PASSWORD for th
 
 The relay listens only on the PC's Tailscale address, and the firewall rule allows port 8554 only from Tailscale
 addresses (100.64.0.0/10). Keep the PC awake (Power settings: sleep = never) while Colab runs.
+
+## Performance on the T4 (vehicle detection first)
+
+### Bottlenecks found (measured or reproduced)
+
+| # | Symptom | Cause | Fix |
+|---|---|---|---|
+| 1 | Live view tears down / "Backend not connected" now and then | ONE failed `/system/health` (5 s timeout through the Colab proxy) marked the backend lost; ONE failed status poll replaced the running stream by a placeholder and the next poll opened a new MJPEG connection (flicker). Reproduced with a browser test that fails one request. | health: one retry before "lost"; live view keeps the stream and the last status on a single failed poll (error after 3 in a row); MJPEG error → automatic reconnect (2, 4, 8 … 15 s) |
+| 2 | Picture ~0.5 s behind the camera | queue mode analyses every frame in order; when the AI is slower than the camera the 0.5 s queue stays full, so every analysed/displayed frame is 0.5 s old | latency budget `AIV_FRAME_MAX_LAG_MS` (Colab launcher: 200): older queued frames are skipped and counted as `framesStale` |
+| 3 | Inference shares its thread with JPEG encoding | live-view encoding ran inside the AI loop | encoder thread per camera (`enc:<camera>`), always the newest annotated frame, never queued |
+| 4 | Camera "disconnected" every ~10 s (Colab logs) | no frame for 10 s: the PC's upload is too small for the main streams (`cabac decode` errors = damaged H.264 after the relay dropped data) | use the 640x360 substream on the relay; the disconnect reason is now logged and shown (`lastDisconnectReason`) |
+| 5 | First frames slow on the GPU | CUDA / cuDNN start-up on the first camera frame | warm-up passes at model load (`AIV_GPU_WARMUP`) |
+
+Test machine (2-core x86, CPU, 1080p vehicle stream, one live viewer, same code with the switch off/on):
+
+| | analysed fps | receive → analysed latency |
+|---|---|---|
+| before (encode in AI loop, no budget) | 13.8 | 541 ms |
+| encoder thread | 14.7 | 543 ms |
+| + budget 300 ms | 15.1 | 340 ms |
+| + budget 100 ms | 14.8 | 147 ms |
+
+GPU numbers are **not** measured here (no GPU) - measure them on the T4 with cell 9c/9d.
+
+### Monitoring (all measured separately)
+
+`colab_launch.py status` / `monitor` and `/api/system/metrics`: camera fps (`receivedFps`), inference fps
+(`processedFps`), live-view fps (`displayFps`, frames sent), model ms (`stageMs.inference`), latency (`latencyMs`),
+queue (`queueLen`/`queueCapacity`), drops (`framesDroppedOverload` queue full, `framesStale` over budget), GPU
+utilisation + memory (`gpuInfo`: whole GPU, this process, PyTorch allocator), device / FP16 / input size per camera,
+snapshot capture → saved time (`eventWriter.snapshotCaptureToSavedMs*`).
+
+### Vehicle snapshots
+
+The snapshot is the frame on which the tracker confirms the vehicle (no later frame is waited for); it is saved
+with its capture time and camera, as the annotated image plus `_original.jpg` - the clean copy of the same frame
+(or the HD main-stream frame when the AI uses a substream). One snapshot per vehicle track, plus the per-label
+cooldown of the module settings. Each snapshot records `trackHits` and `firstSeenToConfirmMs` (how long the
+confirmation took).
+
+### Tuning input size / FP16 / thresholds
+
+`scripts/colab/bench_vehicle.py` (cells 9c/9d) measures, on frames from your camera: ms per frame and fps for
+imgsz 640/960/1280 x FP32/FP16, GPU memory, vehicles and small vehicles per frame, FP16-vs-FP32 agreement. With
+labelled frames (`--labels`) it computes precision / recall / F1 / false positives per frame for a confidence and
+NMS grid and suggests the best setting that reaches the target fps without more false positives than today.
+Without labels it reports only a proxy and does not suggest thresholds. Apply with `%env AIV_IMG_SIZE=960`,
+`%env AIV_HALF=1`, `%env AIV_NMS_IOU=0.6` before `start` (stop first).

@@ -957,3 +957,79 @@ class PerfRuntimeTests(unittest.TestCase):
         self.assertFalse(t.judge(before, same_, 0.05)[0])
         self.assertFalse(t.judge(before, lost, 0.05)[0])
         self.assertFalse(t.judge(before, other_src, 0.05)[0])
+
+
+class StreamLatencyTests(unittest.TestCase):
+    """Colab/T4 work: queue latency budget, live-view encoder thread, FP16 switch."""
+
+    def _reader(self):
+        from collections import deque
+        import threading
+        from backend.detection.frame_reader import LatestFrameReader
+        r = LatestFrameReader.__new__(LatestFrameReader)       # no camera: only the queue part
+        r.lock = threading.Lock()
+        r.qcond = threading.Condition(r.lock)
+        r.queue, r.queue_stale = deque(), 0
+        return r
+
+    def test_latency_budget_skips_stale_keeps_newest(self):
+        import time as _t
+        r = self._reader()
+        now = _t.time()
+        for i, age in enumerate((1.0, 0.8, 0.5, 0.05, 0.01)):
+            r.queue.append((i, None, now - age))
+        self.assertEqual(r.next_frame(0, max_age=0.2)[0], 3)      # 3 frames older than 200 ms skipped
+        self.assertEqual(r.queue_stale, 3)
+        r.queue.clear()
+        r.queue.append((9, None, now - 5))
+        self.assertEqual(r.next_frame(0, max_age=0.2)[0], 9)      # the only (newest) frame is never discarded
+        r.queue.extend([(1, None, now - 1), (2, None, now - 0.9)])
+        self.assertEqual(r.next_frame(0)[0], 1)                    # no budget: strict FIFO as before
+
+    def test_half_only_on_cuda(self):
+        old_dev, old_half = config.DEVICE, config.HALF
+        try:
+            for dev, half, want in ((None, None, False), ("cpu", True, False), (0, None, True), (0, False, False), (0, True, True)):
+                config.DEVICE, config.HALF = dev, half
+                self.assertEqual(config.use_half(), want, (dev, half))
+        finally:
+            config.DEVICE, config.HALF = old_dev, old_half
+
+    def test_encoder_thread_publishes_newest_frame(self):
+        import threading
+        import time as _t
+        import numpy as np
+        from backend.services.sessions import CameraSession
+
+        class Reg:
+            def get(self, cid):
+                return {"id": cid}
+
+        class Mgr:
+            registry = Reg()
+        s = CameraSession(Mgr(), {"id": "T1"})
+        s.enc_thread = threading.Thread(target=s._encode_loop, daemon=True)
+        s.enc_thread.start()
+        try:
+            for v in (10, 200):        # published faster than STREAM_MAX_FPS: only the newest is encoded
+                with s.enc_cond:
+                    if s.enc_frame is not None:
+                        s.enc_stats["skipped"] += 1
+                    s.enc_frame = np.full((90, 160, 3), v, np.uint8)
+                    s.enc_seq += 1
+                    s.enc_cond.notify()
+            for _ in range(100):
+                if s.jpeg is not None:
+                    break
+                _t.sleep(0.02)
+            import cv2
+            img = cv2.imdecode(np.frombuffer(s.jpeg, np.uint8), cv2.IMREAD_COLOR)
+            self.assertGreater(int(img.mean()), 150)               # the newer (bright) frame was shown
+            self.assertEqual(s.enc_stats["encoded"], 1)
+            self.assertEqual(s.enc_stats["skipped"], 1)
+        finally:
+            s.stopping = True
+            with s.enc_cond:
+                s.enc_cond.notify_all()
+            s.enc_thread.join(2)
+        self.assertFalse(s.enc_thread.is_alive())

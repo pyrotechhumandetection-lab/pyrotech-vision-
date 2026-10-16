@@ -67,6 +67,17 @@ VEHICLE_LABELS = ("2-Wheeler", "4-Wheeler", "Bus", "Truck")
 LABEL_TO_COCO = {"Person": [0], "2-Wheeler": [1, 3], "4-Wheeler": [2], "Bus": [5], "Truck": [7]}
 
 
+def fp16_kwargs():
+    """FP16 inference argument for the installed Ultralytics: 'quantize' (8.4+, 'half' is deprecated there)."""
+    try:
+        from ultralytics.cfg import DEFAULT_CFG_DICT
+        if "quantize" in DEFAULT_CFG_DICT:
+            return {"quantize": "fp16"}
+    except Exception:
+        pass
+    return {"half": True}
+
+
 def label_module(label):
     return "human" if label in HUMAN_LABELS else "vehicle"
 
@@ -129,15 +140,38 @@ class PersonVehiclePipeline:
         self.tracker_config = str(tracker_config)
         self.img_size = img_size
         self.device = device
+        from backend import config as _cfg
+        # FP16 / NMS IoU only for the PyTorch model on a CUDA device (see config.use_half)
+        self.half = engine == "pytorch" and _cfg.use_half()
+        self.nms_iou = _cfg.NMS_IOU
         self.far_model = None
         self.last_stages = {}        # ms of the last frame: preprocess / inference / postprocess / tracking / gateWait
         self.shared_persons = None   # person detections of the last frame for Human Count (see process(share_person_conf))
         self._share = None           # active share request during one model call
         self._share_cb_installed = False
         self.reset_tracking()
+        if self.device not in (None, "cpu") and engine == "pytorch":
+            self._warmup(_cfg.GPU_WARMUP)
+
+    def _warmup(self, n):
+        """A few predict() passes on a blank frame: CUDA context, cuDNN algorithm search and FP16 conversion
+        happen here and not on the first camera frames (which otherwise pile up in the queue)."""
+        if n <= 0:
+            return
+        t0 = time.perf_counter()
+        blank = np.zeros((self.img_size * 9 // 16, self.img_size, 3), dtype=np.uint8)    # 16:9 camera shape
+        try:
+            for _ in range(n):
+                self.model.predict(blank, imgsz=self.img_size, device=self.device, verbose=False,
+                                   **(fp16_kwargs() if self.half else {}))
+            log.info("GPU warm-up: %d passes in %.0f ms (imgsz %d, %s)", n, (time.perf_counter() - t0) * 1000.0,
+                     self.img_size, "FP16" if self.half else "FP32")
+        except Exception as e:      # never block the session on the warm-up; the real call reports errors
+            log.warning("GPU warm-up failed: %s", e)
 
     def reset_tracking(self):
         self.hit_counts = {}
+        self.first_seen = {}
         self.label_votes = {}
         self.vote_conf = {}
         self.locked_label = {}
@@ -228,6 +262,10 @@ class PersonVehiclePipeline:
         kwargs = dict(imgsz=self.img_size, conf=conf, classes=classes, verbose=False)
         if self.device is not None:
             kwargs["device"] = self.device
+        if self.half:
+            kwargs.update(fp16_kwargs())
+        if self.nms_iou is not None:
+            kwargs["iou"] = self.nms_iou
         t0 = time.perf_counter()
         try:
             with gated() as slot:
@@ -257,6 +295,7 @@ class PersonVehiclePipeline:
             all_boxes.append((track_id, cls_id, x1, y1, x2, y2, conf))
 
             self.hit_counts[track_id] = self.hit_counts.get(track_id, 0) + 1
+            self.first_seen.setdefault(track_id, time.time())
             if track_id not in self.locked_label:
                 votes = self.label_votes.setdefault(track_id, {})
                 votes[frame_label] = votes.get(frame_label, 0) + 1
@@ -311,7 +350,10 @@ class PersonVehiclePipeline:
                 if in_zone:
                     new_confirmations.append({"trackId": track_id, "label": label, "module": label_module(label),
                                               "confidence": round(conf, 3), "zone": zone_name,
-                                              "box": [round(x1 / w, 4), round(y1 / h, 4), round(x2 / w, 4), round(y2 / h, 4)]})
+                                              "box": [round(x1 / w, 4), round(y1 / h, 4), round(x2 / w, 4), round(y2 / h, 4)],
+                                              # frames / time from the track's first box to this confirming frame
+                                              "hits": self.hit_counts[track_id],
+                                              "firstSeenToConfirmMs": round((time.time() - self.first_seen.get(track_id, time.time())) * 1000.0)})
             elif confirmed:
                 self.confirmed_ids[label].add(track_id)
 

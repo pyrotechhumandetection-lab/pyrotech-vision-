@@ -49,9 +49,16 @@ class LatestFrameReader:
         self.queue_cap = 0
         self.queue_dropped = 0       # frames discarded because the queue was full (application-side loss)
         self.queue_peak = 0
+        self.queue_stale = 0         # frames discarded because they exceeded the latency budget (next_frame max_age)
         self.qcond = threading.Condition(self.lock)
         self.camera_gaps = 0         # frames missing in the stream's timestamps (camera / network side)
         self._last_pts = None
+        # why the stream was lost / how reconnects went (logged, and reported in the session metrics)
+        self.last_error = None       # why the last read failed
+        self.last_reopen_error = None   # last failed reopen (cleared when the stream is open again)
+        self.frames_since_open = 0
+        self.opened_at = None
+        self.reconnect_attempts = 0
         self.cap = self._open()
         self.thread = threading.Thread(target=self._update, name=tag or "frame-reader", daemon=True)
         self.thread.start()
@@ -69,6 +76,8 @@ class LatestFrameReader:
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         if cap.isOpened():
             self.opened_once = True
+            self.opened_at = time.time()
+            self.frames_since_open = 0
             try:
                 fps = float(cap.get(cv2.CAP_PROP_FPS) or 0)
                 self.nominal_fps = round(fps, 2) if 0 < fps < 241 else None
@@ -85,7 +94,15 @@ class LatestFrameReader:
                 time.sleep(0.5)
                 if self.stopped:
                     break
+                self.reconnect_attempts += 1
                 self.cap = self._open()
+                if self.cap.isOpened():
+                    log.info("[%s] stream reopened (attempt %d)", self.tag or "reader", self.reconnect_attempts)
+                    self.reconnect_attempts, self.last_reopen_error = 0, None
+                else:
+                    self.last_reopen_error = "reopen failed (attempt %d)" % self.reconnect_attempts
+                    if self.reconnect_attempts in (1, 2, 5) or self.reconnect_attempts % 20 == 0:   # no log flood
+                        log.warning("[%s] %s", self.tag or "reader", self.last_reopen_error)
                 continue
             c0 = time.thread_time()
             ok, frame = self.cap.read()
@@ -105,6 +122,7 @@ class LatestFrameReader:
                     self.latest_frame = frame
                     self.seq += 1
                     self.frames_read += 1
+                    self.frames_since_open += 1
                     self.last_frame_time = self.latest_time = time.time()
                     self._count_gap(pts)
                     if self.queue is not None:
@@ -119,7 +137,13 @@ class LatestFrameReader:
             if not ok:
                 if was_ok:
                     self.disconnects += 1
-                    log.warning("stream read failed - reconnecting")
+                    since = time.time() - self.last_frame_time if self.last_frame_time else None
+                    up = time.time() - self.opened_at if self.opened_at else None
+                    # OpenCV gives no error code: read() returns False on a socket close, a read timeout
+                    # (CAP_PROP_READ_TIMEOUT_MSEC = open timeout) or an unrecoverable decode error
+                    self.last_error = ("read failed after %d frames / %.0f s connected; last frame %.1f s before"
+                                       % (self.frames_since_open, up or 0, since or 0))
+                    log.warning("[%s] stream read failed - reconnecting (%s)", self.tag or "reader", self.last_error)
                 self.cap.release()
                 # original: sleep 2 s then reopen; sliced so stop() is responsive
                 for _ in range(20):
@@ -127,7 +151,17 @@ class LatestFrameReader:
                         break
                     time.sleep(0.1)
                 if not self.stopped:
+                    t_o = time.time()
+                    self.reconnect_attempts += 1
                     self.cap = self._open()
+                    if self.cap.isOpened():
+                        log.info("[%s] stream reopened in %.1f s (attempt %d)", self.tag or "reader",
+                                 time.time() - t_o, self.reconnect_attempts)
+                        self.reconnect_attempts = 0
+                        self.last_reopen_error = None
+                    else:
+                        self.last_reopen_error = "reopen failed (attempt %d, %.1f s)" % (self.reconnect_attempts, time.time() - t_o)
+                        log.warning("[%s] %s", self.tag or "reader", self.last_reopen_error)
 
     def _count_gap(self, pts):
         """Frames missing between two consecutive stream timestamps (camera / network side)."""
@@ -148,12 +182,20 @@ class LatestFrameReader:
             if self.queue is None:
                 self.queue = deque()
 
-    def next_frame(self, timeout=0.2):
+    def next_frame(self, timeout=0.2, max_age=None):
         """Oldest queued (seq, frame, capture time) or None. The frame is shared with the reader - never
-        draw on it (copy first)."""
+        draw on it (copy first).
+        max_age (s): latency budget - queued frames older than this are discarded (counted in queue_stale)
+        as long as a newer frame is queued, so the analysed / displayed picture never falls further behind
+        the camera than the budget when the AI is slower than the stream. The newest frame is always kept."""
         with self.qcond:
             if not self.queue:
                 self.qcond.wait(timeout)
+            if max_age and len(self.queue) > 1:
+                limit = time.time() - max_age
+                while len(self.queue) > 1 and self.queue[0][2] < limit:
+                    self.queue.popleft()
+                    self.queue_stale += 1
             return self.queue.popleft() if self.queue else None
 
     def queue_len(self):

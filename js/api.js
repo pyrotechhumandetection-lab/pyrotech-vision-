@@ -110,15 +110,26 @@
 
   async function checkHealth() {
     status.checking = true;
-    try {
-      const info = await request('GET', ENDPOINTS.health, undefined, { timeout: 5000 });
-      status.connected = !!info && (info.status === 'ok' || info.ok === true || info.healthy === true);
-      status.error = status.connected ? null : 'Health endpoint did not report an OK status.';
-      status.info = info;
-    } catch (e) {
-      status.connected = false;
-      status.error = e.message;
-      status.info = null;
+    // A connected backend is declared lost only after two failed checks in a row: one slow answer (busy GPU
+    // box, Colab proxy round trip) must not tear down every live stream and show "connection lost".
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const info = await request('GET', ENDPOINTS.health, undefined, { timeout: attempt ? 10000 : 6000 });
+        status.connected = !!info && (info.status === 'ok' || info.ok === true || info.healthy === true);
+        status.error = status.connected ? null : 'Health endpoint did not report an OK status.';
+        status.info = info;
+        break;
+      } catch (e) {
+        if (attempt === 0 && status.connected && e.kind !== 'http') {
+          console.warn('[PYROTECH] health check failed once, retrying:', e.message);
+          await new Promise(function (r) { setTimeout(r, 1500); });
+          continue;
+        }
+        status.connected = false;
+        status.error = e.message;
+        status.info = null;
+        break;
+      }
     }
     status.checking = false;
     status.checked = true;
