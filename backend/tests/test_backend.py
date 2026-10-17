@@ -1033,3 +1033,27 @@ class StreamLatencyTests(unittest.TestCase):
                 s.enc_cond.notify_all()
             s.enc_thread.join(2)
         self.assertFalse(s.enc_thread.is_alive())
+
+
+class EventVersionTests(unittest.TestCase):
+    """/events/version 'edits': unchanged while records are only added, changes on acknowledge / delete."""
+
+    def test_edits_only_on_change_of_existing_records(self):
+        import tempfile as _tf
+        from pathlib import Path as _P
+        from backend.services import events as ev
+        old = config.DATA_DIR, config.SNAPSHOT_DIR
+        d = _tf.mkdtemp()
+        config.DATA_DIR, config.SNAPSHOT_DIR = _P(d), _P(d) / "snapshots"
+        try:
+            st = ev.EventStore()
+            cam = {"id": "C1", "name": "C1", "sourceUrl": "rtsp://x/1"}
+            a = st.raise_alert(cam, "camera_disconnected", "medium", "test")
+            v1, e1 = st.version, st.edits
+            st.raise_alert(cam, "camera_disconnected", "medium", "test 2")
+            self.assertGreater(st.version, v1)
+            self.assertEqual(st.edits, e1)                 # new record only: incremental fetch is enough
+            st.acknowledge(a["id"])
+            self.assertEqual(st.edits, e1 + 1)             # existing record changed: pollers reload
+        finally:
+            config.DATA_DIR, config.SNAPSHOT_DIR = old

@@ -25,6 +25,11 @@
     errors: {}
   };
   const listeners = {};
+  let lastEventsEdits = null;       // /events/version "edits" token: changes when held records were changed / deleted
+  let lastFullEventSync = 0;
+  const EV_KEYS = ['alerts', 'detections', 'snapshots'];
+  const EV_INCREMENT = 50;           // newest records fetched per poll while only NEW records were added
+  const EV_FULL_EVERY_MS = 30 * 60 * 1000;   // safety: full reload at most every 30 min
   let lastEventsVersion = null;     // /events/version token of the alert / detection / snapshot lists held
 
   function load() {
@@ -229,6 +234,44 @@
   }
 
   // ---------- backend sync ----------
+  function evList(d) { return (Array.isArray(d) ? d : (d && d.items) || []).map(fromBackend); }
+  /** Newest-first top records merged into the held list; null = a gap (more new records than fetched). */
+  function mergeNewest(cur, fresh) {
+    if (fresh.length < EV_INCREMENT) return fresh;            // the backend holds fewer: this IS the whole list
+    const have = new Set(cur.map(function (r) { return r.id; }));
+    if (!fresh.some(function (r) { return have.has(r.id); })) return null;
+    const ids = new Set(fresh.map(function (r) { return r.id; }));
+    return fresh.concat(cur.filter(function (r) { return !ids.has(r.id); })).slice(0, 5000);
+  }
+  /** Alert / detection / snapshot lists: ONE request at a time (never three large downloads in parallel,
+   *  which used to block the health / status checks behind them on a slow link). Only the newest
+   *  EV_INCREMENT records are fetched while records are only being added; the whole list is reloaded when
+   *  records were acknowledged / deleted, the backend restarted, a gap is found, or every 30 min. */
+  let evSyncRunning = null;
+  function syncEventLists(info) {      // one sync at a time (the event poll and the 30 s refresh can meet)
+    if (!evSyncRunning) evSyncRunning = doSyncEventLists(info).finally(function () { evSyncRunning = null; });
+    return evSyncRunning;
+  }
+  async function doSyncEventLists(info) {
+    const edits = info && info.edits !== undefined ? info.edits : null;
+    const full = edits === null || edits !== lastEventsEdits || Date.now() - lastFullEventSync > EV_FULL_EVERY_MS;
+    let failed = false;
+    for (const k of EV_KEYS) {
+      try {
+        let next = null;
+        if (!full && remote[k]) next = mergeNewest(remote[k], evList(await api[k].list({ limit: EV_INCREMENT })));
+        if (next === null) next = evList(await api[k].list({ limit: 5000 }));
+        remote[k] = next;
+        delete remote.errors[k];
+      } catch (e) { remote.errors[k] = e.message; failed = true; }
+    }
+    if (!failed) {
+      lastEventsEdits = edits;
+      if (full) lastFullEventSync = Date.now();
+    }
+    return !failed;
+  }
+
   async function refreshFromBackend(which) {
     if (!api.status.connected) {
       ['cameras', 'alerts', 'snapshots', 'detections', 'modules', 'metrics', 'storage'].forEach(function (k) { remote[k] = null; });
@@ -243,12 +286,11 @@
       storage: function () { return api.system.storage(); }
     };
     let keys = which || Object.keys(tasks);
-    let evVersion = null;
-    if (!which) {   // periodic full refresh: skip the large event lists when nothing changed
-      try { evVersion = (await api.system.eventsVersion()).version || null; } catch (e) { evVersion = null; }
-      if (evVersion && evVersion === lastEventsVersion && remote.alerts && remote.detections && remote.snapshots) {
-        keys = keys.filter(function (k) { return ['alerts', 'detections', 'snapshots'].indexOf(k) < 0; });
-      }
+    let evVersion = null, evInfo = null, evSync = false;
+    if (!which) {   // periodic refresh: event lists only when changed, and then incrementally (syncEventLists)
+      try { evInfo = await api.system.eventsVersion(); evVersion = (evInfo && evInfo.version) || null; } catch (e) { evInfo = evVersion = null; }
+      evSync = !(evVersion && evVersion === lastEventsVersion && remote.alerts && remote.detections && remote.snapshots);
+      if (!evSync) keys = keys.filter(function (k) { return EV_KEYS.indexOf(k) < 0; });
     }
     const sigOf = function (k) {
       const v = remote[k];
@@ -261,7 +303,7 @@
     keys.forEach(function (k) { before[k] = sigOf(k); hadData[k] = remote[k] !== null && remote[k] !== undefined; });
     const errBefore = JSON.stringify(remote.errors);
     const structBefore = camSig(remote.cameras, CAM_STRUCT);
-    await Promise.all(keys.map(async function (k) {
+    await Promise.all(keys.filter(function (k) { return which || EV_KEYS.indexOf(k) < 0; }).map(async function (k) {
       try {
         const data = await tasks[k]();
         remote[k] = Array.isArray(data) ? data.map(fromBackend)
@@ -272,7 +314,7 @@
         remote.errors[k] = e.message;
       }
     }));
-    if (!which && evVersion && ['alerts', 'detections', 'snapshots'].every(function (k) { return !remote.errors[k]; })) lastEventsVersion = evVersion;
+    if (evSync && await syncEventLists(evInfo) && evVersion) lastEventsVersion = evVersion;
     // Emit only what changed, so periodic refreshes do not re-render pages (and restart live streams)
     // when nothing is new. First load or a changed error state still re-renders everything.
     if (keys.some(function (k) { return !hadData[k]; }) || JSON.stringify(remote.errors) !== errBefore) { emit('backend'); return; }
@@ -328,21 +370,17 @@
     if (!api.status.connected) return;
     // Download the alert / detection / snapshot lists only when the backend reports a change
     // (they are up to 5000 records each; re-sending them every 5 s loads a busy backend).
-    let version = null;
+    let version = null, info = null;
     try {
-      version = (await api.system.eventsVersion()).version || null;
+      info = await api.system.eventsVersion();
+      version = (info && info.version) || null;
       if (version && version === lastEventsVersion && remote.alerts && remote.detections && remote.snapshots) return;
-    } catch (e) { version = null; }   // older backend without /events/version: full refresh as before
-    let failed = false;
+    } catch (e) { version = info = null; }   // older backend without /events/version: full reload as before
     const sig = function (list) { return list ? list.length + '|' + (list[0] && (list[0].id + list[0].status)) + '|' + list.filter(function (a) { return a.status === 'acknowledged'; }).length : 'x'; };
     const before = { alerts: sig(remote.alerts), detections: sig(remote.detections), snapshots: sig(remote.snapshots) };
-    const keys = ['alerts', 'detections', 'snapshots'];
-    await Promise.all(keys.map(async function (k) {
-      try { const d = await api[k === 'detections' ? 'detections' : k].list({ limit: 5000 }); remote[k] = (Array.isArray(d) ? d : (d && d.items) || []).map(fromBackend); delete remote.errors[k]; }
-      catch (e) { remote.errors[k] = e.message; failed = true; }
-    }));
-    lastEventsVersion = failed ? null : version;
-    keys.forEach(function (k) { if (sig(remote[k]) !== before[k]) emit(k); });
+    const ok = await syncEventLists(info);
+    lastEventsVersion = ok ? version : null;
+    EV_KEYS.forEach(function (k) { if (sig(remote[k]) !== before[k]) emit(k); });
   }
 
   async function refreshMetrics() {

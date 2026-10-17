@@ -60,6 +60,8 @@ class EventStore:
         self.lock = threading.RLock()
         self._cool = {}           # cooldown key -> last time
         self.version = 0          # bumps on every change (cheap change detection for pollers)
+        self.edits = 0            # bumps only when an EXISTING record changes or is removed (acknowledge, delete):
+                                  # pollers then reload the lists; otherwise they fetch only the newest records
         self._reported = OrderedDict()   # (camera, module, trackId) already reported -> True (bounded)
         self._jobs = queue.Queue(maxsize=64)
         self.writer_stats = {"jobs": 0, "msTotal": 0.0, "msMax": 0.0}   # snapshot / alert writing (perf monitor)
@@ -178,6 +180,7 @@ class EventStore:
             self.snapshots.data = [s for s in self.snapshots.data if s["id"] != sid]
             self.snapshots.save()
             self.version += 1
+            self.edits += 1
             return True
 
     def _link_snapshot(self, sid, **fields):
@@ -219,6 +222,7 @@ class EventStore:
                 a.setdefault("notes", []).append({"text": note[:500], "at": now_iso(), "by": by})
             self.alerts.save()
             self.version += 1
+            self.edits += 1
             return a
 
     # ------------------------------------------------------------------ detection pipeline hook

@@ -600,7 +600,10 @@ def mod_snapshot(app, q, body, mod):
 def events_version(app, q, body):
     """Cheap change token for pollers: changes whenever an alert, detection or snapshot record is
     added, acknowledged or deleted (and on every backend start)."""
-    return {"version": f"{BOOT_ID}-{app.events.version}"}
+    return {"version": f"{BOOT_ID}-{app.events.version}",
+            # changes only when existing records were acknowledged / deleted (or the backend restarted):
+            # until then new records can be fetched incrementally (newest N) instead of the whole lists
+            "edits": f"{BOOT_ID}-{app.events.edits}"}
 
 
 @route("GET", r"/detections/count/history")
