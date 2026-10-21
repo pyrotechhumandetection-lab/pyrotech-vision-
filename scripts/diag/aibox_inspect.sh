@@ -46,10 +46,16 @@ run "pip3 list 2>/dev/null | grep -iE 'torch|ultralytics|onnx|rknn|openvino|tens
 run "ls /usr/lib/librknn* /usr/lib/aarch64-linux-gnu/librknn* /usr/lib/librga* /usr/lib/libnvinfer* /usr/lib/aarch64-linux-gnu/libnvinfer* /opt/* 2>/dev/null"
 run "docker ps --format '{{.Names}}  {{.Image}}  {{.Status}}' 2>/dev/null || echo 'no docker'"
 MODELS=/tmp/.aib_models
-find / -xdev \( -path /proc -o -path /sys -o -path /dev -o -path /run \) -prune -o -type f \
+# every mounted data partition too (RK boxes keep apps / models on /userdata, /data, /oem)
+find / /userdata /data /oem /opt -xdev \( -path /proc -o -path /sys -o -path /dev -o -path /run \) -prune -o -type f \
   \( -name '*.rknn' -o -name '*.onnx' -o -name '*.engine' -o -name '*.trt' -o -name '*.pt' -o -name '*.tflite' \
      -o -name '*.om' -o -name '*.hef' -o -name '*.wk' -o -name '*.nb' -o -name '*.bmodel' \) \
-  -size +300k -print 2>/dev/null | grep -v -E 'site-packages/.*/tests|/share/doc' | head -80 > "$MODELS"
+  -size +300k -print 2>/dev/null | grep -v -E 'site-packages/.*/tests|/share/doc' | sort -u | head -80 > "$MODELS"
+printf '\n$ vendor algorithm folders (largest files; models often have custom extensions)\n'
+for d in /opt/server/algo /userdata /data/algo /oem; do [ -d "$d" ] || continue
+  find "$d" -type f -size +1M 2>/dev/null | head -400 | xargs -r ls -lS 2>/dev/null | head -25 | awk '{printf "%8s  %s\n", $5, $9}'
+  find "$d" -type f -size +1M 2>/dev/null | grep -viE '\.(so|so\.[0-9.]+|jar|log|mp4|jpg|jpeg|png|h264|db|mv\.db)$' | head -15 >> "$MODELS"
+done
 printf '\n$ model files (max 80)\n'
 while read -r f; do printf '%s  %s\n' "$(du -h "$f" 2>/dev/null | cut -f1)" "$f"; done < "$MODELS"
 
