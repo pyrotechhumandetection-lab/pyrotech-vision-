@@ -83,8 +83,7 @@ cmd_start() {
     i=1; while [ "$i" -le "$N" ]; do
       echo "  sim$i:"
       echo "    source: rtsp://${cred}127.0.0.1:$PORT/cam"
-      echo "    sourceOnDemand: yes"
-      echo "    sourceOnDemandStartTimeout: 15s"
+      echo "    sourceOnDemand: no"
       i=$((i+1)); done
   } > "$CONF"
   chmod 600 "$CONF"
@@ -94,7 +93,12 @@ cmd_start() {
     grep -q "\[path cam\] .*ready" "$LOG" 2>/dev/null && break
     alive || { mask < "$LOG" | tail -20; die "relay exited (log above)"; }
     sleep 1; i=$((i+1)); done
-  grep -q "\[path cam\] .*ready" "$LOG" || { mask < "$LOG" | tail -20; echo "WARNING: camera not ready yet (log above) - check CAMERA_URL"; }
+  if ! grep -q "\[path cam\] .*ready" "$LOG"; then
+    mask < "$LOG" | tail -20
+    kill "$(cat "$PIDF")" 2>/dev/null; rm -f "$PIDF" "$CONF"
+    die "the REAL camera did not deliver a stream within 30 s (log above): check CAMERA_URL (user, password, path) and
+       that the camera allows one more RTSP connection (the vendor app already uses some). Relay stopped."
+  fi
   host=$BIND; [ "$BIND" = "0.0.0.0" ] && host=$(hostname -I 2>/dev/null | awk '{print $1}')
   : > "$INFO"; i=1; while [ "$i" -le "$N" ]; do echo "rtsp://${cred}$host:$PORT/sim$i" >> "$INFO"; i=$((i+1)); done
   chmod 600 "$INFO"
@@ -137,6 +141,9 @@ cmd_monitor() {
 cmd_aitest() {
   SECS=${1:-120}; MOD=${2:-vehicle}
   alive || die "relay not running - run start first"
+  grep -q "\[path cam\] .*ready" "$LOG" 2>/dev/null || { mask < "$LOG" | tail -15; die "the relay has no stream from the real camera (log above)"; }
+  if tail -n 30 "$LOG" | grep -qiE "\[path cam\].*(error|closed|retrying|not ready)"; then
+    mask < "$LOG" | tail -15; echo "WARNING: the camera connection had errors recently (log above)"; fi
   [ -f "$INFO" ] || die "no simulated cameras (run start)"
   mkdir -p "$SIM_DIR"; CSV=$SIM_DIR/aitest_${MOD}_$(date +%Y%m%d_%H%M%S).csv
   python3 - "$INFO" "$PORT" "$SECS" "$MOD" "$CSV" "${AIV_API:-http://127.0.0.1:8000/api}" "${KEEP:-0}" <<'PY'
