@@ -7,6 +7,9 @@
 #
 #   sudo CAMERA_URL='rtsp://user:pass@192.168.192.87:554/Streaming/Channels/101' sh sim_cameras.sh start [N]
 #   sudo sh sim_cameras.sh monitor [SECONDS]      # every 5 s: NPU, CPU per AI process, network, open streams
+#   sudo sh sim_cameras.sh aitest [SECONDS] [MODULE]   # PYROTECH VISION on this box analyses all N simulated
+#                                                   # cameras at once (default 120 s, vehicle), reports fps per
+#                                                   # camera + NPU/CPU, then removes its test cameras again
 #   sudo sh sim_cameras.sh status
 #   sudo sh sim_cameras.sh stop                   # stops the relay, deletes its config (it holds the camera password)
 #
@@ -131,6 +134,104 @@ cmd_monitor() {
   echo "camCn = connections to real cameras on port 554 (the simulator itself is 1 of them)."
 }
 
+cmd_aitest() {
+  SECS=${1:-120}; MOD=${2:-vehicle}
+  alive || die "relay not running - run start first"
+  [ -f "$INFO" ] || die "no simulated cameras (run start)"
+  mkdir -p "$SIM_DIR"; CSV=$SIM_DIR/aitest_${MOD}_$(date +%Y%m%d_%H%M%S).csv
+  python3 - "$INFO" "$PORT" "$SECS" "$MOD" "$CSV" "${AIV_API:-http://127.0.0.1:8000/api}" "${KEEP:-0}" <<'PY'
+import json, sys, time, urllib.request, urllib.error
+info, port, secs, mod, csv_path, api, keep = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5], sys.argv[6], sys.argv[7] == "1"
+urls = [u.strip() for u in open(info) if u.strip()]
+def call(method, path, body=None, timeout=30):
+    req = urllib.request.Request(api + path, method=method, data=json.dumps(body).encode() if body is not None else None,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, json.loads(r.read() or b"null")
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"null")
+    except Exception as e:
+        return 0, {"message": str(e)}
+def npu():
+    try:
+        return open("/sys/kernel/debug/rknpu/load").read().replace("NPU load:", "").replace("Core", "C").replace(" ", "").strip(", \n").replace(",", " ")
+    except OSError:
+        return "n/a"
+def cpu_times():
+    v = [int(x) for x in open("/proc/stat").readline().split()[1:]]
+    return v[3] + v[4], sum(v)
+st, h = call("GET", "/system/health", timeout=5)
+if st != 200:
+    sys.exit("PYROTECH VISION backend not answering at %s (%s)" % (api, (h or {}).get("message")))
+ids = []
+for i, u in enumerate(urls, 1):
+    user = pw = ""
+    if "@" in u:                                  # rtsp://sim:pass@host:port/simN  (SIM_BIND=0.0.0.0)
+        cred = u.split("://", 1)[1].split("@", 1)[0]
+        user, pw = cred.split(":", 1)
+    cid = "SIM-%d" % i
+    body = {"id": cid, "name": "Simulated camera %d" % i, "type": "rtsp", "sourceUrl": "rtsp://127.0.0.1:%s/sim%d" % (port, i),
+            "requiresAuth": bool(user), "username": user, "password": pw, "enabled": True, "timeoutSec": 20,
+            "streamProfile": "main", "zones": [], "detection": {"modules": {}}}
+    st, r = call("POST", "/cameras", body)
+    if st not in (200, 201):
+        st, r = call("PUT", "/cameras/" + cid, body)
+    if st not in (200, 201):
+        print("camera %s not saved: %s %s" % (cid, st, (r or {}).get("message"))); continue
+    ids.append(cid)
+print("starting %s detection on %d simulated cameras (model load can take a minute on ARM) ..." % (mod, len(ids)), flush=True)
+for cid in ids:
+    st, r = call("POST", "/detections/%s/start" % mod, {"cameraId": cid}, timeout=180)
+    print("  %s: %s" % (cid, "running" if st == 200 else "FAILED %s %s" % (st, (r or {}).get("message"))), flush=True)
+try:
+    print("warming up 20 s ...", flush=True); time.sleep(20)
+    out = open(csv_path, "w")
+    out.write("time,camera,state,receivedFps,analysedFps,inferenceMs,latencyMs,droppedTotal,npu,cpuIdlePct,engine,device\n")
+    acc = {c: [] for c in ids}
+    end = time.time() + secs
+    print("%-8s %-20s %6s %13s %13s %9s %s" % ("time", "NPU", "cpuIdle", "recv fps", "analysed fps", "infer ms", "(sum over cameras; min-max per camera)"))
+    while time.time() < end:
+        i0, t0 = cpu_times(); time.sleep(5); i1, t1 = cpu_times()
+        idle = round(100.0 * (i1 - i0) / max(1, t1 - t0), 1)
+        st, m = call("GET", "/system/metrics", timeout=10)
+        ss = {s["cameraId"]: s for s in (m or {}).get("sessions", []) if s.get("cameraId") in acc}
+        n, ts = npu(), time.strftime("%H:%M:%S")
+        rec = [ss[c].get("receivedFps") or 0 for c in ids if c in ss]
+        ana = [ss[c].get("processedFps") or 0 for c in ids if c in ss]
+        inf = [ss[c].get("inferenceMs") for c in ids if c in ss and ss[c].get("inferenceMs")]
+        for c in ids:
+            s = ss.get(c, {})
+            acc[c].append(s)
+            out.write(",".join(str(x) for x in (ts, c, s.get("state"), s.get("receivedFps"), s.get("processedFps"), s.get("inferenceMs"),
+                      s.get("latencyMs"), s.get("framesDropped"), n, idle, s.get("engine"), s.get("device"))) + "\n")
+        out.flush()
+        rng = lambda v: "%5.1f (%s-%s)" % (sum(v), min(v), max(v)) if v else "  -"
+        print("%-8s %-20s %6s %13s %13s %9s" % (ts, n, idle, rng(rec), rng(ana), "%.0f" % (sum(inf) / len(inf)) if inf else "-"), flush=True)
+    out.close()
+    print("\nper camera (average over the test):")
+    print("%-8s %9s %9s %8s %9s %10s" % ("camera", "recv fps", "anal fps", "% anal", "infer ms", "latency ms"))
+    tr = ta = 0.0
+    for c in ids:
+        v = [s for s in acc[c] if s]
+        avg = lambda k: sum((s.get(k) or 0) for s in v) / len(v) if v else 0
+        r, a = avg("receivedFps"), avg("processedFps"); tr += r; ta += a
+        print("%-8s %9.1f %9.1f %7.0f%% %9.0f %10.0f" % (c, r, a, 100 * a / r if r else 0, avg("inferenceMs"), avg("latencyMs")))
+    eng = next((s.get("engine") for c in ids for s in acc[c] if s and s.get("engine")), "?")
+    dev = next((s.get("device") for c in ids for s in acc[c] if s and s.get("device")), "?")
+    print("TOTAL    %9.1f %9.1f %7.0f%%   engine %s, device %s" % (tr, ta, 100 * ta / tr if tr else 0, eng, dev))
+    print("saved: " + csv_path)
+finally:
+    if keep:
+        print("KEEP=1: test cameras left running")
+    else:
+        for cid in ids:
+            call("POST", "/detections/%s/stop" % mod, {"cameraId": cid}, timeout=30)
+            call("DELETE", "/cameras/" + cid, timeout=30)
+        print("test cameras stopped and removed (SIM-1..SIM-%d)" % len(ids))
+PY
+}
+
 cmd_status() {
   if alive; then echo "relay running, PID $(cat "$PIDF")"; [ -f "$INFO" ] && mask < "$INFO"
   else echo "relay not running"; fi
@@ -146,7 +247,8 @@ cmd_stop() {
 case "$1" in
   start) shift; cmd_start "$@" ;;
   monitor) shift; cmd_monitor "$@" ;;
+  aitest) shift; cmd_aitest "$@" ;;
   status) cmd_status ;;
   stop) cmd_stop ;;
-  *) sed -n '2,20p' "$0"; exit 2 ;;
+  *) sed -n '2,24p' "$0"; exit 2 ;;
 esac
