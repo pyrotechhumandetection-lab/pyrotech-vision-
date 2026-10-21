@@ -100,7 +100,7 @@ cmd_start() {
   echo "then:  sudo sh $0 monitor 120"
 }
 
-npu() { cat /sys/kernel/debug/rknpu/load 2>/dev/null | sed 's/NPU load: *//; s/Core/C/g; s/ //g'; }
+npu() { cat /sys/kernel/debug/rknpu/load 2>/dev/null | sed 's/NPU load: *//; s/Core/C/g; s/ //g; s/,$//; s/,/ /g'; }
 rx() { awk 'NR>2{gsub(":"," "); if($1!="lo") s+=$2} END{print s}' /proc/net/dev; }
 
 cmd_monitor() {
