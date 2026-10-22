@@ -3,7 +3,7 @@
 backend + frontend, camera registration, GPU verification. Used by notebooks/AIVISION_Colab.ipynb.
 
     python scripts/colab/colab_launch.py check            Python, GPU, Node.js, disk, ports, project files
-    python scripts/colab/colab_launch.py install          backend/.venv via ./setup-backend.sh (CUDA PyTorch when a GPU exists),
+    python scripts/colab/colab_launch.py install          backend/.venv via ./aivision.sh setup (CUDA PyTorch when a GPU exists),
                                                           Tailscale, socat
     python scripts/colab/colab_launch.py vpn              join your Tailscale network (TS_AUTHKEY from the environment)
     python scripts/colab/colab_launch.py bridge           127.0.0.1:18554 in Colab -> relay on your PC over Tailscale
@@ -181,13 +181,13 @@ def need_env(*names):
 def cmd_check():
     bad = 0
     log(f"project: {REPO}")
-    for f in ("backend/main.py", "server.js", "setup-backend.sh", "backend/requirements-lock.txt", "backend/models/yolov8n.pt"):
+    for f in ("backend/main.py", "server.js", "aivision.sh", "backend/requirements-lock.txt", "backend/models/yolov8n.pt"):
         if os.path.exists(os.path.join(REPO, f)):
             ok(f)
         else:
             warn(f"{f} missing")
             bad += 1
-    ok(f"system Python {sys.version.split()[0]} (setup-backend.sh fetches 3.13 itself when needed)")
+    ok(f"system Python {sys.version.split()[0]} (aivision.sh setup fetches 3.13 itself when needed)")
     has, desc = gpu()
     (ok if has else warn)(f"GPU: {desc}" + ("" if has else " - detection will run on the CPU. Runtime > Change runtime type > GPU"))
     node = shutil.which("node")
@@ -195,7 +195,7 @@ def cmd_check():
         v = run([node, "-v"]).stdout.strip()
         (ok if int(v.lstrip("v").split(".")[0]) >= 16 else warn)(f"Node.js {v}")
     else:
-        warn("Node.js missing - setup-backend.sh installs it")
+        warn("Node.js missing - aivision.sh setup installs it")
     du = shutil.disk_usage("/content" if os.path.isdir("/content") else REPO)
     (ok if du.free > 8e9 else warn)(f"free disk {du.free / 1e9:.0f} GB (the environment needs ~5 GB with CUDA PyTorch)")
     if os.path.exists(VENV_PY):
@@ -216,10 +216,10 @@ def cmd_install():
     env = dict(os.environ, AIV_TORCH="cuda" if has and os.environ.get("AIV_GPU", "auto") != "off" else "cpu")
     log(f"backend environment ({env['AIV_TORCH']} PyTorch) - first time 5-10 min, log: {LOGS}/setup.log")
     with open(os.path.join(LOGS, "setup.log"), "a") as lf:
-        r = subprocess.run(["bash", "setup-backend.sh"], cwd=REPO, env=env, stdout=lf, stderr=subprocess.STDOUT)
+        r = subprocess.run(["bash", "aivision.sh", "setup"], cwd=REPO, env=env, stdout=lf, stderr=subprocess.STDOUT)
     if r.returncode != 0:
         print(tail("setup", 30))
-        fail("setup-backend.sh failed - see the lines above / logs/setup.log")
+        fail("aivision.sh setup failed - see the lines above / logs/setup.log")
     ok("backend/.venv ready")
     pkgs = [p for p, t in (("socat", "socat"), ("ffmpeg", "ffprobe")) if not shutil.which(t)]
     if pkgs:

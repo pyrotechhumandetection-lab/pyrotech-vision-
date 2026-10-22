@@ -65,7 +65,7 @@ GPU* if you want the GPU, then run the cells in order:
 |---|---|---|
 | 1 | `colab_launch.py check` | project files, Python, GPU (`nvidia-smi`), Node.js, disk, ports already used (no duplicates) |
 | 2 | relay settings | `RELAY_HOST` (your PC's 100.x address), paths; secrets read from Colab Secrets |
-| 3 | `install` | `./setup-backend.sh` (CUDA PyTorch on GPU runtimes, self-check), Tailscale, socat |
+| 3 | `install` | `./aivision.sh setup` (CUDA PyTorch on GPU runtimes, self-check), Tailscale, socat |
 | 4 | `vpn` | starts `tailscaled`, joins with `TS_AUTHKEY`, `tailscale ping` to your PC |
 | 5 | `bridge` + `test-camera` | bridge port up; RTSP DESCRIBE with the relay login; one frame decoded by the backend's OpenCV |
 | 6 | `start` + `add-camera` | backend (GPU env when available) + web UI, health checks through the UI's `/api`; camera(s) saved with the relay login (stored by the backend's credential store, never in the URL) and connection-tested |
@@ -100,7 +100,7 @@ line, not the runtime type.
 | `test-camera`: `RTSP 401` | `RELAY_PASSWORD` secret differs from `local_relay.py show` |
 | `RTSP answered but no frame` | H.265 camera stream or very long keyframe interval - use an H.264 substream, keyframe 1-2 s |
 | `port ... used by ANOTHER process` | a backend/UI started by hand in the notebook - stop it (`!pkill -INT -f backend/main.py`) |
-| `status`: GPU present but no GPU memory | no Human/Vehicle/Count detection running yet, or `install` ran on a CPU runtime (after switching to GPU: `!AIV_TORCH=cuda bash setup-backend.sh --reinstall`) |
+| `status`: GPU present but no GPU memory | no Human/Vehicle/Count detection running yet, or `install` ran on a CPU runtime (after switching to GPU: `!AIV_TORCH=cuda bash ./aivision.sh setup --reinstall`) |
 
 Limits: the stream crosses your PC's upload bandwidth (a 640x360 substream needs ~0.5-1 Mbit/s, a 1080p main stream
 2-6 Mbit/s); detection latency adds the internet round trip; Colab sessions end after idle time / ~12 h and the VM is

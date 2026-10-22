@@ -11,9 +11,9 @@ After installation the AI box behaves like an appliance:
 
 ```
 cd ~/ui-system/pyrotech-vision
-scripts/debian/check-environment.sh      # read-only check of the box (optional, recommended)
-scripts/debian/install-services.sh       # install, enable at boot, start - asks for sudo
-scripts/debian/status-services.sh        # is everything running?
+./aivision.sh check      # read-only check of the box (optional, recommended)
+./aivision.sh install       # install, enable at boot, start - asks for sudo
+./aivision.sh status        # is everything running?
 ```
 
 ---
@@ -67,8 +67,8 @@ be reachable from the network; port 8000 cannot be reached from other PCs (verif
 | Package manager | none for the UI; Python packages via pip from `backend/requirements-lock.txt` |
 | Backend framework / entry | Python standard library `ThreadingHTTPServer`; `backend/main.py` (changes into `backend/`) |
 | Backend start command | `backend/.venv/bin/python backend/main.py` |
-| Python version | 3.13 (Linux) or 3.14 (Windows); `setup-backend.sh` fetches 3.13 with `uv` on Debian 12 |
-| Virtual environment | `backend/.venv` (created by `setup-backend.sh`) |
+| Python version | 3.13 (Linux) or 3.14 (Windows); `./aivision.sh setup` fetches 3.13 with `uv` on Debian 12 |
+| Virtual environment | `backend/.venv` (created by `./aivision.sh setup`) |
 | Ports | UI `PORT` = 5173 (`server.js`), backend `AIV_PORT` = 8000 (`backend/config.py`) |
 | Listening addresses | UI `HOST` (installer: `0.0.0.0`), backend `AIV_HOST` (installer: `127.0.0.1`) |
 | API URL in the browser | relative `/api` (`js/config.js`) - no `localhost` and no IP in the frontend |
@@ -79,7 +79,7 @@ be reachable from the network; port 8000 cannot be reached from other PCs (verif
 | AI models | `backend/models/` (in the repository). Loaded when a detection starts, never downloaded at boot. The head-count model is joined once from its `.part` files into the same folder |
 | Data written | `backend/data` (cameras, encrypted credentials, alerts, counts, `running_modules.json`), `backend/snapshots` |
 | Health endpoint | `GET /api/system/health` (+ `/api/system/metrics` for camera/inference state) |
-| Process management before | none (no unit files, no Docker); manual `start.sh` / `.cmd` scripts |
+| Process management before | none (no unit files, no Docker); manual start scripts |
 | Windows-specific parts | `.cmd`/`.ps1` scripts; camera passwords encrypted with Windows DPAPI. On Linux they are stored in `backend/data/credentials.json` with owner-only permissions (0600) - **passwords saved on the Windows PC cannot be carried over; add the cameras again** |
 
 ### Changes made to the application for appliance use
@@ -93,7 +93,7 @@ be reachable from the network; port 8000 cannot be reached from other PCs (verif
    `.env` switches it off.
 2. **Clean shutdown on `systemctl stop`.** The backend now treats SIGTERM like Ctrl+C (and the unit
    sends SIGINT): cameras are closed and pending counts/alerts are written before it exits.
-3. `start.sh` refuses to start a second copy while the services run (no duplicate camera loops).
+3. `./aivision.sh run` refuses to start a second copy while the services run (no duplicate camera loops).
 
 ---
 
@@ -104,10 +104,10 @@ be reachable from the network; port 8000 cannot be reached from other PCs (verif
 | OS | Debian 12 / 13 (or Ubuntu) with systemd | `check-environment.sh` |
 | CPU | 64-bit: x86_64 or aarch64 (ARM64). 32-bit is not supported (no PyTorch) | `check-environment.sh` |
 | RAM / disk | 4 GB RAM or more; about 4 GB free disk for the Python environment, plus snapshots | `check-environment.sh` |
-| Python | 3.13 / 3.14 for `backend/.venv` (Debian 12's 3.11 is handled by `setup-backend.sh`) | `setup-backend.sh` |
+| Python | 3.13 / 3.14 for `backend/.venv` (Debian 12's 3.11 is handled by `./aivision.sh setup`) | `./aivision.sh setup` |
 | Node.js | 16 or newer (`sudo apt install nodejs`; Debian 12 has 18, Debian 13 has 20) | installer |
-| OpenVINO | optional speed-up; on aarch64 it needs glibc 2.35+. Without it PyTorch is used | `setup-backend.sh` |
-| Internet | only once, for `setup-backend.sh` (about 1 GB of Python packages) | - |
+| OpenVINO | optional speed-up; on aarch64 it needs glibc 2.35+. Without it PyTorch is used | `./aivision.sh setup` |
+| Internet | only once, for `./aivision.sh setup` (about 1 GB of Python packages) | - |
 | User | a normal user who owns the project folder (the services run as this user, **not root**) | installer |
 
 ---
@@ -121,10 +121,10 @@ git clone https://github.com/pyrotechhumandetection-lab/pyrotech-vision-.git pyr
 cd pyrotech-vision
 
 # 2. optional: look at the box first (changes nothing)
-scripts/debian/check-environment.sh
+./aivision.sh check
 
-# 3. install the services (runs ./setup-backend.sh first when something is missing)
-scripts/debian/install-services.sh
+# 3. install the services (runs ./aivision.sh setup first when something is missing)
+./aivision.sh install
 ```
 
 `install-services.sh` (run it as the normal user - it asks for sudo only to write the unit files,
@@ -135,9 +135,9 @@ run `systemctl` and change the firewall):
    can read the project and write `backend/data`, `backend/snapshots` and the head-model folder;
    refuses root unless `--allow-root`;
 3. creates `.env` from `.env.example` if missing (values are never printed);
-4. checks the ports (refuses 80; refuses ports used by another program, e.g. a `./start.sh` still
+4. checks the ports (refuses 80; refuses ports used by another program, e.g. a `./aivision.sh run` still
    running in a terminal);
-5. runs `./setup-backend.sh` - installs only what is missing (apt packages, `backend/.venv`, pinned
+5. runs `./aivision.sh setup` - installs only what is missing (apt packages, `backend/.venv`, pinned
    packages, self-check). A complete environment is left as it is: nothing is deleted or downgraded;
 6. checks Node.js and that the backend Python imports ultralytics / torch / OpenCV contrib;
 7. writes the two unit files, validates them with `systemd-analyze verify`, installs them to
@@ -157,12 +157,12 @@ an update, after moving the folder) - it replaces only its own two unit files.
 
 | Task | Command |
 |---|---|
-| Status (all stages, see below) | `scripts/debian/status-services.sh` |
-| Start | `scripts/debian/start-services.sh` (backend, then UI; waits until they answer) |
-| Stop | `scripts/debian/stop-services.sh` (UI, then backend; clean shutdown, up to 60 s) |
-| Restart both | `scripts/debian/restart-services.sh` |
-| Restart one | `scripts/debian/restart-services.sh backend` / `... frontend` |
-| Check the box | `scripts/debian/check-environment.sh` |
+| Status (all stages, see below) | `./aivision.sh status` |
+| Start | `./aivision.sh start` (backend, then UI; waits until they answer) |
+| Stop | `./aivision.sh stop` (UI, then backend; clean shutdown, up to 60 s) |
+| Restart both | `./aivision.sh restart` |
+| Restart one | `./aivision.sh restart backend` / `... frontend` |
+| Check the box | `./aivision.sh check` |
 | systemd directly | `systemctl status pyrotech-vision-backend pyrotech-vision-frontend` |
 | Do not start at boot any more | `sudo systemctl disable pyrotech-vision-backend pyrotech-vision-frontend` |
 
@@ -186,7 +186,7 @@ Exit code 0 = both services active and the API answers.
 
 ---
 
-Performance: `scripts/debian/perf-tune.sh status | monitor | auto | rollback` - see §13.
+Performance: `./aivision.sh perf status | monitor | auto | rollback` - see §13.
 
 ## 6. Logs and diagnostics
 
@@ -231,7 +231,7 @@ A normal user may need `sudo` for `journalctl`, or once: `sudo usermod -aG syste
 * Firewall: with **ufw** active, `install-services.sh --open-firewall` adds exactly one rule
   (`5173/tcp`). Or by hand: `sudo ufw allow 5173/tcp`. The firewall is never disabled. Other
   firewalls (nftables/iptables rules): allow incoming TCP 5173.
-* Another UI port: `scripts/debian/install-services.sh --ui-port 8080` (any port ≥ 1024 except the
+* Another UI port: `./aivision.sh install --ui-port 8080` (any port ≥ 1024 except the
   backend port; 80 is refused).
 * `network-online.target` only means the network is configured - not that cameras are reachable.
   The backend therefore retries cameras on its own (§2).
@@ -240,17 +240,17 @@ A normal user may need `sudo` for `journalctl`, or once: `sudo usermod -aG syste
 
 ## 8. Changing settings, updating the software
 
-* **Settings** (`.env`): change the value, then `scripts/debian/restart-services.sh backend`.
+* **Settings** (`.env`): change the value, then `./aivision.sh restart backend`.
   Ports (`PORT`, `AIV_PORT`) are written into the unit files: after changing them run
-  `scripts/debian/install-services.sh` again. The services always listen with `HOST=0.0.0.0` (UI) and
+  `./aivision.sh install` again. The services always listen with `HOST=0.0.0.0` (UI) and
   `AIV_HOST=127.0.0.1` (backend) - these override `HOST`/`AIV_HOST` in `.env`.
 * **Update**:
   ```
   cd ~/ui-system/pyrotech-vision
   git pull
-  scripts/debian/install-services.sh     # installs new packages if needed, restarts the services
+  ./aivision.sh install     # installs new packages if needed, restarts the services
   ```
-* **Run by hand instead** (development): `scripts/debian/stop-services.sh`, then `./start.sh`.
+* **Run by hand instead** (development): `./aivision.sh stop`, then `./aivision.sh run`.
 
 ---
 
@@ -258,10 +258,10 @@ A normal user may need `sudo` for `journalctl`, or once: `sudo usermod -aG syste
 
 | Symptom | Check / fix |
 |---|---|
-| Browser on another PC: "cannot connect" | On the box: `scripts/debian/status-services.sh`. If OK there: firewall (`sudo ufw status`; `sudo ufw allow 5173/tcp`), correct IP (`hostname -I`), PC in the same network |
+| Browser on another PC: "cannot connect" | On the box: `./aivision.sh status`. If OK there: firewall (`sudo ufw status`; `sudo ufw allow 5173/tcp`), correct IP (`hostname -I`), PC in the same network |
 | UI opens but says "backend not reachable" | `systemctl status pyrotech-vision-backend`; `journalctl -u pyrotech-vision-backend -n 100`. It may still be starting (a few seconds) |
-| Backend restarts again and again | `journalctl -u pyrotech-vision-backend -b` shows the error before each `Main process exited`. Typical: environment incomplete → `./setup-backend.sh`; port taken → `sudo ss -lntp` |
-| "Port … is already in use" during install | a `./start.sh` still runs in a terminal (Ctrl+C there) or another program uses the port (`--ui-port`) |
+| Backend restarts again and again | `journalctl -u pyrotech-vision-backend -b` shows the error before each `Main process exited`. Typical: environment incomplete → `./aivision.sh setup`; port taken → `sudo ss -lntp` |
+| "Port … is already in use" during install | a `./aivision.sh run` still runs in a terminal (Ctrl+C there) or another program uses the port (`--ui-port`) |
 | Detection not resumed after reboot | status section "Resume after restart": `retrying` (camera unreachable - check the camera / network), `failed` (camera deleted or disabled - start it again in the UI) |
 | Camera shows "NOT connected" | camera powered/reachable? (`ping <camera-ip>`); wrong password → edit the camera in the UI |
 | No inference although connected | CPU overloaded (`top`), too many detections at once; `journalctl` for `ENGINE_FAILURE` |
@@ -276,23 +276,23 @@ A normal user may need `sudo` for `journalctl`, or once: `sudo usermod -aG syste
 **Uninstall the services** (keeps everything else):
 
 ```
-scripts/debian/uninstall-services.sh                 # add --close-firewall to remove the ufw rule too
+./aivision.sh uninstall                 # add --close-firewall to remove the ufw rule too
 ```
 
 It stops and disables the two services and deletes only their two unit files (only if they were
 created by `install-services.sh`). The project folder, `backend/.venv`, the models, `.env`, cameras,
-alerts and snapshots are **not** touched. `./start.sh` keeps working, and `install-services.sh`
+alerts and snapshots are **not** touched. `./aivision.sh run` keeps working, and `install-services.sh`
 can install the services again at any time.
 
 **Rollback to the previous behaviour** (no services, manual start): run `uninstall-services.sh`,
-then start the application by hand with `./start.sh` as before.
+then start the application by hand with `./aivision.sh run` as before.
 
 **Rollback of a software update**: `git log --oneline` → `git checkout <previous-commit>` →
-`scripts/debian/install-services.sh`. Data in `backend/data` stays compatible; `running_modules.json`
+`./aivision.sh install`. Data in `backend/data` stays compatible; `running_modules.json`
 is ignored by older versions.
 
 **Switch off only the automatic resume of detections**: `AIV_AUTOSTART=0` in `.env`, then
-`scripts/debian/restart-services.sh backend`.
+`./aivision.sh restart backend`.
 
 ---
 
@@ -337,7 +337,7 @@ real people in the picture.
    (*dropped (queue full)*); that camera then runs up to 0.5 s behind live. `AIV_FRAME_POLICY=latest` restores
    the original newest-frame behaviour (lowest delay, frames skipped instead). One camera's queue never blocks
    another camera.
-6. **Measurements per camera** (Detection pages, `GET /api/system/metrics`, `scripts/debian/status-services.sh`):
+6. **Measurements per camera** (Detection pages, `GET /api/system/metrics`, `./aivision.sh status`):
    received fps, processed fps, inference time (average + latest), queue length / capacity / peak, latency from
    receiving a frame to the end of its analysis, frames dropped in the application (queue full) and frames
    missing in the camera stream itself (gaps in the stream's timestamps = camera / network side), the fire
@@ -410,7 +410,7 @@ network link (box address 10.77.0.2). Results:
 | 11 | from the other PC: UI 200, `/api` 200, **port 8000 refused**, `.env` and `credentials.json` not served (404) | passed |
 | 12 | API requests use the relative `/api` path through the UI | passed |
 | 13 | `kill -9` of the backend → restarted after 10 s, counted, logged; `kill -9` of the UI → restarted after 5 s | passed |
-| 14 | no duplicate processes: one backend, one UI; `./start.sh` refuses while the services run | passed |
+| 14 | no duplicate processes: one backend, one UI; `./aivision.sh run` refuses while the services run | passed |
 | 15 | uninstall: units removed; `backend/data`, `.venv` (6.1 GB), models unchanged | passed |
 | - | camera offline at start: retried 10 s / 20 s / 40 s, resumed by itself when it came back | passed |
 | - | ufw active: installer warns; `--open-firewall` opens only 5173/tcp; then reachable | passed |
@@ -426,7 +426,7 @@ original link, pages without console errors) passed; 58 backend unit tests passe
 
 **Not tested** (needs the real box): Debian itself and ARM64 hardware, your cameras' substreams, a physical power cut,
 access from a real second PC on your LAN, your real cameras, and the Debian 12 path that fetches
-Python 3.13. On the box, run `scripts/debian/check-environment.sh` and `status-services.sh` after
+Python 3.13. On the box, run `./aivision.sh check` and `status-services.sh` after
 installing, then reboot once (`sudo reboot`) and run `status-services.sh` again - the box is never
 rebooted automatically by these scripts.
 
@@ -435,13 +435,13 @@ surviving Ultralytics' model load, FIFO inference slots, identical shared person
 update / rollback, candidate limits, accuracy comparison, keep / roll-back decisions), self-check, API test (21 checks)
 and UI test (15 checks) passed; on the systemd test box `status`, `monitor` (with log), `frames`, `bench` (idle
 priority and `--maintenance`), `auto` (kept a measured gain), `apply` (automatic rollback of a measured loss),
-`apply --keep`, `rollback`, `history`; without the services: `start`, `apply` with restart through `./start.sh`,
+`apply --keep`, `rollback`, `history`; without the services: `start`, `apply` with restart through `./aivision.sh run`,
 `rollback`, `stop` (ports free afterwards); all modules (Human, Human Count, Object, Fire) running with every CPU
 setting set at once. **Not run on ARM64 hardware.**
 
 ## 13. Performance monitor and CPU optimizer (ARM64 / CPU-only boxes)
 
-`scripts/debian/perf-tune.sh` (code: `scripts/perf/pyrotech_perf.py` + `bench_worker.py`) runs next to the
+`./aivision.sh perf` (code: `scripts/perf/pyrotech_perf.py` + `bench_worker.py`) runs next to the
 application - it is not a second backend. It reads the backend's own metrics API and `/proc`, benchmarks CPU
 thread configurations in separate low-priority processes, and changes **only** the CPU keys in `.env`
 (always after a timestamped backup), followed by a controlled restart of the backend, a before/after measurement
@@ -464,23 +464,23 @@ Not changed (would change detection results): input size (`AIV_IMG_SIZE=640`), m
 ```
 cd ~/ui-system/pyrotech-vision
 git pull                                          # get the tool (or copy the files)
-sudo systemctl restart pyrotech-vision-backend    # the backend part of this update (or restart start.sh)
+sudo systemctl restart pyrotech-vision-backend    # the backend part of this update (or ./aivision.sh restart backend)
 
-scripts/debian/perf-tune.sh status                # hardware, CPU settings in effect, per camera fps / stages, findings
-scripts/debian/perf-tune.sh monitor               # live view every 2 s with timestamps (Ctrl+C ends it)
-scripts/debian/perf-tune.sh monitor --log backend/data/perf/monitor.jsonl     # ... and record it
-scripts/debian/perf-tune.sh auto --dry-run        # measure + benchmark + recommend, change nothing
-scripts/debian/perf-tune.sh auto                  # ... and apply the best configuration, validated live
-scripts/debian/perf-tune.sh auto --maintenance    # same, but pauses detection during the benchmark (exact numbers)
-scripts/debian/perf-tune.sh apply --threads 4 --concurrency 2     # set values yourself (same backup/validation)
-scripts/debian/perf-tune.sh rollback              # undo the last applied change (restores the .env backup, restarts)
-scripts/debian/perf-tune.sh rollback --list       # all applied changes; rollback --to <id>
-scripts/debian/perf-tune.sh history               # every change with its before/after measurement
-scripts/debian/perf-tune.sh start | stop | restart
+./aivision.sh perf status                # hardware, CPU settings in effect, per camera fps / stages, findings
+./aivision.sh perf monitor               # live view every 2 s with timestamps (Ctrl+C ends it)
+./aivision.sh perf monitor --log backend/data/perf/monitor.jsonl     # ... and record it
+./aivision.sh perf auto --dry-run        # measure + benchmark + recommend, change nothing
+./aivision.sh perf auto                  # ... and apply the best configuration, validated live
+./aivision.sh perf auto --maintenance    # same, but pauses detection during the benchmark (exact numbers)
+./aivision.sh perf apply --threads 4 --concurrency 2     # set values yourself (same backup/validation)
+./aivision.sh perf rollback              # undo the last applied change (restores the .env backup, restarts)
+./aivision.sh perf rollback --list       # all applied changes; rollback --to <id>
+./aivision.sh perf history               # every change with its before/after measurement
+./aivision.sh perf start | stop | restart
 ```
 
 Start, stop and restart use the existing start-up procedure: the systemd services when they are installed
-(asks for sudo), otherwise `./start.sh --no-browser`, which the tool then also stops cleanly (Ctrl+C semantics:
+(asks for sudo), otherwise `./aivision.sh run --no-browser`, which the tool then also stops cleanly (Ctrl+C semantics:
 the backend closes its sessions). A backend started by hand in another terminal is never killed - the tool tells you
 to restart it and then run `perf-tune.sh validate`.
 
@@ -576,7 +576,7 @@ small / distant people are detected less reliably - test it on your scenes befor
 
 ### Rollback / removal
 
-* undo the last tuning: `scripts/debian/perf-tune.sh rollback` (or `--to <id>`); every backup stays in
+* undo the last tuning: `./aivision.sh perf rollback` (or `--to <id>`); every backup stays in
   `backend/data/perf/backups/` (the replaced `.env` is also kept before a rollback);
 * by hand: remove the `AIV_TORCH_*`, `AIV_INFER_CONCURRENCY`, `AIV_CV_THREADS`, `AIV_CPU_AFFINITY`,
   `AIV_OMP_WAIT_POLICY` values from `.env` and restart the backend - the defaults are the previous behaviour;

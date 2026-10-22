@@ -6,13 +6,13 @@ Runs next to the application (it is NOT a second backend): it reads the backend'
 configuration only through .env + a controlled backend restart, with a backup, a live before/after
 measurement and an automatic rollback when the measurement does not confirm the gain.
 
-    scripts/debian/perf-tune.sh <command> [options]       (wrapper: uses backend/.venv, low priority)
+    ./aivision.sh perf <command> [options]       (wrapper: uses backend/.venv, low priority)
 
 Commands
     status                 one-shot: hardware, CPU settings in effect, per-camera performance, findings
     monitor                live view every --interval s (default 2) with timestamps; --log FILE.jsonl
     start | stop | restart application control through its normal start-up procedure (systemd services
-                           when installed, otherwise ./start.sh started and stopped by this tool)
+                           when installed, otherwise ./aivision.sh run started and stopped by this tool)
     frames                 save representative frames from the running cameras (backend/data/perf/frames)
     bench                  benchmark CPU configurations on those frames (separate processes, idle priority)
     apply                  write CPU settings to .env (backup first), restart, measure, keep or roll back
@@ -201,7 +201,7 @@ def write_env(settings, reason):
     if new:
         if "# >>> pyrotech-perf" not in "\n".join(out):
             out += ["", "# >>> pyrotech-perf: CPU settings written by scripts/perf/pyrotech_perf.py",
-                    "#     (undo: scripts/debian/perf-tune.sh rollback; backups in backend/data/perf/backups)"]
+                    "#     (undo: ./aivision.sh perf rollback; backups in backend/data/perf/backups)"]
             out += [f"{k}={v}" for k, v in new.items()]
             out.append("# <<< pyrotech-perf")
         else:
@@ -738,9 +738,9 @@ def start_app(wait=90):
         subprocess.run(sudo_cmd(["systemctl", "start", BACKEND_UNIT, FRONTEND_UNIT]), check=False)
     else:
         logp = os.path.join(PERF_DIR, "app.log")
-        say(f"starting ./start.sh --no-browser (log: {os.path.relpath(logp, REPO)})")
+        say(f"starting ./aivision.sh run --no-browser (log: {os.path.relpath(logp, REPO)})")
         lf = open(logp, "a")
-        p = subprocess.Popen([os.path.join(REPO, "start.sh"), "--no-browser"], cwd=REPO, stdout=lf, stderr=subprocess.STDOUT,
+        p = subprocess.Popen([os.path.join(REPO, "aivision.sh"), "run", "--no-browser"], cwd=REPO, stdout=lf, stderr=subprocess.STDOUT,
                              stdin=subprocess.DEVNULL, start_new_session=True)
         with open(APP_PIDFILE, "w") as f:
             f.write(str(p.pid))
@@ -759,11 +759,11 @@ def stop_app(timeout=40):
         bp = backend_pid()
         if bp:
             warn(f"the backend (PID {bp}) was not started by this tool - stop it in its own terminal with Ctrl+C "
-                 f"(or install the services: scripts/debian/install-services.sh)")
+                 f"(or install the services: ./aivision.sh install)")
             return False
         say("application not running")
         return True
-    say(f"stopping ./start.sh (process group {pid}) with Ctrl+C semantics")
+    say(f"stopping ./aivision.sh run (process group {pid}) with Ctrl+C semantics")
     try:
         os.killpg(pid, signal.SIGINT)
     except OSError:
@@ -1296,7 +1296,7 @@ def cmd_apply(a, settings=None, bench_ref=None):
         entry["status"] = "pending-restart"
         append_jsonl(CHANGES, entry)
         warn("this tool did not start the backend and no systemd service is installed: restart the backend yourself "
-             "(Ctrl+C in its terminal, then ./start.sh), then run:  perf-tune.sh validate")
+             "(Ctrl+C in its terminal, then ./aivision.sh run), then run:  ./aivision.sh perf validate")
         return True
     if not restart_backend():
         entry["status"] = "restart-failed"
@@ -1427,7 +1427,7 @@ def cmd_rollback(a):
         rt = api("/system/runtime", 5)[1] or {}
         say("in effect now: " + json.dumps(rt.get("applied", {})))
     else:
-        say("restart the backend yourself (Ctrl+C in its terminal, then ./start.sh) to use the restored settings")
+        say("restart the backend yourself (Ctrl+C in its terminal, then ./aivision.sh run) to use the restored settings")
 
 
 def cmd_history(a):
@@ -1458,7 +1458,7 @@ def write_report(entry):
          + (f", fast cores {cpu_list_text(hw['bigCores'])}" if hw.get("bigCores") else "") + f"), {hw.get('glibc')}",
          f"- settings: {settings_label(entry['settingsBefore'])} -> {settings_label(entry['settingsAfter'])}",
          f"- .env backup: {os.path.relpath(entry['backup'], REPO)}"
-         + ("" if entry["status"] == "rolled-back" else " (undo: `scripts/debian/perf-tune.sh rollback`)"), ""]
+         + ("" if entry["status"] == "rolled-back" else " (undo: `./aivision.sh perf rollback`)"), ""]
     if b and af:
         L += ["## Measured on this machine (live application, same cameras)", "",
               "| | before | after |", "|---|---|---|",
@@ -1474,7 +1474,7 @@ def write_report(entry):
         L.append("")
     elif b:
         L += ["Before (measured):", f"- {b['processedFpsTotal']} fps analysed, system CPU {b['systemCpu']}%", "",
-              "After: not measured yet (`scripts/debian/perf-tune.sh validate`).", ""]
+              "After: not measured yet (`./aivision.sh perf validate`).", ""]
     bench = entry.get("bench")
     if bench:
         L += ["## Benchmark (separate processes, saved frames)", "", f"{bench}", ""]
@@ -1491,7 +1491,7 @@ def cmd_status(a):
     print(f"  hardware: {hw.get('cpuModel') or '?'} | {hw.get('arch')} | {hw.get('cpus')} CPUs ({hw.get('cpusUsable')} usable)"
           + (f" | fast cores {cpu_list_text(hw['bigCores'])}, slow {cpu_list_text(hw['littleCores'])}" if hw.get("bigCores") else "")
           + f" | {hw.get('glibc')} | OpenVINO {'installed' if hw.get('openvinoInstalled') else 'not installed'}")
-    print(f"  start-up: {'systemd services' if systemd_mode() else ('./start.sh started by this tool' if managed_pid() else './start.sh / manual')}")
+    print(f"  start-up: {'systemd services' if systemd_mode() else ('./aivision.sh run started by this tool' if managed_pid() else './aivision.sh run / manual')}")
     print(f"  .env CPU settings: {settings_label(current_settings())}")
     st, rt = api("/system/runtime", 5)
     if st != 200:

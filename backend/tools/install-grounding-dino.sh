@@ -20,7 +20,7 @@ SRC="${1%/}"
 NAME="models--IDEA-Research--grounding-dino-tiny"
 [[ -d "$SRC/$NAME/snapshots" ]] || die "'$SRC' does not contain $NAME/snapshots"
 PY="$(backend_python)"
-[[ -x "$PY" ]] || command -v "$PY" >/dev/null 2>&1 || die "No backend Python environment yet - run ./start.sh --setup-only first."
+[[ -x "$PY" ]] || command -v "$PY" >/dev/null 2>&1 || die "No backend Python environment yet - run ./aivision.sh setup first."
 
 DST="backend/models/object_monitor/hf"
 say "Copying $NAME into $DST"

@@ -110,40 +110,41 @@ enter the password again.
 
 ## Setup and start on Debian / Ubuntu Linux
 
-One command - clone the repository and run `start.sh`:
+ONE script, `aivision.sh`, does everything on Debian / Ubuntu (the AI box):
 
 ```
 git clone https://github.com/pyrotechhumandetection-lab/pyrotech-vision-.git
 cd pyrotech-vision-
-./start.sh
+./aivision.sh install          # downloads + installs every requirement, installs the backend and the web UI as
+                               # services (start at every boot, restart after a crash), starts and checks them
 ```
 
-`start.sh` runs `setup-backend.sh` (only the missing steps), then the web UI (`start-frontend.sh`, in the
-background) and the backend (`start-backend.sh`, in the terminal) and opens http://127.0.0.1:5173.
-Ctrl+C stops both. The first start needs internet and takes a few minutes (about 1 GB); later starts
-take seconds.
+Console: `http://<box-ip>:5173`. The first run needs internet and takes a few minutes (about 1 GB).
 
-| Linux script | Windows script | What it does |
-|---|---|---|
-| `start.sh` | `start_backend.cmd`, `start.cmd` | setup if needed, then web UI + backend (all five modules) |
-| `setup-backend.sh` | `setup-backend.cmd` | apt packages (Python venv, Node.js, libraries OpenCV needs; asks for the sudo password once), `.env` from `.env.example`, `backend/.venv` with the pinned packages, contrib OpenCV, self-check |
-| `start-backend.sh` | `start-backend.cmd` | backend only (`./start-backend.sh --check` = self-check) |
-| `start-frontend.sh` | `start-frontend.cmd` | web UI only |
-| `backend/tools/install-grounding-dino.sh <folder>` | `install-grounding-dino.cmd` | optional Object Monitoring Layer 3 |
-| `backend/tools/download-wheels.sh` | `download-wheels.cmd` | download all packages to `backend/wheels/linux` for an offline install |
+| Command | What it does |
+|---|---|
+| `./aivision.sh install` | first installation (and after moving the folder / changing ports): setup + services + start + check |
+| `./aivision.sh update [--data-dir DIR]` | backup, `git pull`, setup only if requirements changed, reinstall, check |
+| `./aivision.sh start` / `stop` / `restart [backend\|frontend]` | control the services |
+| `./aivision.sh status` | step-by-step status (services, ports, API, cameras, detections, recent errors) |
+| `./aivision.sh setup [--reinstall]` | only download / install the requirements (apt, Node.js, `backend/.venv`, pinned packages, self-check) |
+| `./aivision.sh run` | run in this terminal without services (Ctrl+C stops); refused while the services run |
+| `./aivision.sh check` | read-only environment check |
+| `./aivision.sh ai-stream list` / `sub --all` | let the AI analyse the cameras' substreams |
+| `./aivision.sh perf status` | performance monitor / CPU tuning |
+| `./aivision.sh uninstall` | remove the services (data, models, `.env` are kept) |
+| `./aivision.sh <command> --help` | details |
 
-**Debian AI box (starts by itself at every boot):** `scripts/debian/install-services.sh` installs the
-backend and the web UI as systemd services - automatic start at boot, restart after a crash, running
-detections resume after a reboot, console at `http://<box-ip>:5173`. See
-[docs/DEBIAN_AI_BOX_DEPLOYMENT.md](docs/DEBIAN_AI_BOX_DEPLOYMENT.md).
+Optional tools: `backend/tools/install-grounding-dino.sh <folder>` (Object Monitoring Layer 3),
+`backend/tools/download-wheels.sh` (all packages to `backend/wheels/linux` for an offline install).
+Windows keeps its own `.cmd` scripts (table above). Details: [docs/DEBIAN_AI_BOX_DEPLOYMENT.md](docs/DEBIAN_AI_BOX_DEPLOYMENT.md).
 
 `backend/tools/migrate_data.ps1` and `venv-in-use.ps1` are Windows-only and have no Linux version (not needed there).
 
 * Python 3.13 or 3.14 is used; on Debian 12 (Python 3.11) setup fetches Python 3.13 with `uv` into
   `backend/.uv` without changing the system Python. CPU PyTorch unless an NVIDIA GPU is found.
-* Settings: edit `.env` (ports, `HOST=0.0.0.0` to open the UI from other PCs, model, engine), then run
-  `./start.sh` again. `AIV_TORCH=cpu|cuda` forces the PyTorch build.
-* Options of `start.sh`: `--setup-only`, `--check`, `--reinstall` (rebuild `backend/.venv`), `--no-browser`.
+* Settings: edit `.env` (ports, `HOST=0.0.0.0` to open the UI from other PCs, model, engine), then `./aivision.sh restart` (services) or run `./aivision.sh run` again. `AIV_TORCH=cpu|cuda` forces the PyTorch build.
+* `./aivision.sh run` options: `--setup-only`, `--check`, `--reinstall` (rebuild `backend/.venv`), `--no-browser`.
 * OpenVINO (faster CPU inference) is optional: where no OpenVINO package exists for the PC (for example
   64-bit ARM with an older system library) setup warns and every module runs on PyTorch.
   `AIV_OPENVINO=off` skips it. 32-bit systems are not supported (no PyTorch).
@@ -225,7 +226,7 @@ substream while the main stream stays the viewing stream; *Snapshot image* = box
 full-resolution original from the main stream. Measurements, costs and setup:
 [docs/DEBIAN_AI_BOX_DEPLOYMENT.md §11](docs/DEBIAN_AI_BOX_DEPLOYMENT.md).
 
-**CPU thread settings** are read once at start-up. Do not guess them - `scripts/debian/perf-tune.sh` monitors the
+**CPU thread settings** are read once at start-up. Do not guess them - `./aivision.sh perf` monitors the
 running application, benchmarks thread configurations on frames from your cameras, applies the best one to `.env`
 (backup first), measures before/after and rolls back automatically when there is no measured gain:
 [docs/DEBIAN_AI_BOX_DEPLOYMENT.md §13](docs/DEBIAN_AI_BOX_DEPLOYMENT.md).
@@ -444,7 +445,7 @@ backend\.venv\Scripts\python -m unittest discover -s backend/tests -t . -v
 backend\.venv\Scripts\python backend\main.py --check
 ```
 
-On Debian / Ubuntu: `backend/.venv/bin/python -m unittest discover -s backend/tests -t .` and `./start.sh --check`.
+On Debian / Ubuntu: `backend/.venv/bin/python -m unittest discover -s backend/tests -t .` and `./aivision.sh run --check`.
 
 ## Frontend without a backend
 
