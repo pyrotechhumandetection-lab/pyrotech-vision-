@@ -56,7 +56,11 @@ if ! mkdir -p "$BACKUP_DIR/$TS" 2>/dev/null; then          # sudo only when the 
 fi
 chmod 700 "$BACKUP_DIR/$TS"
 [[ -f .env ]] && cp -p .env "$BACKUP_DIR/$TS/.env" && ok ".env saved"
-CUR_DATA="$(env_get AIV_DATA_DIR "$REPO/backend/data")"
+# the backend's own rules (backend/config.py): relative paths are relative to backend/; default data =
+# backend/data, default snapshot images = backend/snapshots (NOT inside the data folder)
+abs_backend() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s' "$REPO/backend/$1" ;; esac; }
+CUR_DATA="$(abs_backend "$(env_get AIV_DATA_DIR "$REPO/backend/data")")"
+CUR_SNAP="$(abs_backend "$(env_get AIV_SNAPSHOT_DIR "$REPO/backend/snapshots")")"
 if [[ -d "$CUR_DATA" ]]; then
   mkdir -p "$BACKUP_DIR/$TS/data"
   find "$CUR_DATA" -maxdepth 1 -name '*.json' -exec cp -p {} "$BACKUP_DIR/$TS/data/" \; 2>/dev/null || true
@@ -88,11 +92,26 @@ if [[ -n "$DATA_DIR" ]]; then
   DATA_DIR="$(realpath -m "$DATA_DIR")"
   as_root mkdir -p "$DATA_DIR/snapshots"
   as_root chown -R "$(stat -c %U "$REPO"):$(stat -c %G "$REPO")" "$DATA_DIR"
-  OLD_SNAP="$(env_get AIV_SNAPSHOT_DIR "$CUR_DATA/snapshots")"
   if [[ "$CUR_DATA" != "$DATA_DIR" && -d "$CUR_DATA" ]]; then
     info "copying $CUR_DATA -> $DATA_DIR (the old folder is kept; delete it yourself once everything works)"
-    cp -a -n "$CUR_DATA/." "$DATA_DIR/" 2>/dev/null || true
-    if [[ -d "$OLD_SNAP" && "$OLD_SNAP" != "$DATA_DIR/snapshots" ]]; then cp -a -n "$OLD_SNAP/." "$DATA_DIR/snapshots/" 2>/dev/null || true; fi
+    as_root systemctl stop "$BACKEND_UNIT" 2>/dev/null || true      # no writes while copying
+    cp -a -n "$CUR_DATA/." "$DATA_DIR/" || die "copying the data failed - .env NOT changed, nothing switched"
+    # verify: every camera / event list must have arrived (an existing EMPTY list in the target is replaced)
+    for f in "$CUR_DATA"/*.json; do
+      [[ -f "$f" ]] || continue
+      t="$DATA_DIR/$(basename "$f")"
+      if ! cmp -s "$f" "$t"; then
+        if [[ "$(stat -c %s "$t" 2>/dev/null || echo 0)" -le 2 ]]; then cp -a "$f" "$t"
+        else note "$(basename "$f") differs in both folders - kept the one in $DATA_DIR (old one in $CUR_DATA)"; fi
+      fi
+    done
+    [[ ! -f "$CUR_DATA/cameras.json" || -s "$DATA_DIR/cameras.json" ]] || die "cameras.json did not arrive - .env NOT changed"
+    ok "cameras / events copied ($(ls "$DATA_DIR"/*.json 2>/dev/null | wc -l) files)"
+  fi
+  if [[ -d "$CUR_SNAP" && "$CUR_SNAP" != "$DATA_DIR/snapshots" ]]; then
+    info "copying snapshot images $CUR_SNAP -> $DATA_DIR/snapshots (old folder kept)"
+    cp -a -n "$CUR_SNAP/." "$DATA_DIR/snapshots/" || die "copying the snapshot images failed - .env NOT changed"
+    ok "snapshot images copied ($(du -sh "$DATA_DIR/snapshots" | cut -f1))"
   fi
   [[ -f .env ]] || cp .env.example .env
   cp -p .env "$BACKUP_DIR/$TS/.env.before-data-dir"
