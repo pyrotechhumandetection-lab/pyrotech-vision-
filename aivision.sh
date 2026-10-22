@@ -1572,6 +1572,7 @@ PY
   off)
     env_set AIV_ENGINE openvino; ok "NPU engine off - CPU engine (AIV_ENGINE=openvino, PyTorch if OpenVINO is missing)"; npu_restart ;;
   model)
+    local prev; prev="$(env_get AIV_RKNN_MODEL models/yolov8n_rknn_model)"
     case "${1:-}" in
       fp16) env_set AIV_RKNN_MODEL models/yolov8n_rknn_model ;;
       int8) [[ -f backend/models/yolov8n_int8_rknn_model/metadata.yaml ]] || die "INT8 model not found"
@@ -1580,8 +1581,13 @@ PY
       *) die "usage: ./aivision.sh npu model fp16|int8" ;;
     esac
     ok "NPU model: $1"
-    if [[ "$(env_get AIV_ENGINE auto)" == "auto" ]]; then
-      npu_test || warn "the NPU is NOT used with this model (CPU engine) - ./aivision.sh npu model fp16 to go back"
+    # the model to go back to: the previous one, or FP16 when the previous one is this same model
+    [[ "$prev" == "$(env_get AIV_RKNN_MODEL)" ]] && prev="models/yolov8n_rknn_model"
+    if [[ "$(env_get AIV_ENGINE auto)" == "auto" ]] && ! npu_test; then
+      # never leave the box on the CPU because a new model failed: go back to the previous model
+      warn "the NPU test failed with this model - going back to $prev"
+      env_set AIV_RKNN_MODEL "$prev"
+      npu_test || warn "the previous model failed the test too - the CPU engine is used (./aivision.sh npu check)"
     fi
     npu_restart ;;
   *) usage npu; die "Unknown npu command: $sub" ;;

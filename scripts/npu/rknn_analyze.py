@@ -607,13 +607,14 @@ def section_pipeline_accuracy(dirs, args, do_pipe, do_acc):
             for _, nm, m_, e_ in sorted(worst, reverse=True)[:5]:
                 say(f"      most different: {nm}  missed {m_}, extra {e_}")
             # agreement rules (each one a problem of its own): strong boxes missed <= 3 %, boxes found >= 95 %,
-            # extra boxes <= 10 %, mean confidence difference <= 0.05, every class with >= 5 boxes found >= 80 %
+            # extra boxes <= 10 % (a single box never fails these two), mean confidence difference <= 0.05, every class with >= 5 boxes found >= 80 %
             fails = []
             if tot["strongRef"] and tot["strongMissed"] / tot["strongRef"] > 0.03:
                 fails.append(f"misses {pct(tot['strongMissed'], tot['strongRef'])} of the strong detections")
-            if n and tot["matched"] / n < 0.95:
+            # (a single box on a handful of images is not a trend: at least 2 boxes must differ for these two)
+            if n and tot["missed"] > max(1, 0.05 * n):
                 fails.append(f"finds only {pct(tot['matched'], n)} of the boxes")
-            if n and tot["extra"] / n > 0.10:
+            if n and tot["extra"] > max(1, 0.10 * n):
                 fails.append(f"adds {tot['extra']} extra boxes ({pct(tot['extra'], n)})")
             if cdiff and float(np.mean(cdiff)) > 0.05:
                 fails.append(f"confidence differs by {np.mean(cdiff):.3f} on average (thresholds would act differently)")
