@@ -132,6 +132,7 @@ Console: `http://<box-ip>:5173`. The first run needs internet and takes a few mi
 | `./aivision.sh check` | read-only environment check |
 | `./aivision.sh ai-stream list` / `sub --all` | let the AI analyse the cameras' substreams |
 | `./aivision.sh perf status` | performance monitor / CPU tuning |
+| `./aivision.sh npu setup` / `status` / `check` | Rockchip RK3588 NPU for Human / Vehicle / Human Count ([details](docs/DEBIAN_AI_BOX_DEPLOYMENT.md#14-rockchip-npu-rk3588)) |
 | `./aivision.sh uninstall` | remove the services (data, models, `.env` are kept) |
 | `./aivision.sh <command> --help` | details |
 

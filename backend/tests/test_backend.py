@@ -1253,3 +1253,96 @@ class AdaptiveScheduleTests(unittest.TestCase):
         self.assertFalse(g.motion_in(left, 0.5))                    # trees / lights outside the zone ignored
         self.assertTrue(g.motion_in(right, 0.5))
         self.assertTrue(g.motion_in(None, 0.5))                     # no zones = whole picture
+
+
+class RknnNpuTests(unittest.TestCase):
+    """Rockchip NPU engine on a PC: the ctypes runtime against a fake librknnrt.so (tests/fake_rknnrt.c, needs gcc),
+    the Ultralytics RKNN backend through the shim, the pipeline's fixed input size and the engine fallback."""
+
+    @classmethod
+    def setUpClass(cls):
+        import shutil
+        import subprocess
+        cls.lib = os.environ.get("AIV_TEST_FAKE_RKNN_LIB", "")      # prebuilt fake library (no gcc on the box)
+        if not cls.lib:
+            if not shutil.which("gcc"):
+                raise unittest.SkipTest("gcc not available")
+            cls.tmp = tempfile.mkdtemp()
+            cls.lib = os.path.join(cls.tmp, "librknnrt.so")
+            src = Path(__file__).with_name("fake_rknnrt.c")
+            subprocess.run(["gcc", "-shared", "-fPIC", "-O1", str(src), "-o", cls.lib], check=True)
+        cls.env = {k: os.environ.get(k) for k in ("AIV_RKNN_SOC", "AIV_RKNN_LIB", "AIV_NPU_CORE", "AIV_RKNN_CTYPES")}
+        os.environ.update(AIV_RKNN_SOC="rk3588", AIV_RKNN_LIB=cls.lib, AIV_NPU_CORE="rr", AIV_RKNN_CTYPES="1")
+        cls.engine = config.ENGINE
+        config.ENGINE = "rknn"                  # independent of AIV_ENGINE in .env and of the NPU-test marker
+        if not any(config.RKNN_MODEL_PATH.glob("*.rknn")):
+            raise unittest.SkipTest("no RKNN model in backend/models")
+
+    @classmethod
+    def tearDownClass(cls):
+        config.ENGINE = cls.engine
+        for k, v in cls.env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_runtime_shapes_cores_and_rgb(self):
+        import numpy as np
+        from backend.detection import rknn_runtime as rt
+        masks = []
+        for _ in range(4):
+            r = rt.RKNNLite()
+            self.assertEqual(r.load_rknn(str(next(config.RKNN_MODEL_PATH.glob("*.rknn")))), 0)
+            self.assertEqual(r.init_runtime(), 0)
+            masks.append(r.core_mask)
+        self.assertEqual(sorted(masks[:3]), [rt.CORE_0, rt.CORE_1, rt.CORE_2])    # round robin over 3 cores
+        self.assertEqual(masks[3], masks[0])
+        x = np.zeros((1, 640, 640, 3), np.uint8)
+        x[..., 0] = 255
+        y = r.inference([x])[0]
+        self.assertEqual(y.shape, (1, 84, 8400))
+        self.assertAlmostEqual(float(y[0, 5, 1]), 1.0, places=3)        # channel 0 = R reached the NPU
+        self.assertEqual(r.sdk_version(), ("2.3.2 (fake)", "0.9.8"))
+        self.assertEqual(r.last_run_us(), 1234)
+
+    def test_engine_selected_and_pipeline_boxes(self):
+        import numpy as np
+        from backend.detection.pipeline import PersonVehiclePipeline
+        eng, path = config.resolve_engine()
+        self.assertEqual(eng, "rknn")
+        p = PersonVehiclePipeline(path, config.TRACKER_CONFIG, 416, None, engine=eng)
+        self.assertEqual(p.img_size, 640)                     # fixed RKNN input size, 416 ignored
+        self.assertEqual(p.npu_precision, "FP16")
+        self.assertTrue(p.npu_core.startswith("core"))
+        fr = np.zeros((720, 1280, 3), np.uint8)
+        r = p.model.predict(fr, imgsz=p.img_size, conf=0.5, verbose=False)[0]
+        self.assertEqual(r.boxes.xyxy.round().tolist(), [[540.0, 160.0, 740.0, 560.0]])   # letterbox undone
+        self.assertEqual(int(r.boxes.cls[0]), 0)
+
+    def test_auto_needs_passed_npu_test(self):
+        saved, saved_marker = config.ENGINE, config.NPU_VERIFIED
+        try:
+            config.ENGINE = "auto"
+            config.NPU_VERIFIED = Path(tempfile.mkdtemp()) / "verified"
+            self.assertNotEqual(config.resolve_engine()[0], "rknn")          # no passed test yet
+            config.NPU_VERIFIED.write_text(config.RKNN_MODEL_PATH.name)
+            self.assertEqual(config.resolve_engine()[0], "rknn")
+            config.NPU_VERIFIED.write_text("yolov8n_int8_rknn_model")       # tested another model
+            self.assertNotEqual(config.resolve_engine()[0], "rknn")
+        finally:
+            config.ENGINE, config.NPU_VERIFIED = saved, saved_marker
+
+    def test_fallback_without_library(self):
+        os.environ["AIV_RKNN_LIB"] = "/nonexistent/librknnrt.so"
+        try:
+            from backend.detection import rknn_runtime as rt
+            saved = rt.LIB_CANDIDATES[:]
+            rt.LIB_CANDIDATES[:] = []
+            try:
+                self.assertNotEqual(config.resolve_engine()[0], "rknn")
+                self.assertIn(config.fallback_engine("rknn")[0], ("openvino", "pytorch"))
+            finally:
+                rt.LIB_CANDIDATES[:] = saved
+        finally:
+            os.environ["AIV_RKNN_LIB"] = self.lib

@@ -229,24 +229,27 @@ class CameraSession:
             raise SessionError("MODEL_NOT_FOUND", f"Tracker config not found: {config.TRACKER_CONFIG.name}", 500)
         from backend.detection.pipeline import PersonVehiclePipeline
         engine, path = config.resolve_engine()
-        try:
-            self.pipeline = PersonVehiclePipeline(path, config.TRACKER_CONFIG, config.IMG_SIZE, config.DEVICE, engine=engine)
-        except Exception as e:
-            if engine == "pytorch":
-                raise SessionError("ENGINE_FAILURE", f"Could not load the detection model: {e}", 500)
-            log.warning("OpenVINO model could not be loaded (%s) - using PyTorch", e)
+        while True:
             try:
-                engine = "pytorch"
-                self.pipeline = PersonVehiclePipeline(config.MODEL_PATH, config.TRACKER_CONFIG, config.IMG_SIZE, config.DEVICE, engine=engine)
-            except Exception as e2:
-                raise SessionError("ENGINE_FAILURE", f"Could not load the detection model: {e2}", 500)
-        self.metrics["engine"] = {"openvino": "OpenVINO", "pytorch": "PyTorch"}[engine]
+                self.pipeline = PersonVehiclePipeline(path, config.TRACKER_CONFIG, config.IMG_SIZE, config.DEVICE, engine=engine)
+                break
+            except Exception as e:
+                if engine == "pytorch":
+                    raise SessionError("ENGINE_FAILURE", f"Could not load the detection model: {e}", 500)
+                nxt, path = config.fallback_engine(engine)
+                log.warning("%s model could not be loaded (%s) - using %s", config.engine_label(engine), e, config.engine_label(nxt))
+                engine = nxt
+        self.metrics["engine"] = config.engine_label(engine)
         gpu = engine == "pytorch" and config.DEVICE not in (None, "cpu")
-        self.metrics["device"] = f"GPU cuda:{config.DEVICE}" if gpu else "CPU"
-        self.metrics["precision"] = "FP16" if self.pipeline.half else "FP32"
-        self.metrics["imgSize"] = config.IMG_SIZE
+        if engine == "rknn":
+            self.metrics["device"] = f"NPU ({self.pipeline.npu_core})"
+            self.metrics["precision"] = self.pipeline.npu_precision
+        else:
+            self.metrics["device"] = f"GPU cuda:{config.DEVICE}" if gpu else "CPU"
+            self.metrics["precision"] = "FP16" if self.pipeline.half else "FP32"
+        self.metrics["imgSize"] = self.pipeline.img_size
         log.info("camera %s: inference engine %s on %s, %s, imgsz %d (%s)", self.camera_id, self.metrics["engine"],
-                 self.metrics["device"], self.metrics["precision"], config.IMG_SIZE, path if engine != "pytorch" else config.MODEL_PATH)
+                 self.metrics["device"], self.metrics["precision"], self.pipeline.img_size, path if engine != "pytorch" else config.MODEL_PATH)
 
     def ensure_counter(self):
         """Load the Human Count engine (same shipped yolov8n weights, separate model instance)."""
@@ -256,19 +259,18 @@ class CameraSession:
             raise SessionError("MODEL_NOT_FOUND", f"Model file not found: {config.MODEL_PATH.name}", 500)
         from backend.detection.human_count import HumanCounter
         engine, path = config.resolve_engine()
-        try:
-            self.counter = HumanCounter(path, config.IMG_SIZE, config.DEVICE, engine=engine)
-        except Exception as e:
-            if engine == "pytorch":
-                raise SessionError("ENGINE_FAILURE", f"Could not load the person detection model: {e}", 500)
-            log.warning("OpenVINO model could not be loaded for Human Count (%s) - using PyTorch", e)
+        while True:
             try:
-                engine = "pytorch"
-                self.counter = HumanCounter(config.MODEL_PATH, config.IMG_SIZE, config.DEVICE, engine=engine)
-            except Exception as e2:
-                raise SessionError("ENGINE_FAILURE", f"Could not load the person detection model: {e2}", 500)
+                self.counter = HumanCounter(path, config.IMG_SIZE, config.DEVICE, engine=engine)
+                break
+            except Exception as e:
+                if engine == "pytorch":
+                    raise SessionError("ENGINE_FAILURE", f"Could not load the person detection model: {e}", 500)
+                nxt, path = config.fallback_engine(engine)
+                log.warning("%s model could not be loaded for Human Count (%s) - using %s", config.engine_label(engine), e, config.engine_label(nxt))
+                engine = nxt
         if not self.metrics.get("engine"):
-            self.metrics["engine"] = {"openvino": "OpenVINO", "pytorch": "PyTorch"}[engine]
+            self.metrics["engine"] = config.engine_label(engine)
         log.info("camera %s: Human Count engine ready (%s)", self.camera_id, engine)
 
     def ensure_fire(self):

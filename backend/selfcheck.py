@@ -100,8 +100,16 @@ def run():
         return _done(fails, warns)
     t0 = time.time()
     engine, model_path = config.resolve_engine()
-    line("OK", f"inference engine: {engine} ({Path(model_path).name})")
-    p = PersonVehiclePipeline(model_path, config.TRACKER_CONFIG, config.IMG_SIZE, config.DEVICE, engine=engine)
+    try:
+        p = PersonVehiclePipeline(model_path, config.TRACKER_CONFIG, config.IMG_SIZE, config.DEVICE, engine=engine)
+    except Exception as e:
+        if engine != "rknn":
+            raise
+        line("WARN", f"NPU engine could not be loaded ({e}) - the backend uses the CPU engine (./aivision.sh npu check)")
+        engine, model_path = config.fallback_engine(engine)
+        p = PersonVehiclePipeline(model_path, config.TRACKER_CONFIG, config.IMG_SIZE, config.DEVICE, engine=engine)
+    where = f", {p.npu_core}, {p.npu_precision}" if engine == "rknn" else ""
+    line("OK", f"inference engine: {config.engine_label(engine)} ({Path(model_path).name}{where})")
     plan = p.build_plan(module_config({}, "human"), module_config({}, "vehicle"), [])
     labels, ms = set(), 0.0
     for _ in range(6):   # MIN_HITS_TO_CONFIRM + label voting need several frames

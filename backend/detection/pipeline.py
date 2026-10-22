@@ -69,6 +69,34 @@ VEHICLE_LABELS = ("2-Wheeler", "4-Wheeler", "Bus", "Truck")
 LABEL_TO_COCO = {"Person": [0], "2-Wheeler": [1, 3], "4-Wheeler": [2], "Bus": [5], "Truck": [7]}
 
 
+def load_rknn_prereqs(model_path):
+    """Rockchip NPU: install the runtime for Ultralytics; (input size, precision label) of the RKNN model."""
+    from backend.detection import rknn_runtime
+    ok, why = rknn_runtime.available()
+    if not ok:
+        raise RuntimeError(f"RKNN NPU not available: {why}")
+    rknn_runtime.install_for_ultralytics()
+    info = rknn_runtime.model_info(model_path)
+    if not info["file"]:
+        raise RuntimeError(f"no .rknn file in {model_path}")
+    return info["imgsz"], "INT8" if info["quantize"] == 8 else "FP16"
+
+
+def npu_core_of(yolo):
+    """NPU core of a loaded Ultralytics RKNN model ('core 0' ...), best effort."""
+    try:
+        from backend.detection import rknn_runtime
+        ab = yolo.predictor.model                                    # AutoBackend
+        be = getattr(ab, "backend", None) or getattr(ab, "model", None)   # RKNNBackend
+        rk = getattr(be, "model", None)                              # RKNNLite (shim or real)
+        mask = getattr(rk, "core_mask", None)
+        if mask is None:
+            mask = getattr(rk, "_aivision_core", None)
+        return rknn_runtime.core_name(mask) if mask is not None else "auto"
+    except Exception:
+        return "auto"
+
+
 def fp16_kwargs():
     """FP16 inference argument for the installed Ultralytics: 'quantize' (8.4+, 'half' is deprecated there)."""
     try:
@@ -136,12 +164,17 @@ class PersonVehiclePipeline:
         from backend.detection.tracker import install as install_tracker
         install_tracker()                # ByteTrack + buffered IoU for fast vehicles (see tracker.py)
 
+        self.npu_core, self.npu_precision = None, None
+        if engine == "rknn":             # Rockchip NPU: fixed input size of the exported model
+            img_size, self.npu_precision = load_rknn_prereqs(model_path)
         self.model = YOLO(str(model_path), task="detect")
         self.model_path = str(model_path)
         self.engine = engine
         self.tracker_config = str(tracker_config)
         self.img_size = img_size
-        self.device = device
+        self.device = None if engine == "rknn" else device
+        if engine == "rknn":
+            self._npu_warmup()
         from backend import config as _cfg
         # FP16 / NMS IoU only for the PyTorch model on a CUDA device (see config.use_half)
         self.half = engine == "pytorch" and _cfg.use_half()
@@ -154,6 +187,13 @@ class PersonVehiclePipeline:
         self.reset_tracking()
         if self.device not in (None, "cpu") and engine == "pytorch":
             self._warmup(_cfg.GPU_WARMUP)
+
+    def _npu_warmup(self):
+        """Load the RKNN model now (Ultralytics loads lazily on the first call) so load errors surface here and
+        the engine can fall back to the CPU; also reports the NPU core the model runs on."""
+        blank = np.zeros((self.img_size * 9 // 16, self.img_size, 3), dtype=np.uint8)
+        self.model.predict(blank, imgsz=self.img_size, verbose=False)
+        self.npu_core = npu_core_of(self.model)
 
     def _warmup(self, n):
         """A few predict() passes on a blank frame: CUDA context, cuDNN algorithm search and FP16 conversion
@@ -303,6 +343,8 @@ class PersonVehiclePipeline:
             self._share = {"conf": conf, "classes": set(classes), "person_conf": float(share_person_conf)}
             conf = min(conf, float(share_person_conf))
             classes = sorted(set(classes) | {PERSON_CLASS})
+        if self.engine == "rknn":        # the RKNN model has one fixed input size
+            imgsz = self.img_size
         kwargs = dict(imgsz=int(imgsz or self.img_size), conf=conf, classes=classes, verbose=False)
         if self.device is not None:
             kwargs["device"] = self.device

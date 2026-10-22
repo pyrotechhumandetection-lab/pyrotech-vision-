@@ -1,0 +1,22 @@
+{
+ "ref": 122,
+ "found": 122,
+ "missed": 0,
+ "extra": 0,
+ "strong": 100,
+ "strongMissed": 0,
+ "images": 32,
+ "confDiffMean": 0.0008,
+ "confDiffMax": 0.0079,
+ "iouMean": 0.9972,
+ "perClass": {
+  "0": [
+   105,
+   105
+  ],
+  "5": [
+   17,
+   17
+  ]
+ }
+}

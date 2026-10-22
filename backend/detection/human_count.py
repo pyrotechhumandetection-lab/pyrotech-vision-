@@ -199,10 +199,15 @@ class PersonDetector:
 
     def __init__(self, model_path, img_size=640, device=None, engine="pytorch"):
         from ultralytics import YOLO
+        if engine == "rknn":             # Rockchip NPU: fixed input size of the exported model
+            from backend.detection.pipeline import load_rknn_prereqs
+            img_size, _prec = load_rknn_prereqs(model_path)
         self.model = YOLO(str(model_path), task="detect")
         self.img_size = img_size
-        self.device = device
+        self.device = None if engine == "rknn" else device
         self.engine = engine
+        if engine == "rknn":             # load now: errors fall back to the CPU engine
+            self.model.predict(np.zeros((img_size * 9 // 16, img_size, 3), np.uint8), imgsz=img_size, verbose=False)
 
     def detect(self, frame, conf):
         kwargs = dict(imgsz=self.img_size, conf=conf, classes=[PERSON_COCO_ID], verbose=False)
@@ -271,7 +276,7 @@ class HumanCounter:
         zones = {z["id"]: z for z in (camera_zones or []) if z.get("enabled", True)}
         self.zones = [zones[i] for i in (cfg.get("zones") or []) if i in zones]
         img = int((cfg.get("schedule") or {}).get("imgSize") or 0)
-        if img:
+        if img and self.detector.engine != "rknn":   # the RKNN model has one fixed input size
             self.detector.img_size = img          # model input size only; frames and boxes stay full size
 
     def _in_zone(self, box, polys):

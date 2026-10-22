@@ -582,3 +582,61 @@ small / distant people are detected less reliably - test it on your scenes befor
   `AIV_OMP_WAIT_POLICY` values from `.env` and restart the backend - the defaults are the previous behaviour;
 * shared person pass off: `AIV_SHARED_PERSON_INFERENCE=0`;
 * the tool's files: `backend/data/perf/` (frames, logs, reports - never needed by the application).
+
+## 14. Rockchip NPU (RK3588)
+
+The box's RK3588 has a 3-core NPU (6 TOPS) that the CPU engines (PyTorch / OpenVINO) never used: every AI pass of
+Human Detection, Vehicle Detection and Human Count ran on the CPU (about 0.5 s per frame on the box), which also
+held up the live view while a person was in the picture. The NPU engine runs the **same yolov8n weights**
+(converted, not retrained) on the NPU; resizing, NMS, ByteTrack, zones, confirmation and snapshots are unchanged.
+Fire & Smoke and Object Monitoring still run on the CPU.
+
+### Commands
+
+```bash
+./aivision.sh npu setup              # NPU runtime + device access + NPU engine on + restart
+./aivision.sh npu status             # engine / NPU core / precision / AI fps per camera
+./aivision.sh npu check              # analysis report (read-only) -> logs/npu_report_<date>.txt
+./aivision.sh npu check --camera CAM-01 --streams 8     # accuracy on that camera, 8 parallel streams
+sudo ./aivision.sh npu check         # + NPU load and every program that uses the NPU
+./aivision.sh npu off | on           # CPU engine (AIV_ENGINE=openvino) | NPU (AIV_ENGINE=auto)
+./aivision.sh npu model fp16 | int8  # FP16 (default) | INT8 (faster; check accuracy first)
+```
+
+`./aivision.sh setup` (and therefore `install` / `update`) also installs the runtime on a Rockchip board.
+
+### How it works
+
+* `backend/models/yolov8n_rknn_model/` - `yolov8n.pt` converted with rknn-toolkit2 2.3.2 for rk3588, FP16, 640x640
+  (`scripts/npu/convert_rknn.py`). RKNN simulator vs the FP32 model: 122/122 boxes, mean confidence
+  difference 0.0008.
+* Runtime: Rockchip's `librknnrt.so` 2.3.2, downloaded by `npu setup` into `backend/npu/` (SHA-256 checked; the
+  system's own library and the box vendor's software are not touched). The official Python wrapper
+  (rknn-toolkit-lite2) has no build for Python 3.13, so `backend/detection/rknn_runtime.py` calls the C library
+  directly (ctypes, struct layout checked against `rknn_api.h`) and plugs into Ultralytics' built-in RKNN backend.
+* Each model instance (camera / module) gets the next NPU core (0, 1, 2, 0, ...), `AIV_NPU_CORE` to change.
+* The RKNN model has a fixed 640x640 input; the per-module "image size" setting is ignored on the NPU.
+* If the NPU cannot be used (no runtime, no device access, driver error), the backend logs a warning and uses
+  OpenVINO / PyTorch as before - detection never stops because of the NPU.
+* The backend service gets the `render` / `video` groups (`SupplementaryGroups=`) to open `/dev/dri/renderD*`.
+
+### What `npu check` reports
+
+1. system: SoC, NPU device node + permission, NPU driver version, NPU clock, NPU load (sudo), other programs using
+   the NPU (the box vendor's own AI engine shares it - its load lowers our fps)
+2. runtime: `librknnrt.so` path / version / checksum
+3. models: target chip, toolkit, precision, input / output tensors, NPU memory per camera
+4. benchmark: latency per NPU core and NPU-only time, then N parallel streams (`--streams`) - total and per-stream fps,
+   CPU used
+5. full pipeline: resize + NPU + NMS vs the CPU engine on a real image
+6. accuracy: NPU vs CPU detections on the newest snapshot images (or `--images DIR`, `--camera ID`):
+   boxes found / missed / extra, strong (conf >= 0.5) boxes missed, confidence difference
+   "PROBLEMS FOUND" lists only failed checks.
+
+### Not verified yet
+
+Tested on a PC with a stand-in runtime library (same C interface) and in the Debian test box: engine selection,
+core assignment, boxes mapped back to the camera frame, fallback to the CPU, `npu` commands, analysis script.
+**Not yet run on the real RK3588**: NPU fps, NPU-vs-CPU accuracy on the hardware and the driver version of the box
+must come from `./aivision.sh npu check` there.
+

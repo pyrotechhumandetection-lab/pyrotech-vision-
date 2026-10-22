@@ -279,7 +279,7 @@ def _module(m):
 def health(app, q, body):
     engine, path = config.resolve_engine()
     return {"status": "ok", "version": __version__, "modules": list(MODULES), "modelAvailable": config.MODEL_PATH.is_file(),
-            "modelFile": config.MODEL_PATH.name, "engine": {"openvino": "OpenVINO", "pytorch": "PyTorch"}[engine],
+            "modelFile": config.MODEL_PATH.name, "engine": config.engine_label(engine),
             "autostart": app.autostart.status() if getattr(app, "autostart", None) else None}
 
 
@@ -293,7 +293,7 @@ def runtime_info(app, q, body):
     """CPU settings in effect (thread pools, inference concurrency, affinity), as read back from the libraries."""
     engine, _ = config.resolve_engine()
     return {"requested": runtime.STATE["requested"], "applied": runtime.snapshot(), "errors": runtime.STATE["errors"],
-            "gate": runtime.GATE.stats(), "engine": {"openvino": "OpenVINO", "pytorch": "PyTorch"}[engine],
+            "gate": runtime.GATE.stats(), "engine": config.engine_label(engine),
             "sharedPersonInference": config.SHARED_PERSON_INFERENCE, "imgSize": config.IMG_SIZE,
             "pid": os.getpid()}
 

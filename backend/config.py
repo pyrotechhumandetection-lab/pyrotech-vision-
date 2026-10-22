@@ -130,8 +130,9 @@ def use_half():
     return bool(cuda and (HALF is None or HALF))
 
 # Inference engine for the SAME yolov8n weights:
-#   auto     - OpenVINO when the openvino package and models/yolov8n_openvino_model exist, else PyTorch
+#   auto     - RKNN on a Rockchip NPU board (see RKNN_MODEL_PATH below), else OpenVINO when the openvino package and models/yolov8n_openvino_model exist, else PyTorch
 #   openvino - OpenVINO (falls back to PyTorch with a warning if it cannot be loaded)
+#   rknn     - Rockchip NPU (falls back to OpenVINO / PyTorch with a warning if it cannot be loaded)
 #   pytorch  - original PyTorch .pt model
 # The OpenVINO folder is an FP32, dynamic-shape export of models/yolov8n.pt (identical detections,
 # several times faster on CPU). A custom AIV_MODEL .pt is always run with PyTorch.
@@ -147,12 +148,66 @@ def openvino_available():
         return False
 
 
+# Rockchip NPU (RK3588 ...): RKNN export of the same yolov8n weights, run on the NPU (detection/rknn_runtime.py).
+#   auto picks it first on a Rockchip board once ./aivision.sh npu setup has installed the runtime and its NPU test
+#   (same detections as the CPU engine on sample images) has passed; AIV_ENGINE=rknn forces it without that test.
+#   The RKNN model has a fixed input size (metadata.yaml imgsz, 640): the per-module imgSize setting is ignored.
+RKNN_MODEL_PATH = _path("AIV_RKNN_MODEL", "models/yolov8n_rknn_model")
+ENGINE_LABELS = {"rknn": "RKNN NPU", "openvino": "OpenVINO", "pytorch": "PyTorch"}
+
+
+def engine_label(engine):
+    return ENGINE_LABELS.get(engine, str(engine))
+
+
+NPU_VERIFIED = BACKEND_DIR / "npu" / "verified"      # written by ./aivision.sh npu setup after its NPU test passed
+
+
+def npu_verified():
+    """The NPU test of ./aivision.sh npu setup passed for the RKNN model in use (needed for AIV_ENGINE=auto)."""
+    try:
+        return NPU_VERIFIED.read_text().strip() == RKNN_MODEL_PATH.name
+    except OSError:
+        return False
+
+
+def rknn_available():
+    if ENGINE != "rknn" and not npu_verified():      # auto: only after a passed NPU test
+        return False
+    has_model = any(RKNN_MODEL_PATH.glob("*.rknn")) if RKNN_MODEL_PATH.is_dir() else RKNN_MODEL_PATH.is_file()
+    if not has_model:
+        return False
+    try:
+        from backend.detection import rknn_runtime
+        return rknn_runtime.available()[0]
+    except Exception:
+        return False
+
+
+def rknn_img_size():
+    try:
+        from backend.detection import rknn_runtime
+        return rknn_runtime.model_info(RKNN_MODEL_PATH)["imgsz"]
+    except Exception:
+        return 640
+
+
+def fallback_engine(engine):
+    """Next engine to try when `engine` cannot be loaded: rknn -> openvino (if present) -> pytorch."""
+    if engine == "rknn" and (OPENVINO_MODEL_PATH / "yolov8n.xml").is_file() and openvino_available() \
+            and ENGINE in ("auto", "rknn", "openvino"):
+        return "openvino", OPENVINO_MODEL_PATH
+    return "pytorch", MODEL_PATH
+
+
 def resolve_engine():
     """(engine name, model path) actually used for inference."""
     custom_pt = MODEL_PATH.name.lower() != "yolov8n.pt"
     if DEVICE not in (None, "cpu"):        # an explicit CUDA device means the PyTorch GPU build
         return "pytorch", MODEL_PATH
-    want_ov = ENGINE == "openvino" or (ENGINE == "auto" and not custom_pt)
+    if (ENGINE == "rknn" or (ENGINE == "auto" and not custom_pt)) and rknn_available():
+        return "rknn", RKNN_MODEL_PATH
+    want_ov = ENGINE in ("openvino", "rknn") or (ENGINE == "auto" and not custom_pt)
     if want_ov and (OPENVINO_MODEL_PATH / "yolov8n.xml").is_file() and openvino_available():
         return "openvino", OPENVINO_MODEL_PATH
     return "pytorch", MODEL_PATH
@@ -239,7 +294,7 @@ LOG_LEVEL = _env("AIV_LOG_LEVEL", "INFO").upper()
 def model_label():
     """Model shown in the UI: the yolov8n weights + the engine running them."""
     engine, _ = resolve_engine()
-    return f"{MODEL_PATH.name} (OpenVINO)" if engine == "openvino" else MODEL_PATH.name
+    return MODEL_PATH.name if engine == "pytorch" else f"{MODEL_PATH.name} ({engine_label(engine)})"
 
 
 def setup_logging():

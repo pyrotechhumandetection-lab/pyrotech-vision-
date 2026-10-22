@@ -21,6 +21,7 @@
 #    run        run in this terminal without services (Ctrl+C stops)
 #    ai-stream  AI on the camera substream: list | sub ID..|--all | custom ID PATH | same ID
 #    perf       performance monitor / CPU tuning (status | monitor | auto ...)
+#    npu        Rockchip NPU (RK3588): setup | status | check | bench | on | off | model fp16|int8
 # ==========================================================================================
 set -euo pipefail
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
@@ -126,6 +127,62 @@ need_backend_python() {
 need_node() { command -v node >/dev/null 2>&1 || die "Node.js was not found - run ./aivision.sh setup (it installs it)"; }
 port_busy() { ss -ltnH "sport = :$1" 2>/dev/null | grep -q .; }
 port_pid()  { ss -ltnpH "sport = :$1" 2>/dev/null | grep -o 'pid=[0-9]*' | head -n1 | cut -d= -f2; }
+
+# env_set KEY VALUE - write KEY=VALUE into the project's .env (created from .env.example when missing)
+env_set() {
+  local k="$1" kv="$1=$2"
+  [[ -f "$REPO/.env" ]] || cp "$REPO/.env.example" "$REPO/.env"
+  if grep -qE "^[[:space:]]*$k=" "$REPO/.env"; then sed -i "s#^[[:space:]]*$k=.*#$kv#" "$REPO/.env"; else printf '%s\n' "$kv" >> "$REPO/.env"; fi
+}
+
+# ---------------------------------------------------------------- Rockchip NPU runtime
+# librknnrt.so of rknn-toolkit2 v2.3.2 (same version as the toolkit that built backend/models/*_rknn_model),
+# kept in backend/npu/ - the system's own library (e.g. the box vendor's) is not touched.
+RKNN_VER="2.3.2"
+RKNN_LIB_URL="https://raw.githubusercontent.com/airockchip/rknn-toolkit2/v$RKNN_VER/rknpu2/runtime/Linux/librknn_api/aarch64/librknnrt.so"
+RKNN_LIB_SHA="d31fc19c85b85f6091b2bd0f6af9d962d5264a4e410bfb536402ec92bac738e8"
+RKNN_LIB="$REPO/backend/npu/librknnrt.so"
+rockchip_soc() {   # AIV_RKNN_SOC in the environment overrides the device tree (tests only)
+  if [[ -n "${AIV_RKNN_SOC:-}" ]]; then echo "$AIV_RKNN_SOC"; return; fi
+  [[ -r /proc/device-tree/compatible ]] || return 0
+  tr '\0' ',' < /proc/device-tree/compatible 2>/dev/null | tr ',' '\n' | grep -oE '^(rk3588|rk3576|rk3568|rk3566|rk3562|rv1126b)' | head -n1 || true
+}
+npu_lib_ok() { [[ -f "$RKNN_LIB" ]] && [[ "$(sha256sum "$RKNN_LIB" | cut -d' ' -f1)" == "$RKNN_LIB_SHA" ]]; }
+npu_lib_fetch() {   # npu_lib_fetch [FILE] - install librknnrt.so from FILE, else download it (2 ways)
+  npu_lib_ok && return 0
+  mkdir -p "$REPO/backend/npu"
+  local tmp="$RKNN_LIB.part" src="${1:-}"
+  rm -f "$tmp"
+  if [[ -n "$src" ]]; then
+    cp -f "$src" "$tmp" || { warn "cannot read $src"; return 1; }
+  else
+    [[ "$(uname -m)" == "aarch64" ]] || { warn "not an aarch64 board - NPU runtime not installed"; return 1; }
+    echo "    downloading librknnrt.so $RKNN_VER (7.4 MB) from github.com/airockchip/rknn-toolkit2"
+    python3 - "$RKNN_LIB_URL" "$tmp" <<'PY' >/dev/null 2>&1 || rm -f "$tmp"
+import sys, urllib.request
+with urllib.request.urlopen(sys.argv[1], timeout=120) as r, open(sys.argv[2], "wb") as f:
+    f.write(r.read())
+PY
+    if [[ ! -s "$tmp" ]] && command -v git >/dev/null 2>&1; then      # second way: sparse git checkout
+      echo "    direct download failed - trying git"
+      local gd; gd="$(mktemp -d)"
+      if git clone -q --depth 1 --branch "v$RKNN_VER" --filter=blob:none --sparse \
+           https://github.com/airockchip/rknn-toolkit2 "$gd/tk" 2>/dev/null \
+         && git -C "$gd/tk" sparse-checkout set rknpu2/runtime/Linux/librknn_api/aarch64 2>/dev/null; then
+        cp -f "$gd/tk/rknpu2/runtime/Linux/librknn_api/aarch64/librknnrt.so" "$tmp" 2>/dev/null || true
+      fi
+      rm -rf "$gd"
+    fi
+    [[ -s "$tmp" ]] || { rm -f "$tmp"; warn "download failed - check the internet connection, or copy librknnrt.so $RKNN_VER (aarch64) to the box and run: ./aivision.sh npu setup --lib FILE"; return 1; }
+  fi
+  if [[ "$(sha256sum "$tmp" | cut -d' ' -f1)" != "$RKNN_LIB_SHA" ]]; then
+    rm -f "$tmp"; warn "librknnrt.so is not the expected version $RKNN_VER (checksum) - not installed"; return 1
+  fi
+  mv -f "$tmp" "$RKNN_LIB"
+  ok "NPU runtime librknnrt.so $RKNN_VER installed in backend/npu/"
+}
+# groups that may open the NPU device (/dev/dri/renderD* is group render, older images: video)
+npu_groups() { local g out=(); for g in render video; do getent group "$g" >/dev/null && out+=("$g"); done; echo "${out[*]}"; }
 
 cd "$REPO"
 
@@ -250,6 +307,21 @@ Ctrl+C stops both. Refused while the services are running (./aivision.sh stop fi
   ./aivision.sh perf <command> --help    all options
 
 Runs with the backend'\''s Python (backend/.venv) at reduced priority, so it never competes with detection.' ;;
+    npu) printf '%s\n' 'PYROTECH VISION - Rockchip NPU (RK3588) for Human / Vehicle / Human Count detection.
+
+  ./aivision.sh npu setup         NPU runtime (librknnrt.so 2.3.2 -> backend/npu/), NPU device access for the
+                                  service user, NPU engine on, restart, show the engine in use
+                                  (no internet: --lib FILE = a copy of librknnrt.so 2.3.2 aarch64)
+  ./aivision.sh npu status        engine in use and NPU core / precision per camera
+  ./aivision.sh npu check [opts]  full analysis (read-only): system, NPU driver, runtime, models, benchmark,
+                                  NPU vs CPU accuracy on your snapshot images -> logs/npu_report_<date>.txt
+  ./aivision.sh npu bench [opts]  benchmark only;  --streams 8 = 8 cameras in parallel
+  ./aivision.sh npu on | off      use the NPU (AIV_ENGINE=auto) | back to the CPU engine (AIV_ENGINE=openvino)
+  ./aivision.sh npu model fp16|int8   FP16 = same accuracy as the CPU (default); INT8 = faster, check accuracy first
+
+check / bench options: --camera ID (frames from that camera for the accuracy test), --images DIR, --frames N,
+  --runs N, --streams N, --seconds S, --only system,runtime,models,bench,pipeline,accuracy  (sudo: NPU load too)
+The models are the shipped yolov8n weights converted with scripts/npu/convert_rknn.py (nothing retrained).' ;;
     *) sed -n '2,25p' "$SELF" | sed 's/^# \{0,1\}//' ;;
   esac
 }
@@ -380,6 +452,11 @@ if [[ ! -x "$PY" ]]; then
   fi
 fi
 
+if [[ -n "$(rockchip_soc)" ]]; then      # Rockchip NPU board: runtime for the RKNN engine (non-fatal)
+  say "Rockchip $(rockchip_soc) NPU found - NPU runtime"
+  npu_lib_fetch || warn "the NPU engine stays off until ./aivision.sh npu setup succeeds (CPU engine used)"
+fi
+
 if [[ "$(cat "$STAMP" 2>/dev/null)" == "$WANT_STAMP" ]]; then
   echo "Backend environment is up to date ($VENV)."
   exit 0
@@ -490,6 +567,8 @@ if [[ "$SVC_USER" == "root" && $ALLOW_ROOT -eq 0 ]]; then
        (that user must own the folder: sudo chown -R <name>: \"$REPO\"), or pass --allow-root."
 fi
 SVC_GROUP="$(id -gn "$SVC_USER")"
+NPU_GROUPS=""
+[[ -n "$(rockchip_soc)" ]] && NPU_GROUPS="$(npu_groups)"     # NPU device access for the backend service
 ok "services run as user '$SVC_USER' (group '$SVC_GROUP')"
 
 as_user() {   # run a command as the service account
@@ -599,6 +678,7 @@ WorkingDirectory=${REPO//%/%%}
 Environment=PYTHONUNBUFFERED=1
 Environment=AIV_HOST=127.0.0.1
 Environment=AIV_PORT=$API_PORT
+${NPU_GROUPS:+SupplementaryGroups=$NPU_GROUPS}
 ExecStart=$(q "$PY") $(q "$REPO/backend/main.py")
 # SIGINT = the backend's clean shutdown (closes cameras, saves counts / pending alerts)
 KillSignal=SIGINT
@@ -1378,6 +1458,132 @@ fi
 exec nice -n 10 "$PY" "$REPO/scripts/perf/pyrotech_perf.py" "$@"
 }
 
+# ================================================================ npu
+cmd_npu() {
+local sub="${1:-}"; shift || true
+case "$sub" in
+  ""|-h|--help|help) usage npu; exit 0 ;;
+esac
+SOC="$(rockchip_soc)"
+npu_restart() {
+  if systemctl is-active --quiet "$BACKEND_UNIT" 2>/dev/null; then
+    say "Restarting the backend"
+    as_root systemctl restart "$BACKEND_UNIT"
+    "$SELF" npu status --wait
+  else
+    info "backend service not running - the setting is used at the next start"
+  fi
+}
+# NPU test: the RKNN model in use loads on the NPU and finds the same people / bus as the CPU engine on the
+# sample images; passed -> backend/npu/verified (AIV_ENGINE=auto uses the NPU only then), failed -> marker removed
+npu_test() {
+  local py model assets out name
+  py="$(need_backend_python)"
+  model="backend/$(env_get AIV_RKNN_MODEL models/yolov8n_rknn_model)"
+  name="$(basename "$model")"
+  [[ -d "$model" ]] || { warn "RKNN model folder $model not found"; return 1; }
+  assets="$("$py" -c 'import pathlib, ultralytics; print(pathlib.Path(ultralytics.__file__).parent / "assets")' 2>/dev/null)"
+  out="$(mktemp -d)"; chmod 755 "$out"
+  say "Testing the NPU with $name (model load + detections compared with the CPU engine on sample images)"
+  rm -f backend/npu/verified
+  # as root: a group just added for this user only applies to new logins
+  if ! as_root env AIV_ENGINE=rknn PYTHONDONTWRITEBYTECODE=1 "$py" "$REPO/scripts/npu/rknn_analyze.py" --only models,accuracy --model "$model" \
+         --images "$assets" --out "$out" > "$out/test.log" 2>&1; then
+    grep -E '^\s+(- |!!)|found by|strong' "$out/test.log" | head -n 12
+    warn "NPU test failed (details: $out/test.log)"
+    return 1
+  fi
+  grep -E 'found by|strong boxes' "$out/test.log" || true
+  printf '%s\n' "$name" > backend/npu/verified
+  ok "NPU test passed ($name)"
+}
+case "$sub" in
+  setup)
+    [[ -n "$SOC" ]] || die "No Rockchip NPU chip found in /proc/device-tree/compatible - the NPU engine needs an RK3588 class board."
+    local lib=""
+    [[ "${1:-}" == "--lib" ]] && { lib="${2:?--lib needs the path of librknnrt.so}"; }
+    say "Rockchip $SOC - NPU runtime"
+    npu_lib_fetch "$lib" || die "NPU runtime not installed."
+    ls backend/models/*_rknn_model/*.rknn >/dev/null 2>&1 || die "No RKNN model in backend/models - run git pull."
+    local u g; u="$(id -un)"
+    if unit_installed "$BACKEND_UNIT"; then u="$(systemctl show -p User --value "$BACKEND_UNIT" 2>/dev/null)"; u="${u:-root}"; fi
+    for g in $(npu_groups); do
+      if [[ "$u" != "root" ]] && ! id -nG "$u" | tr ' ' '\n' | grep -qx "$g"; then
+        as_root usermod -aG "$g" "$u" && ok "user $u added to group $g (NPU device access)"
+      fi
+    done
+    npu_test || { npu_restart; die "NPU test failed - the NPU is NOT used; the CPU engine stays in use."; }
+    env_set AIV_ENGINE auto
+    ok "AIV_ENGINE=auto in .env (NPU first, CPU engine if the NPU cannot be used)"
+    if unit_installed "$BACKEND_UNIT" && unit_ours "$BACKEND_UNIT" && ! grep -q '^SupplementaryGroups=' "$UNIT_DIR/$BACKEND_UNIT" \
+       && [[ -n "$(npu_groups)" ]]; then
+      say "Updating the services (NPU device access)"
+      "$SELF" install --skip-setup --no-start >/dev/null && ok "services updated"
+    fi
+    npu_restart ;;
+  status)
+    local wait=0; [[ "${1:-}" == "--wait" ]] && wait=20
+    python3 - "http://127.0.0.1:$(api_port)/api" "$wait" <<'PY'
+import json, sys, time, urllib.request
+api, wait = sys.argv[1], int(sys.argv[2])
+def get(p):
+    with urllib.request.urlopen(api + p, timeout=5) as r:
+        return json.loads(r.read())
+end = time.time() + wait
+while True:
+    try:
+        h = get("/system/health"); m = get("/system/metrics")
+        # after a restart: wait (up to the limit) until the cameras that start automatically are running
+        ss = m.get("sessions") or []
+        if (ss and all(x.get("engine") for x in ss)) or time.time() > end + 25 or not wait:
+            break
+    except Exception as e:
+        if time.time() > end:
+            sys.exit(f"backend not reachable ({e})")
+    time.sleep(2)
+print(f"  engine (new cameras): {h.get('engine')}")
+cams = m.get("sessions") or []
+if not cams:
+    print("  no camera session running")
+for c in cams:
+    fps = c.get("processingFps")
+    print(f"  {str(c.get('cameraId')):16} engine {c.get('engine') or '-':9} device {c.get('device') or '-':15} "
+          f"{c.get('precision') or '':5} input {c.get('imgSize') or '-':4} AI {fps if fps is not None else '-'} fps, "
+          f"camera {c.get('cameraFps') if c.get('cameraFps') is not None else '-'} fps")
+print(f"  backend CPU {m.get('processCpu')}% of one core, system CPU {m.get('cpu')}%")
+if h.get("engine") != "RKNN NPU":
+    print("  NPU not in use - see: journalctl -u pyrotech-vision-backend | grep -i rknn   and   ./aivision.sh npu check")
+PY
+    ;;
+  check|bench)
+    local py; py="$(need_backend_python)"
+    local only=()
+    [[ "$sub" == "bench" ]] && only=(--only system,models,bench,pipeline)
+    mkdir -p logs
+    exec nice -n 5 "$py" "$REPO/scripts/npu/rknn_analyze.py" "${only[@]}" "$@" ;;
+  on)
+    npu_lib_ok || [[ -n "$(env_get AIV_RKNN_LIB "")" ]] || die "NPU runtime not installed - run ./aivision.sh npu setup"
+    npu_test || { npu_restart; die "NPU test failed - the NPU is NOT used."; }
+    env_set AIV_ENGINE auto; ok "NPU engine on (AIV_ENGINE=auto)"; npu_restart ;;
+  off)
+    env_set AIV_ENGINE openvino; ok "NPU engine off - CPU engine (AIV_ENGINE=openvino, PyTorch if OpenVINO is missing)"; npu_restart ;;
+  model)
+    case "${1:-}" in
+      fp16) env_set AIV_RKNN_MODEL models/yolov8n_rknn_model ;;
+      int8) [[ -f backend/models/yolov8n_int8_rknn_model/metadata.yaml ]] || die "INT8 model not found"
+            env_set AIV_RKNN_MODEL models/yolov8n_int8_rknn_model
+            note "INT8: check the accuracy on your cameras first: ./aivision.sh npu check --camera <ID>" ;;
+      *) die "usage: ./aivision.sh npu model fp16|int8" ;;
+    esac
+    ok "NPU model: $1"
+    if [[ "$(env_get AIV_ENGINE auto)" == "auto" ]]; then
+      npu_test || warn "the NPU is NOT used with this model (CPU engine) - ./aivision.sh npu model fp16 to go back"
+    fi
+    npu_restart ;;
+  *) usage npu; die "Unknown npu command: $sub" ;;
+esac
+}
+
 # ================================================================ dispatch
 CMD="${1:-}"
 [[ -n "$CMD" ]] || { usage; exit 2; }
@@ -1395,6 +1601,7 @@ case "$CMD" in
   run) ( cmd_run "$@" ) ;;
   ai-stream) ( cmd_ai_stream "$@" ) ;;
   perf) ( cmd_perf "$@" ) ;;
+  npu) ( cmd_npu "$@" ) ;;
   -h|--help|help) usage ;;
   *) usage; die "Unknown command: $CMD" ;;
 esac

@@ -21,3 +21,6 @@ backend/models/object_monitor/hf/
 # start.sh: logs of the web UI, Python fetched by uv on older Debian
 logs/
 backend/.uv/
+# Rockchip NPU runtime downloaded by ./aivision.sh npu setup; RKNN conversion work folder
+backend/npu/
+build/
