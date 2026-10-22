@@ -1,22 +1,39 @@
 {
- "ref": 122,
- "found": 119,
- "missed": 3,
- "extra": 1,
- "strong": 100,
- "strongMissed": 0,
- "images": 32,
- "confDiffMean": 0.0275,
- "confDiffMax": 0.2049,
- "iouMean": 0.9254,
- "perClass": {
-  "0": [
+ "calibration": "56 images from npu calib-pack 2026-10-22 (41 snapshots + 15 live frames, gate camera), quantized_algorithm normal",
+ "reference": "FP32 ONNX of the same weights, RKNN simulator, conf >= 0.25, IoU >= 0.5",
+ "holdout_half": {
+  "note": "calibrated on even images, tested on odd images",
+  "ref": 53,
+  "found": 53,
+  "extra": 3,
+  "strongMissed": 0,
+  "strong": 52,
+  "confDiffMean": 0.0165
+ },
+ "own_images_all": {
+  "ref": 113,
+  "found": 111,
+  "extra": 14,
+  "strongMissed": 0,
+  "strong": 102,
+  "confDiffMean": 0.0179
+ },
+ "other_footage": {
+  "note": "street test footage, not this camera",
+  "ref": 122,
+  "found": 111,
+  "extra": 1,
+  "strongMissed": 0,
+  "strong": 100,
+  "confDiffMean": 0.0303,
+  "person": [
    105,
-   102
+   94
   ],
-  "5": [
+  "bus": [
    17,
    17
   ]
- }
+ },
+ "previous_generic_calibration_on_box": "npu_report_20261022_170151: found 71.7 %, extra 60 %, confidence diff 0.108"
 }

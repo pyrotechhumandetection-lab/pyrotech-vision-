@@ -1,5 +1,5 @@
-description: Ultralytics YOLOv8n model trained on COCO - RKNN export for PYROTECH
-  VISION (scripts/npu/convert_rknn.py)
+description: Ultralytics YOLOv8n (COCO) - RKNN INT8 for PYROTECH VISION, calibrated
+  on 56 images of the gate camera (npu_calib_20261022_170336.zip)
 author: Ultralytics
 license: AGPL-3.0 License (https://ultralytics.com/license)
 version: 8.4.174
