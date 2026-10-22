@@ -606,10 +606,23 @@ def section_pipeline_accuracy(dirs, args, do_pipe, do_acc):
                 say(f"      {c:11s} {b}/{a} found ({pct(b, a)})")
             for _, nm, m_, e_ in sorted(worst, reverse=True)[:5]:
                 say(f"      most different: {nm}  missed {m_}, extra {e_}")
-            strong_rate = tot["strongMissed"] / tot["strongRef"] if tot["strongRef"] else 0.0
-            if tot["strongRef"] and strong_rate > 0.03:
-                problem(f"{d.name}: the NPU misses {pct(tot['strongMissed'], tot['strongRef'])} of the strong detections the CPU makes")
-            elif n:
+            # agreement rules (each one a problem of its own): strong boxes missed <= 3 %, boxes found >= 95 %,
+            # extra boxes <= 10 %, mean confidence difference <= 0.05, every class with >= 5 boxes found >= 80 %
+            fails = []
+            if tot["strongRef"] and tot["strongMissed"] / tot["strongRef"] > 0.03:
+                fails.append(f"misses {pct(tot['strongMissed'], tot['strongRef'])} of the strong detections")
+            if n and tot["matched"] / n < 0.95:
+                fails.append(f"finds only {pct(tot['matched'], n)} of the boxes")
+            if n and tot["extra"] / n > 0.10:
+                fails.append(f"adds {tot['extra']} extra boxes ({pct(tot['extra'], n)})")
+            if cdiff and float(np.mean(cdiff)) > 0.05:
+                fails.append(f"confidence differs by {np.mean(cdiff):.3f} on average (thresholds would act differently)")
+            for c, (a, b) in sorted(per_cls.items()):
+                if a >= 5 and b / a < 0.8:
+                    fails.append(f"finds only {b}/{a} {c} boxes")
+            for f_ in fails:
+                problem(f"{d.name} ({prec}) vs CPU: {f_}")
+            if n and not fails:
                 say(f"  verdict              : NPU detections agree with the CPU ({prec})")
             REPORT.setdefault("accuracy", {})[d.name] = {**tot, "perClass": per_cls,
                                                          "confDiffMean": round(float(np.mean(cdiff)), 4) if cdiff else None,
