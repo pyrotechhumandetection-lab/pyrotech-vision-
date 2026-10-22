@@ -1,5 +1,24 @@
 # AI frame sampling (multi-camera optimisation)
 
+## Default: adaptive idle / active
+
+| State | What runs | Leaves the state when |
+|---|---|---|
+| IDLE | motion check on a 160 px grey copy (~5x/s, ~1-2 ms) counted ONLY inside the module's detection zones; one AI check every `idleCheckSec` (10 s) | motion in the zones, or the idle check finds an object not confirmed yet -> ACTIVE |
+| ACTIVE | every frame (up to the module's frames-per-second cap: vehicle 16, human / count 6) with the original tracker-based confirmation | `idleAfterSec` (10 s) without motion in the zones, without unconfirmed objects and - Human Count - without people in view |
+
+A parked car or a person standing still does not keep a module active (already confirmed), except Human Count,
+which stays active while people are in view so nobody is counted twice. Fire & Smoke is not affected.
+
+Measured on test footage with 40 s still scene per 70 s (2-core CPU, vehicle + human on a 1080p camera, Human Count
+on a 360p camera, 140 s): every-frame 191 % CPU, 14 person + 1 bus events, 15 people counted; adaptive 102 % CPU,
+16 person + 1 bus events, 15 people counted (active 53 % of the time on the vehicle/human camera; the count camera
+stayed active because people were always in view). Results depend on how often your scenes are still.
+
+The fixed-interval mode below remains available (mode "interval"), and "every" analyses every frame.
+
+## Fixed interval mode
+
 Every camera keeps ONE connection and one reader. Each running module decides per frame whether the AI
 analyses it (`backend/services/scheduler.py`); the live view keeps its own frame rate.
 

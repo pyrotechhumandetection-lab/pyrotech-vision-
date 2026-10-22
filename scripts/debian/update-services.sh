@@ -40,7 +40,7 @@ while (($#)); do
   shift
 done
 [[ $EUID -ne 0 ]] || die "Run as the normal user that owns $REPO (the script asks for sudo where needed)."
-command -v git >/dev/null || die "git is not installed (sudo apt install git)."
+(( PULL == 0 )) || command -v git >/dev/null || die "git is not installed (sudo apt install git) - or use --no-pull."
 
 TS="$(date +%Y%m%d-%H%M%S)"
 if [[ -z "$BACKUP_DIR" ]]; then
@@ -50,8 +50,10 @@ fi
 
 # ---------------------------------------------------------------- 1. backup
 say "1/6 Backup -> $BACKUP_DIR/$TS"
-as_root mkdir -p "$BACKUP_DIR/$TS"
-as_root chown "$(id -un):$(id -gn)" "$BACKUP_DIR" "$BACKUP_DIR/$TS" 2>/dev/null || true
+if ! mkdir -p "$BACKUP_DIR/$TS" 2>/dev/null; then          # sudo only when the folder is not writable
+  as_root mkdir -p "$BACKUP_DIR/$TS"
+  as_root chown "$(id -un):$(id -gn)" "$BACKUP_DIR" "$BACKUP_DIR/$TS"
+fi
 chmod 700 "$BACKUP_DIR/$TS"
 [[ -f .env ]] && cp -p .env "$BACKUP_DIR/$TS/.env" && ok ".env saved"
 CUR_DATA="$(env_get AIV_DATA_DIR "$REPO/backend/data")"
@@ -76,7 +78,7 @@ if (( PULL )); then
   git pull --ff-only || die "git pull failed (network, or the branch has diverged) - nothing was changed."
   ok "now at: $(git log --oneline -1)"
 else
-  info "--no-pull: keeping $(git log --oneline -1)"
+  info "--no-pull: keeping $(git log --oneline -1 2>/dev/null || echo "the current files")"
 fi
 REQ_AFTER="$(cat backend/requirements*.txt setup-backend.sh 2>/dev/null | sha256sum | cut -c1-16)"
 
