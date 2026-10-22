@@ -1552,6 +1552,14 @@ for c in cams:
     print(f"  {str(c.get('cameraId')):16} engine {c.get('engine') or '-':9} device {c.get('device') or '-':15} "
           f"{c.get('precision') or '':5} input {c.get('imgSize') or '-':4} AI {fps if fps is not None else '-'} fps, "
           f"camera {c.get('cameraFps') if c.get('cameraFps') is not None else '-'} fps")
+    for mod, sc in sorted((c.get("schedule") or {}).items()):
+        st = sc.get("state")
+        print(f"      {mod:8} {sc.get('mode') or '-'}{' ' + st.upper() if st else '':8} AI {sc.get('aiFps') if sc.get('aiFps') is not None else '-'} fps "
+              f"(last {sc.get('aiFpsWindowSec') or '-'} s), last inference {sc.get('lastInferenceMs') if sc.get('lastInferenceMs') is not None else '-'} ms, "
+              f"active {sc.get('activeSharePct') if sc.get('activeSharePct') is not None else '-'} % of the time, "
+              f"woken by motion {sc.get('wakeByMotion', 0)}x")
+    if any((sc.get("state") == "idle") for sc in (c.get("schedule") or {}).values()):
+        print("      IDLE = nothing moving in the zone: AI only every idleCheckSec; it switches to every frame on motion")
 print(f"  backend CPU {m.get('processCpu')}% of one core, system CPU {m.get('cpu')}%")
 if h.get("engine") != "RKNN NPU":
     print("  NPU not in use - see: journalctl -u pyrotech-vision-backend | grep -i rknn   and   ./aivision.sh npu check")
