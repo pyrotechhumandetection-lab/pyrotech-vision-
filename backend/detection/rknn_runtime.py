@@ -15,11 +15,13 @@ NPU cores (RK3588 has 3): every new model instance (= camera session / module) g
 = fixed mask for every instance.
 """
 import ctypes
+import hashlib
 import itertools
 import logging
 import os
 import sys
 import threading
+import time
 import types
 from pathlib import Path
 
@@ -203,6 +205,9 @@ def core_name(mask):
 
 
 # ---------------------------------------------------------------- RKNNLite-compatible runtime
+_IO_CHOICE = {}            # model sha1 -> (io variant, autotune table)
+_IO_LOCK = threading.Lock()
+
 class RKNNLite:
     """Same calls as rknnlite.api.RKNNLite (the subset Ultralytics uses), backed by librknnrt.so via ctypes."""
     _aivision_shim = True
@@ -240,7 +245,28 @@ class RKNNLite:
                 log.warning("NPU core mask %s refused (%s) - driver chooses", core_name(mask), ret)
                 mask = CORE_AUTO
         self.core_mask = mask
+        self._choose_io()
         return 0
+
+    def _choose_io(self):
+        """AIV_RKNN_IO: auto (default: measured once per model file and process), or e.g. uint8/float, fp16/raw."""
+        want = os.environ.get("AIV_RKNN_IO", "auto").strip().lower()
+        if want != "auto":
+            self.io = tuple(want.split("/")) if "/" in want else ("uint8", "float")
+            return
+        key = hashlib.sha1(self.model).hexdigest()
+        with _IO_LOCK:
+            if key not in _IO_CHOICE:
+                try:
+                    table = self.autotune()
+                    _IO_CHOICE[key] = (getattr(self, "io", ("uint8", "float")), table)
+                    log.info("NPU I/O for this model: %s  (%s)", "/".join(_IO_CHOICE[key][0]),
+                             ", ".join(f"{r['io']} {r['ms']} ms{'' if r['same'] else ' (differs - not used)'}" for r in table))
+                except Exception as e:      # never block loading: keep the default
+                    log.warning("NPU I/O autotune failed (%s) - using uint8/float", e)
+                    _IO_CHOICE[key] = (("uint8", "float"), [])
+            self.io = _IO_CHOICE[key][0]
+            self.io_table = _IO_CHOICE[key][1]
 
     def _attr(self, cmd, i):
         a = TensorAttr()
@@ -248,18 +274,34 @@ class RKNNLite:
         _check(self.lib.rknn_query(self.ctx, cmd, ctypes.byref(a), ctypes.sizeof(a)), "query tensor attr")
         return attr_dict(a)
 
-    def inference(self, inputs, data_format=None, **_kw):
+    # How data crosses the CPU <-> NPU boundary. The FP16 model's NPU time is about half of the call on the RK3588:
+    # the rest is librknnrt converting the input (uint8 -> FP16) and the output (FP16 -> FP32, layout) on one CPU
+    # core. Variants (same model, same result - checked by autotune before one is used):
+    #   in:  uint8 (runtime converts)   fp16 (numpy converts, 0..255)   fp16n (numpy converts, 0..1)
+    #   out: float (runtime converts)   raw  (native type, numpy converts / dequantizes)
+    IO_VARIANTS = (("uint8", "float"), ("uint8", "raw"), ("fp16", "raw"), ("fp16n", "raw"))
+
+    def _prep(self, x, mode):
+        if mode == "fp16":
+            return np.ascontiguousarray(x, np.float16), T_FLOAT16
+        if mode == "fp16n":
+            return np.ascontiguousarray(x.astype(np.float32) * (1.0 / 255.0), np.float16), T_FLOAT16
+        x = np.ascontiguousarray(x)
+        return x, T_UINT8 if x.dtype == np.uint8 else T_FLOAT32
+
+    def inference(self, inputs, data_format=None, io=None, **_kw):
         """inputs: list of uint8 NHWC arrays (one per model input). Returns float32 arrays in the model's shapes."""
+        in_mode, out_mode = io or getattr(self, "io", None) or ("uint8", "float")
         with self._lock:
             n_in = len(inputs)
             ins = (Input * n_in)()
             keep = []
             for i, x in enumerate(inputs):
-                x = np.ascontiguousarray(x)
+                x, t = self._prep(x, in_mode)
                 keep.append(x)
                 ins[i].index, ins[i].buf, ins[i].size = i, x.ctypes.data, x.nbytes
                 ins[i].pass_through = 0
-                ins[i].type = T_UINT8 if x.dtype == np.uint8 else T_FLOAT32
+                ins[i].type = t
                 ins[i].fmt = F_NCHW if data_format == "nchw" else F_NHWC
             _check(self.lib.rknn_inputs_set(self.ctx, n_in, ins), "rknn_inputs_set")
             ret = self.lib.rknn_run(self.ctx, None)
@@ -270,19 +312,67 @@ class RKNNLite:
             _check(ret, "rknn_run")
             n_out = len(self.outputs)
             outs = (Output * n_out)()
+            want_float = 1 if out_mode == "float" else 0
             for i in range(n_out):
-                outs[i].want_float, outs[i].is_prealloc, outs[i].index = 1, 0, i
+                outs[i].want_float, outs[i].is_prealloc, outs[i].index = want_float, 0, i
             _check(self.lib.rknn_outputs_get(self.ctx, n_out, outs, None), "rknn_outputs_get")
             try:
                 res = []
                 for i, meta in enumerate(self.outputs):
-                    cnt = outs[i].size // 4
-                    arr = np.ctypeslib.as_array(ctypes.cast(outs[i].buf, ctypes.POINTER(ctypes.c_float)), (cnt,)).copy()
+                    raw = np.frombuffer(ctypes.string_at(outs[i].buf, outs[i].size), np.uint8)
+                    t = meta["type"] if not want_float else "FP32"
+                    if t == "FP32":
+                        arr = raw.view(np.float32).copy()
+                    elif t == "FP16":
+                        arr = raw.view(np.float16).astype(np.float32)
+                    elif t in ("INT8", "UINT8"):
+                        q = raw.view(np.int8 if t == "INT8" else np.uint8).astype(np.float32)
+                        arr = (q - meta["zp"]) * meta["scale"]
+                    else:
+                        raise RuntimeError(f"raw output type {t} not supported")
                     dims = meta["dims"]
-                    res.append(arr.reshape(dims) if int(np.prod(dims)) == cnt else arr)
+                    res.append(arr.reshape(dims) if int(np.prod(dims)) == arr.size else arr)
                 return res
             finally:
                 self.lib.rknn_outputs_release(self.ctx, n_out, outs)
+
+    def autotune(self, runs=4):
+        """Measure every I/O variant on a test image, keep the fastest one whose output equals the default
+        (uint8 / float) output: scores within 0.01, boxes within 0.5 px. Returns the table (for the report)."""
+        rng = np.random.default_rng(1)
+        dims = self.inputs[0]["dims"]
+        shape = dims if self.inputs[0]["fmt"] == "NHWC" else [dims[0], dims[2], dims[3], dims[1]]
+        x = rng.integers(0, 256, size=shape, dtype=np.uint8)
+        x[:, : shape[1] // 2] //= 2                       # some structure, not only noise
+        table, ref = [], None
+        for io in self.IO_VARIANTS:
+            try:
+                y = self.inference([x], io=io)[0]
+                ts = []
+                for _ in range(runs):
+                    t0 = time.perf_counter()
+                    self.inference([x], io=io)
+                    ts.append((time.perf_counter() - t0) * 1000.0)
+                ms = float(np.median(ts))
+            except Exception as e:
+                table.append({"io": "/".join(io), "ms": None, "same": False, "error": str(e)[:80]})
+                continue
+            if ref is None:
+                ref = y
+            d = np.abs(y.astype(np.float32) - ref.astype(np.float32)) if y.shape == ref.shape else None
+            if d is None:
+                same = False
+            elif d.ndim == 3:            # detection head 1 x (4 box + classes) x anchors
+                same = float(d[:, :4].max()) <= 0.5 and float(d[:, 4:].max()) <= 0.01
+            else:
+                same = float(d.max()) <= 0.01
+            table.append({"io": "/".join(io), "ms": round(ms, 1), "same": bool(same),
+                          "maxDiff": round(float(d.max()), 4) if d is not None else None})
+        ok = [r for r in table if r["same"] and r["ms"] is not None]
+        if ok:
+            best = min(ok, key=lambda r: r["ms"])
+            self.io = tuple(best["io"].split("/"))
+        return table
 
     # extras for the analysis script
     def sdk_version(self):

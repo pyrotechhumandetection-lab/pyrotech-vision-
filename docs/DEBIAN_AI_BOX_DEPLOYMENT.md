@@ -601,6 +601,7 @@ Fire & Smoke and Object Monitoring still run on the CPU.
 sudo ./aivision.sh npu check         # + NPU load and every program that uses the NPU
 ./aivision.sh npu off | on           # CPU engine (AIV_ENGINE=openvino) | NPU (AIV_ENGINE=auto)
 ./aivision.sh npu model fp16 | int8  # FP16 (default) | INT8 (faster; check accuracy first)
+./aivision.sh npu calib-pack         # zip of your snapshots + live frames -> INT8 model calibrated on YOUR cameras
 ```
 
 `./aivision.sh setup` (and therefore `install` / `update`) also installs the runtime on a Rockchip board.
@@ -614,6 +615,11 @@ sudo ./aivision.sh npu check         # + NPU load and every program that uses th
   system's own library and the box vendor's software are not touched). The official Python wrapper
   (rknn-toolkit-lite2) has no build for Python 3.13, so `backend/detection/rknn_runtime.py` calls the C library
   directly (ctypes, struct layout checked against `rknn_api.h`) and plugs into Ultralytics' built-in RKNN backend.
+* CPU <-> NPU data path: on the box the FP16 model spends about half of each call in librknnrt's own input /
+  output conversion on one CPU core (report 2026-10-22: 92 ms per call, 46 ms NPU). When a model is loaded the
+  runtime measures 4 variants (uint8 or FP16 input, converted output or raw output converted with numpy) and uses
+  the fastest one whose output equals the default; `npu check` shows the table. `AIV_RKNN_IO=uint8/float` forces
+  the original path.
 * Each model instance (camera / module) gets the next NPU core (0, 1, 2, 0, ...), `AIV_NPU_CORE` to change.
 * The RKNN model has a fixed 640x640 input; the per-module "image size" setting is ignored on the NPU.
 * If the NPU cannot be used (no runtime, no device access, driver error), the backend logs a warning and uses

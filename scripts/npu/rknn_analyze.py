@@ -336,6 +336,14 @@ def section_bench(dirs, runs, streams, seconds):
             problem(f"{f.name}: cannot open on the NPU: {e}")
             continue
         shape = probe.inputs[0]["dims"]
+        tab = getattr(probe, "io_table", None) or []
+        if tab:
+            say(f"      CPU<->NPU data path (fastest one with identical output is used: {'/'.join(probe.io)}):")
+            for t in tab:
+                say(f"        {t['io']:12s} {('%.1f ms' % t['ms']) if t['ms'] is not None else 'error':>9s}   "
+                    f"{'same output' if t['same'] else 'DIFFERENT output - not used'}"
+                    f"{'' if t.get('maxDiff') is None else '  (max diff %s)' % t['maxDiff']}{('  ' + t['error']) if t.get('error') else ''}")
+        rec["io"] = {"chosen": "/".join(getattr(probe, "io", ("uint8", "float"))), "variants": tab}
         probe.release()
         if probe.inputs[0]["fmt"] == "NCHW":
             shape = [shape[0], shape[2], shape[3], shape[1]]
@@ -425,7 +433,7 @@ def camera_frames(cam_id, n):
     reg = CameraRegistry()
     cam = reg.get(cam_id)
     if not cam:
-        problem(f"camera {cam_id} not found")
+        problem(f"camera {cam_id} not found - camera IDs: {', '.join(c['id'] for c in reg.list()) or 'none'}")
         return []
     try:
         src, kind = reg.resolve_ai_source(cam)

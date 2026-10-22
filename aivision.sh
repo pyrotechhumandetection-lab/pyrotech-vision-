@@ -21,7 +21,7 @@
 #    run        run in this terminal without services (Ctrl+C stops)
 #    ai-stream  AI on the camera substream: list | sub ID..|--all | custom ID PATH | same ID
 #    perf       performance monitor / CPU tuning (status | monitor | auto ...)
-#    npu        Rockchip NPU (RK3588): setup | status | check | bench | on | off | model fp16|int8
+#    npu        Rockchip NPU (RK3588): setup | status | check | bench | on | off | model | calib-pack
 # ==========================================================================================
 set -euo pipefail
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
@@ -318,6 +318,8 @@ Runs with the backend'\''s Python (backend/.venv) at reduced priority, so it nev
   ./aivision.sh npu bench [opts]  benchmark only;  --streams 8 = 8 cameras in parallel
   ./aivision.sh npu on | off      use the NPU (AIV_ENGINE=auto) | back to the CPU engine (AIV_ENGINE=openvino)
   ./aivision.sh npu model fp16|int8   FP16 = same accuracy as the CPU (default); INT8 = faster, check accuracy first
+  ./aivision.sh npu calib-pack    zip of your snapshot images + live camera frames (logs/npu_calib_<date>.zip)
+                                  for an INT8 model calibrated on YOUR cameras
 
 check / bench options: --camera ID (frames from that camera for the accuracy test), --images DIR, --frames N,
   --runs N, --streams N, --seconds S, --only system,runtime,models,bench,pipeline,accuracy  (sudo: NPU load too)
@@ -1561,6 +1563,8 @@ PY
     [[ "$sub" == "bench" ]] && only=(--only system,models,bench,pipeline)
     mkdir -p logs
     exec nice -n 5 "$py" "$REPO/scripts/npu/rknn_analyze.py" "${only[@]}" "$@" ;;
+  calib-pack)
+    exec nice -n 10 "$(need_backend_python)" "$REPO/scripts/npu/calib_pack.py" "$@" ;;
   on)
     npu_lib_ok || [[ -n "$(env_get AIV_RKNN_LIB "")" ]] || die "NPU runtime not installed - run ./aivision.sh npu setup"
     npu_test || { npu_restart; die "NPU test failed - the NPU is NOT used."; }

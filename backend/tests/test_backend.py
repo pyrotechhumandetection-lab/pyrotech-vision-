@@ -1306,6 +1306,16 @@ class RknnNpuTests(unittest.TestCase):
         self.assertEqual(r.sdk_version(), ("2.3.2 (fake)", "0.9.8"))
         self.assertEqual(r.last_run_us(), 1234)
 
+    def test_io_autotune_never_picks_a_different_output(self):
+        from backend.detection import rknn_runtime as rt
+        r = rt.RKNNLite()
+        r.load_rknn(str(next(config.RKNN_MODEL_PATH.glob("*.rknn"))))
+        r.init_runtime()
+        table = {t["io"]: t for t in r.autotune(runs=2)}
+        self.assertTrue(table["uint8/float"]["same"])
+        self.assertFalse(table["fp16n/raw"]["same"])        # the stand-in does not normalise: must be rejected
+        self.assertTrue(table["/".join(r.io)]["same"])
+
     def test_engine_selected_and_pipeline_boxes(self):
         import numpy as np
         from backend.detection.pipeline import PersonVehiclePipeline
