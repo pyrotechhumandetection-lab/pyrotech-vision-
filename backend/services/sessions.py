@@ -21,9 +21,11 @@ import cv2
 
 from backend import config, runtime
 from backend.detection.frame_reader import LatestFrameReader
+from backend.detection.motion import MotionGate
 from backend.detection.modules import MODULES, module_config
 from backend.detection.rtsp_probe import rtsp_describe
 from backend.services.counts import CountStore
+from backend.services.scheduler import ModuleSchedule
 from backend.services.util import now_iso, redact
 
 log = logging.getLogger("aivision.sessions")
@@ -75,6 +77,17 @@ class CameraSession:
         self.latest_raw = None
         self.plan = None
         self.cfg_dirty = True
+        # AI frame scheduling (services/scheduler.py): one schedule per running module
+        self.sched = {}
+        self._sched0 = {}
+        self.motion = MotionGate()
+        self.gate_on = False                # a motion-gated module is running
+        self.motion_min_area = 0.5
+        self.capture_cap = 0.0              # frames per second processed by this session (0 = every frame)
+        self.pv_sampled = {}                # human / vehicle modules confirmed per sample (pipeline.process)
+        self.pv_imgsz = None
+        self.held_pv = None                 # (detections, time) of the last Person/Vehicle analysis
+        self.held_count_at = None
         # Measured, never estimated:
         #   cameraFps      frames actually received + decoded from the camera per second (reader thread)
         #   processingFps  frames analysed by the AI model per second
@@ -93,7 +106,8 @@ class CameraSession:
                         "aiResolution": None, "viewResolution": None, "fireAnalysedFps": None, "fireSkipped": None,
                         "stageMs": None, "sharedPersonPass": None, "displayFps": None, "displayEncodeMs": None,
                         "displaySkipped": 0, "device": None, "precision": None, "imgSize": None,
-                        "lastDisconnectReason": None}
+                        "lastDisconnectReason": None, "framesSkippedCapture": 0, "captureFpsTarget": None,
+                        "framesRecorded": None, "schedule": {}}
         self.current = {"human": {}, "vehicle": {}}             # label -> count visible in the latest frame
         self.last_detection_at = {"human": None, "vehicle": None, "count": None, "fire": None, "object": None}
         self._disconnect_alerted = False
@@ -373,6 +387,7 @@ class CameraSession:
         win = self._new_window()
         win_read0 = self.reader.frames_read
         last_enc = 0.0
+        next_accept = 0.0
         last_seen = time.time()
         queue_mode = self.reader.queue is not None
         while not self.stopping:
@@ -389,7 +404,7 @@ class CameraSession:
                         self._on_disconnect()
                     continue
                 seq, raw, captured = item
-                frame = raw.copy()
+                frame = None                        # copied below only when the frame is used
             else:
                 ok, seq, frame, captured = self.reader.read_latest()
                 now = time.time()
@@ -419,24 +434,73 @@ class CameraSession:
             self.metrics["lastFrameAt"] = now_iso()
             if self.reader.width and not self.metrics["resolution"]:
                 self.metrics["resolution"] = f"{self.reader.width}x{self.reader.height}"
+            if any_on and self.cfg_dirty:
+                self._rebuild_plan(active)
+            # capture-rate cap of the running modules (e.g. 16 fps vehicle, 6 fps human): frames above it are
+            # skipped right after decoding - no copy, no AI, no live-view encoding (counted, never silent)
+            cap = self.capture_cap if any_on else 0.0
+            if cap:
+                # frame-rate decimation with a running schedule: 20 fps in, 16 fps target -> 16 of 20 frames
+                # (a plain "time since last frame" test would keep only every 2nd frame = 10 fps)
+                if now < next_accept:
+                    self.metrics["framesSkippedCapture"] += 1
+                    continue
+                next_accept = max(next_accept + 1.0 / cap, now - 1.0 / cap)
+            if frame is None:                       # queue mode: copy only frames that are used
+                frame = raw.copy() if any_on else raw
             self.latest_raw = raw if raw is not None else frame.copy()     # clean frame (never drawn on)
 
             annotated = frame
             if any_on:
-                if self.cfg_dirty:
-                    self._rebuild_plan(active)
                 t_loop = time.perf_counter()
                 runtime.take_wait_ms()                       # reset this thread's slot-wait counter
+                # ---- which modules analyse this frame (scheduler: interval / motion gate / every frame)
+                if self.gate_on:
+                    self.motion.update(self.latest_raw, now, self.motion_min_area)
+                due = {}
+                for m in ("human", "vehicle", "count", "object"):
+                    sc = self.sched.get(m)
+                    if m in active and sc is not None:
+                        run, why = sc.decide(now, lambda t, sc=sc: self.motion.active(t, sc.hold))
+                        if run:
+                            due[m] = why
+                if due and queue_mode:                       # analyse the NEWEST frame, not the oldest waiting
+                    newest, n_old = self.reader.take_newest()
+                    if newest is not None:
+                        seq, raw, captured = newest
+                        last_seq = seq
+                        frame = annotated = raw.copy()
+                        self.latest_raw = raw
+                        for m in due:
+                            self.sched[m].replaced(n_old)
+                if due and captured and now - captured > config.STALE_FRAME_SEC:
+                    for m in due:                            # too old to report as current: wait for the next frame
+                        self.sched[m].stale()
+                    due = {}
+                for m, why in due.items():
+                    self.sched[m].selected(now, seq, captured, why)
+                pv_due = pv_on and ("human" in due or "vehicle" in due)
+                count_due = count_on and "count" in due
+                obj_due = obj_on and "object" in due
+                ran = pv_due or count_due or obj_due
                 inf_ms, new = 0.0, []
-                shared = pv_on and count_on and config.SHARED_PERSON_INFERENCE
-                if pv_on:
+                shared = pv_due and count_due and config.SHARED_PERSON_INFERENCE
+                if pv_due:
                     try:
                         annotated, dets, new, inf_ms = self.pipeline.process(
-                            frame, self.plan, share_person_conf=self.counter.detect_conf if shared else None)
+                            frame, self.plan, share_person_conf=self.counter.detect_conf if shared else None,
+                            sampled=self.pv_sampled or None, imgsz=self.pv_imgsz)
                     except Exception as e:     # engine failure: stop processing, keep the stream, tell the UI
                         log.exception("pipeline failure on %s", self.camera_id)
+                        for m in ("human", "vehicle"):
+                            if m in due:
+                                self.sched[m].done(False)
                         self._engine_failure(e)
                         continue
+                    for m in ("human", "vehicle"):
+                        if m in due:
+                            self.sched[m].done(True, inf_ms)
+                    self.held_pv = (dets, now)
                     st = self.pipeline.last_stages
                     for k in ("preprocess", "inference", "postprocess", "tracking"):
                         win["st_" + k] += st.get(k, 0.0)
@@ -447,33 +511,51 @@ class CameraSession:
                         if d["inZone"] and d["module"] in active:
                             counts[d["module"]][d["label"]] = counts[d["module"]].get(d["label"], 0) + 1
                     self.current = counts
-                else:
+                elif pv_on and self.held_pv is not None and self.pv_sampled:
+                    # between two analyses: show the last result, labelled with its age
+                    annotated = self.pipeline.draw_held(frame, self.plan, self.held_pv[0], now - self.held_pv[1])
+                elif not pv_on:
                     self.current = {"human": {}, "vehicle": {}}
-                if count_on:
+                if count_on and count_due:
                     try:   # inference on the clean frame, boxes drawn on the shared annotated frame
                         pre_wait = runtime.take_wait_ms()
                         persons = self.pipeline.shared_persons if shared else None
-                        annotated, c_ms, counted = self.counter.process(self.latest_raw, annotated, captured or now, dets=persons)
+                        c_t = captured or now
+                        if self.sched["count"].sampled:
+                            annotated, c_ms, counted = self.counter.occupancy(self.latest_raw, annotated, c_t, dets=persons)
+                        else:
+                            annotated, c_ms, counted = self.counter.process(self.latest_raw, annotated, c_t, dets=persons)
                         c_wait = runtime.take_wait_ms()
                         c_ms -= c_wait
                         win["gate"] += pre_wait + c_wait
                         win["st_count"] += c_ms
                         win["shared"] += 1 if persons is not None else 0
+                        self.sched["count"].done(True, c_ms)
+                        self.held_count_at = now
                     except Exception as e:
                         log.exception("Human Count failure on %s", self.camera_id)
+                        self.sched["count"].done(False)
                         self._engine_failure(e)
                         continue
                     inf_ms += c_ms
                     self._after_count(counted, annotated, captured)
+                elif count_on and self.counter.occupancy_mode:
+                    self.counter.draw_occupancy(annotated, now - (self.held_count_at or now))
                 if obj_on:
-                    try:   # Layer 1 on every frame (cheap), Layer 2 in its own thread
+                    try:   # Layer 1 when due (motion gate / every frame), Layer 2 in its own thread
                         t_o = time.perf_counter()
-                        annotated = obj_eng.process(self.latest_raw, annotated)
+                        if obj_due:
+                            annotated = obj_eng.process(self.latest_raw, annotated)
+                            self.sched["object"].done(True)
+                        else:
+                            annotated = obj_eng.skip(self.latest_raw, annotated)
                         o_ms = (time.perf_counter() - t_o) * 1000.0
-                        inf_ms += o_ms
+                        inf_ms += o_ms if obj_due else 0.0
                         win["st_object"] += o_ms
                     except Exception as e:
                         log.exception("Object Monitoring failure on %s", self.camera_id)
+                        if obj_due:
+                            self.sched["object"].done(False)
                         self._engine_failure(e)
                         continue
                 if fire_on:      # hand the newest frame to the fire worker (skipped while it is busy), draw its boxes
@@ -481,12 +563,14 @@ class CameraSession:
                     fire_eng.submit(self.latest_raw, captured or now)
                     annotated = fire_eng.draw(annotated)
                     win["st_fire"] += (time.perf_counter() - t_f) * 1000.0
+                    ran = True
                 win["gate"] += runtime.take_wait_ms()
-                win["proc"] += 1
-                win["inf"] += inf_ms
-                win["inf_last"] = inf_ms
-                win["age"] += (now - captured) * 1000.0 if captured else 0.0
-                self.metrics["framesProcessed"] += 1
+                if ran:
+                    win["proc"] += 1
+                    win["inf"] += inf_ms
+                    win["inf_last"] = inf_ms
+                    win["age"] += (now - captured) * 1000.0 if captured else 0.0
+                    self.metrics["framesProcessed"] += 1
                 self.state = "processing"
                 t_ev = time.perf_counter()
                 if new:
@@ -494,6 +578,7 @@ class CameraSession:
                     for item in new:
                         if item["module"] in active and cam:
                             self.last_detection_at[item["module"]] = now_iso()
+                            item["frameId"] = seq                 # the exact analysed frame (camera session sequence)
                             # the frame that triggered the confirmation, stamped with its capture time;
                             # encoding, disk writes and JSON persistence run on the event writer thread
                             # original = HD main-stream frame when the AI uses a substream, else the clean
@@ -504,12 +589,13 @@ class CameraSession:
                             self.mgr.events.on_confirmation(cam, item["module"], module_config(cam, item["module"]), item,
                                                             annotated, captured_at=captured, original=orig)
                 win["st_events"] += (time.perf_counter() - t_ev) * 1000.0
-                win["loop"] += (time.perf_counter() - t_loop) * 1000.0
-                win["n"] += 1
-                if captured:          # receive -> analysis finished (includes the time spent in the queue)
-                    lat = (time.time() - captured) * 1000.0
-                    win["lat"] += lat
-                    win["lat_max"] = max(win["lat_max"], lat)
+                if ran:
+                    win["loop"] += (time.perf_counter() - t_loop) * 1000.0
+                    win["n"] += 1
+                    if captured:          # receive -> analysis finished (includes the time spent in the queue)
+                        lat = (time.time() - captured) * 1000.0
+                        win["lat"] += lat
+                        win["lat_max"] = max(win["lat_max"], lat)
             else:
                 self.state = "connected"
                 self.current = {"human": {}, "vehicle": {}}
@@ -573,6 +659,11 @@ class CameraSession:
             stg["slotWait"] = round(w["gate"] / n, 1)
             stg["liveEncode"] = round(w["st_encode"] / max(1, n), 1) if w["st_encode"] else 0.0
         m["stageMs"] = stg
+        sched_out = {}
+        for mid, sc in list(self.sched.items()):
+            snap, self._sched0[mid] = sc.snapshot(self._sched0.get(mid, {}), el)
+            sched_out[mid] = snap
+        m["schedule"] = sched_out
         es = self.enc_stats
         e0 = getattr(self, "_enc0", None) or {"encoded": 0, "skipped": 0, "ms": 0.0}
         n_enc = es["encoded"] - e0["encoded"]
@@ -610,6 +701,35 @@ class CameraSession:
         if self.objmon is not None:
             self.obj_cfg = module_config(cam, "object")
             self.objmon.configure(self.obj_cfg)
+        # ---- AI frame scheduling per module (interval, motion gate, capture cap, model input size)
+        caps, gate_area = [], []
+        for m in ("human", "vehicle", "count", "object"):
+            if m not in active:
+                self.sched.pop(m, None)
+                continue
+            sch = module_config(cam, m).get("schedule") or {}
+            sc = self.sched.get(m) or ModuleSchedule(m)
+            sc.configure(sch, gate_allowed=m in ("human", "object"))     # never motion-gate vehicle / count
+            self.sched[m] = sc
+            if sc.motion_gate:
+                gate_area.append(float(sch.get("motionMinAreaPct", config.MOTION_MIN_AREA_PCT)))
+            caps.append(float(sch.get("captureFps") or 0) if sc.sampled else 0.0)
+        if "fire" in active:
+            caps.append(0.0)                  # Fire & Smoke keeps every frame (its own everyNFrames setting)
+        # the session runs at the HIGHEST rate any running module needs; one module without a cap = no cap
+        self.capture_cap = 0.0 if (not caps or 0.0 in caps) else max(caps)
+        self.metrics["captureFpsTarget"] = self.capture_cap or None
+        self.gate_on = bool(gate_area)
+        self.motion_min_area = min(gate_area) if gate_area else config.MOTION_MIN_AREA_PCT
+        self.pv_sampled, sizes = {}, []
+        for m in ("human", "vehicle"):
+            if m in active:
+                sch = module_config(cam, m).get("schedule") or {}
+                sizes.append(int(sch.get("imgSize") or config.IMG_SIZE))
+                if self.sched[m].sampled:
+                    self.pv_sampled[m] = {"margin": float(sch.get("confirmMargin", config.SAMPLED_CONFIRM_MARGIN)),
+                                          "dedupeSec": float(sch.get("dedupeSec", config.SAMPLED_DEDUPE_SEC))}
+        self.pv_imgsz = max(sizes) if sizes else None      # one shared pass: the larger input size of the two
         self.cfg_dirty = False
 
     def _after_count(self, counted, annotated, captured):
@@ -638,7 +758,7 @@ class CameraSession:
                     self.enc_cond.wait(0.5)
                 if self.stopping:
                     break
-                wait = last + period - time.time()
+                wait = last + 0.9 * period - time.time()     # 10% tolerance: 16 fps input is not cut to 14 by timing jitter
                 if wait > 0:              # rate limit: wait, then take whatever frame is newest by then
                     self.enc_cond.wait(wait)
                     if self.stopping:

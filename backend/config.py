@@ -193,6 +193,32 @@ STREAM_MAX_FPS = float(_env("AIV_STREAM_MAX_FPS", "15"))
 STREAM_ENCODER_THREAD = _env("AIV_STREAM_ENCODER_THREAD", "1").strip() not in ("0", "false", "no", "off")
 PREVIEW_IDLE_RELEASE_SEC = float(_env("AIV_PREVIEW_IDLE_RELEASE", "10"))
 
+# --- AI frame sampling (defaults for every camera; each camera's module settings can override them,
+#     camera["detection"]["modules"][<module>]["schedule"]) ---
+#   *_INTERVAL   seconds between two AI analyses of a camera (0 = every frame, the previous behaviour).
+#                With an interval, Human / Vehicle detections are confirmed on ONE analysed frame
+#                (confidence >= class threshold + AIV_SAMPLED_CONFIRM_MARGIN) and repeated sightings at the same
+#                place are suppressed for AIV_SAMPLED_DEDUPE_SEC; Human Count reports people in view per
+#                sample (occupancy) instead of unique tracked people.
+#   *_CAPTURE_FPS  frames per second the camera session processes / shows (frames above it are skipped right
+#                after decoding, before any other work; the camera's own fps setting decides what is decoded).
+#   motion gate  Human Detection and Object Monitoring only: AI runs when the picture changes (plus a fallback
+#                check every AIV_MOTION_FALLBACK_SEC); never used for Vehicle, Human Count or Fire & Smoke.
+VEHICLE_INTERVAL_SEC = float(_env("AIV_VEHICLE_INTERVAL", "2.0"))
+VEHICLE_CAPTURE_FPS = float(_env("AIV_VEHICLE_CAPTURE_FPS", "16"))
+HUMAN_INTERVAL_SEC = float(_env("AIV_HUMAN_INTERVAL", "4.0"))
+HUMAN_CAPTURE_FPS = float(_env("AIV_HUMAN_CAPTURE_FPS", "6"))
+COUNT_INTERVAL_SEC = float(_env("AIV_COUNT_INTERVAL", "4.0"))
+HUMAN_MOTION_GATE = _env("AIV_HUMAN_MOTION_GATE", "1").strip() not in ("0", "false", "no", "off")
+OBJECT_MOTION_GATE = _env("AIV_OBJECT_MOTION_GATE", "1").strip() not in ("0", "false", "no", "off")
+MOTION_FALLBACK_SEC = float(_env("AIV_MOTION_FALLBACK_SEC", "30"))
+MOTION_HOLD_SEC = float(_env("AIV_MOTION_HOLD_SEC", "10"))
+MOTION_MIN_AREA_PCT = float(_env("AIV_MOTION_MIN_AREA_PCT", "0.5"))
+SAMPLED_CONFIRM_MARGIN = float(_env("AIV_SAMPLED_CONFIRM_MARGIN", "0.10"))
+SAMPLED_DEDUPE_SEC = float(_env("AIV_SAMPLED_DEDUPE_SEC", "60"))
+# a frame older than this (receive -> analysis start) is not analysed (counted as stale; the next frame is used)
+STALE_FRAME_SEC = float(_env("AIV_STALE_FRAME_SEC", "2.0"))
+
 # --- events ---
 DEFAULT_EVENT_COOLDOWN_SEC = float(_env("AIV_EVENT_COOLDOWN", "30"))
 # Vehicle snapshots: one per confirmed vehicle (deduplicated by track), so the default cooldown is 0.

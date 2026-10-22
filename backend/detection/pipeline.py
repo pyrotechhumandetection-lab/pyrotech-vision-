@@ -63,6 +63,8 @@ FAR_CONF = 0.25
 FAR_DEDUPE_IOU = 0.3
 
 HUMAN_LABELS = ("Person", "Rider", "Person (far)")
+LABEL_COLORS = {"Person": (0, 255, 0), "Rider": RIDER_COLOR, "Person (far)": FAR_COLOR,
+                **{lbl: col for lbl, col in VEHICLE_CLASS_MAP.values()}}
 VEHICLE_LABELS = ("2-Wheeler", "4-Wheeler", "Bus", "Truck")
 LABEL_TO_COCO = {"Person": [0], "2-Wheeler": [1, 3], "4-Wheeler": [2], "Bus": [5], "Truck": [7]}
 
@@ -169,7 +171,41 @@ class PersonVehiclePipeline:
         except Exception as e:      # never block the session on the warm-up; the real call reports errors
             log.warning("GPU warm-up failed: %s", e)
 
+    def _sample_is_new(self, module, label, box, dedupe_sec):
+        """Sampled mode: True when no box of the same label confirmed within dedupe_sec overlaps this one.
+        A matching earlier sighting is refreshed (a vehicle parked for hours is reported once)."""
+        now = time.time()
+        seen = [e for e in self.sample_seen.get(module, []) if now - e[2] <= dedupe_sec]
+        for e in seen:
+            if e[0] == label and iou(e[1], box) >= 0.3:
+                e[1], e[2] = box, now
+                self.sample_seen[module] = seen
+                return False
+        seen.append([label, box, now])
+        self.sample_seen[module] = seen[-500:]
+        return True
+
+    def draw_held(self, frame, plan, dets, age_s):
+        """Live view between two analysed frames: draw the zones and the LAST analysed frame's boxes (they show
+        where objects were up to one interval ago - labelled with the age so they are not mistaken for live)."""
+        h, w = frame.shape[:2]
+        for zs in (plan or {}).get("zones", {}).values():
+            for z in zs:
+                poly = zone_polygon(z, w, h)
+                if len(poly) >= 3:
+                    cv2.polylines(frame, [poly], True, hex_to_bgr(z.get("color", "#3478FF")), 2)
+        for d in dets or []:
+            x1, y1, x2, y2 = (int(d["box"][0] * w), int(d["box"][1] * h), int(d["box"][2] * w), int(d["box"][3] * h))
+            col = LABEL_COLORS.get(d["label"], (255, 255, 255)) if d.get("inZone", True) else (140, 140, 140)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), col, 1)
+            cv2.putText(frame, f"{d['label']} {d['confidence']:.2f}", (x1, max(y1 - 8, 14)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1)
+        txt = f"AI result {age_s:.1f} s ago"
+        cv2.putText(frame, txt, (10, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3)
+        cv2.putText(frame, txt, (10, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        return frame
+
     def reset_tracking(self):
+        self.sample_seen = {}
         self.hit_counts = {}
         self.first_seen = {}
         self.label_votes = {}
@@ -234,8 +270,16 @@ class PersonVehiclePipeline:
         }
 
     # ------------------------------------------------------------------ frame
-    def process(self, frame, plan, share_person_conf=None):
+    def process(self, frame, plan, share_person_conf=None, sampled=None, imgsz=None):
         """Run the original detection logic on one frame.
+
+        sampled: {module: {"margin": m, "dedupeSec": d}} for modules analysed at an interval (one frame every
+        few seconds). Track-based confirmation (several consecutive sightings of one tracker ID) cannot work
+        with seconds between frames, so for these modules a box is confirmed on THIS frame when its confidence
+        >= class threshold + margin; a confirmed box overlapping (IoU >= 0.3) one of the same label confirmed
+        within dedupeSec is not reported again (a parked car does not raise an alert every sample).
+        Modules not listed keep the original track-based confirmation unchanged.
+        imgsz: model input size for this pass (default: the pipeline's img_size).
 
         share_person_conf: Human Count runs on the same camera and needs person boxes above this
         confidence - they are taken from this model pass (self.shared_persons, Nx5 xyxy+conf) instead of
@@ -259,7 +303,7 @@ class PersonVehiclePipeline:
             self._share = {"conf": conf, "classes": set(classes), "person_conf": float(share_person_conf)}
             conf = min(conf, float(share_person_conf))
             classes = sorted(set(classes) | {PERSON_CLASS})
-        kwargs = dict(imgsz=self.img_size, conf=conf, classes=classes, verbose=False)
+        kwargs = dict(imgsz=int(imgsz or self.img_size), conf=conf, classes=classes, verbose=False)
         if self.device is not None:
             kwargs["device"] = self.device
         if self.half:
@@ -344,8 +388,22 @@ class PersonVehiclePipeline:
             in_zone = (not polys) or any(len(p) >= 3 and cv2.pointPolygonTest(p, (float(cx), float(cy)), False) >= 0 for _, p in polys)
             zone_name = next((z.get("name") for z, p in polys if len(p) >= 3 and cv2.pointPolygonTest(p, (float(cx), float(cy)), False) >= 0), None)
 
-            confirmed = label is not None and self.hit_counts[track_id] >= MIN_HITS_TO_CONFIRM
-            if confirmed and track_id not in self.confirmed_ids.setdefault(label, set()):
+            smod = sampled.get(module) if sampled else None
+            if smod is not None:
+                # sampled mode: confirm on this frame (see process docstring); the tracker still runs and gives IDs
+                label = "Rider" if track_id in rider_ids else frame_label
+                box_n = (x1 / w, y1 / h, x2 / w, y2 / h)
+                confirmed = conf >= thresholds.get(label, plan["predict_conf"]) + float(smod.get("margin", 0.10))
+                if confirmed and in_zone and self._sample_is_new(module, label, box_n, float(smod.get("dedupeSec", 60))):
+                    new_confirmations.append({"trackId": track_id, "label": label, "module": module,
+                                              "confidence": round(conf, 3), "zone": zone_name,
+                                              "box": [round(v, 4) for v in box_n], "hits": 1, "firstSeenToConfirmMs": 0,
+                                              "confirmMode": "sampled"})
+                confirmed_branch = False
+            else:
+                confirmed = label is not None and self.hit_counts[track_id] >= MIN_HITS_TO_CONFIRM
+                confirmed_branch = True
+            if confirmed_branch and confirmed and track_id not in self.confirmed_ids.setdefault(label, set()):
                 self.confirmed_ids[label].add(track_id)
                 if in_zone:
                     new_confirmations.append({"trackId": track_id, "label": label, "module": label_module(label),
@@ -354,7 +412,7 @@ class PersonVehiclePipeline:
                                               # frames / time from the track's first box to this confirming frame
                                               "hits": self.hit_counts[track_id],
                                               "firstSeenToConfirmMs": round((time.time() - self.first_seen.get(track_id, time.time())) * 1000.0)})
-            elif confirmed:
+            elif confirmed_branch and confirmed:
                 self.confirmed_ids[label].add(track_id)
 
             display_label = label if label is not None else "(deciding)"

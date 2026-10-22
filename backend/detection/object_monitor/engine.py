@@ -142,6 +142,13 @@ class ObjectEngine:
         dets = self.detector.latest if (self.detector and self.cfg["detector"].get("showLabels")) else []
         return draw_objects(annotated, self.monitor.view(), dets, bool(dets))
 
+    def skip(self, raw, annotated):
+        """Motion gate closed: no monitoring step on this frame, but keep the newest frame (for marking objects)
+        and draw the current object states so the live view does not flicker."""
+        self.last_frame = raw
+        dets = self.detector.latest if (self.detector and self.cfg["detector"].get("showLabels")) else []
+        return draw_objects(annotated, self.monitor.view(), dets, bool(dets))
+
     # ------------------------------------------------------------------ commands from the UI
     def mark(self, box_norm, name=None):
         """box_norm: (x, y, w, h) 0-1 of the frame. Uses the newest frame as the object's reference."""

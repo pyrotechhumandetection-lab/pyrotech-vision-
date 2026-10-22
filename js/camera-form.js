@@ -475,15 +475,41 @@
       '<div class="field"><label for="cf-sens">Alert Sensitivity</label><div class="range-row"><input class="range" type="range" id="cf-sens" min="0" max="2" step="1" value="' + ['low', 'medium', 'high'].indexOf(m.detection.sensitivity) + '" data-range-out="cf-sens-out" data-format="sens"><output class="range-val" id="cf-sens-out"></output></div>' +
       '<span class="field-hint">Sensitivity must be translated into backend alert rules (e.g. minimum consecutive frames) where supported.</span></div></div>';
   }
+  /** Modules running on the backend for this camera right now (one shared camera connection). */
+  function runningModules() {
+    const ses = !isNew && api.status.connected ? state.session(originalId) : null;
+    return ses && Array.isArray(ses.modules) ? ses.modules : [];
+  }
   function renderModuleCards() {
     const el = root.querySelector('#dm-grid');
-    el.innerHTML = cat.MODULES.map(function (md) {
+    const running = runningModules();
+    const canRun = !isNew && api.status.connected && m.source === 'backend';
+    el.innerHTML = (isNew ? '<div class="dm-primary-note field-hint" style="grid-column:1/-1">' + icon('info', 13) + ' A new camera starts with <b>one primary detection</b>: choose one module; it starts when the camera is saved. Add more modules after saving (they share the same camera connection).</div>' : '') +
+      cat.MODULES.map(function (md) {
       const cfg = m.detection.modules[md.id];
-      return '<div class="dm-card' + (cfg.enabled ? ' on' : '') + '"><span class="dm-icon" style="color:' + md.color + '">' + icon(md.icon, 22) + '</span><b style="line-height:1.25">' + esc(md.name) + '</b>' +
-        ui.switchHtml('dm-' + md.id, cfg.enabled, 'Enable ' + md.name, { attrs: 'data-dm="' + md.id + '"', cls: 'blue' }) +
-        '<button type="button" class="dm-settings" data-dms="' + md.id + '" aria-label="' + esc(md.name) + ' settings"><span>Settings</span><span class="dim" style="font-size:11px;margin-left:auto">' + (cfg.enabled ? 'conf ' + Number(cfg.confidence).toFixed(2) : 'off') + '</span>' + icon('chevronDown', 14) + '</button></div>';
+      const on = running.indexOf(md.id) >= 0;
+      const runBtn = canRun && md.live
+        ? '<button type="button" class="dm-run btn btn-sm ' + (on ? 'btn-ghost' : 'btn-primary') + '" data-dmrun="' + md.id + '" data-on="' + (on ? 1 : 0) + '" style="grid-column:1/-1">' + icon(on ? 'square' : 'play', 13) + '<span>' + (on ? 'Running — stop' : 'Add to this camera (start)') + '</span></button>'
+        : '';
+      return '<div class="dm-card' + (cfg.enabled ? ' on' : '') + '"><span class="dm-icon" style="color:' + md.color + '">' + icon(md.icon, 22) + '</span><b style="line-height:1.25">' + esc(md.name) + (on ? ' <span class="badge badge-success" style="font-size:10px">running</span>' : '') + '</b>' +
+        ui.switchHtml('dm-' + md.id, cfg.enabled, (isNew ? 'Primary detection: ' : 'Enable ') + md.name, { attrs: 'data-dm="' + md.id + '"', cls: 'blue' }) +
+        '<button type="button" class="dm-settings" data-dms="' + md.id + '" aria-label="' + esc(md.name) + ' settings"><span>Settings</span><span class="dim" style="font-size:11px;margin-left:auto">' + (cfg.enabled ? 'conf ' + Number(cfg.confidence).toFixed(2) : 'off') + '</span>' + icon('chevronDown', 14) + '</button>' + runBtn + '</div>';
     }).join('');
+    el.querySelectorAll('[data-dmrun]').forEach(function (b) { b.addEventListener('click', async function () {
+      const id = b.dataset.dmrun, on = b.dataset.on === '1', name = cat.moduleById(id).name;
+      if (on && !(await ui.confirm({ title: 'Stop ' + name + ' on this camera?', message: 'The other modules keep running on the same camera connection.', confirmText: 'Stop' }))) return;
+      ui.setBusy(b, true, on ? 'Stopping…' : 'Starting…');
+      try {
+        if (on) await api.detection.stop(id, originalId); else await api.detection.start(id, originalId);
+        ui.toast('success', name + (on ? ' stopped' : ' started'), on ? '' : 'Runs on the existing camera connection (no second RTSP stream).');
+        await state.pollCameras();
+      } catch (e) { ui.toast('error', name + ': ' + (e.code || 'error'), e.message); }
+      if (root && root.isConnected) renderModuleCards();
+    }); });
     el.querySelectorAll('[data-dm]').forEach(function (inp) { inp.addEventListener('change', function () {
+      if (isNew && inp.checked) {     // new camera: one primary detection - selecting one clears the others
+        Object.keys(m.detection.modules).forEach(function (k) { if (k !== inp.dataset.dm) m.detection.modules[k].enabled = false; });
+      }
       m.detection.modules[inp.dataset.dm].enabled = inp.checked;
       renderModuleCards(); showErrors({}); renderZoneList();
       if (inp.checked && inp.dataset.dm === 'count') askCountArea();
@@ -494,6 +520,7 @@
       const next = await window.AV.modules.openSettings(id, m.detection.modules[id], m.zones);
       if (next) {
         m.detection.modules[id] = next;
+        if (isNew && next.enabled) Object.keys(m.detection.modules).forEach(function (k) { if (k !== id) m.detection.modules[k].enabled = false; });
         // reflect module→zone mapping on zones
         m.zones.forEach(function (z) {
           const has = (z.modules || []).indexOf(id) >= 0, want = next.zones.indexOf(z.id) >= 0;
@@ -622,6 +649,13 @@
       dirtyBaseline = snapshot();
       ui.toast('success', isNew ? 'Camera added' : 'Camera updated',
         res.persistedTo === 'backend' ? res.camera.name + ' saved on the backend.' : res.camera.name + ' saved in this browser only (local mode). ' + (m.requiresAuth ? 'Password was not stored.' : ''));
+      // new camera: start its ONE primary detection (other modules are added explicitly later)
+      const primary = isNew && res.persistedTo === 'backend' ? cat.MODULES.filter(function (md) { return md.live && toSave.detection.modules[md.id] && toSave.detection.modules[md.id].enabled; }) : [];
+      if (primary.length === 1) {
+        const pid = primary[0].id, cid = res.camera.id || toSave.id;
+        api.detection.start(pid, cid).then(function () { ui.toast('success', primary[0].name + ' started', 'Primary detection of ' + res.camera.name + '.'); state.pollCameras(); })
+          .catch(function (e) { ui.toast('error', primary[0].name + ' not started', (e.code ? e.code + ': ' : '') + e.message); });
+      }
       window.AV.router.go('/cameras/' + encodeURIComponent(res.camera.id || toSave.id));
     } catch (e) {
       ui.toast('error', 'Save failed — your changes are kept', (e.kind === 'unavailable' ? 'Backend unavailable. ' : '') + window.AV.connection.clean(e.message) + ' You can retry.');

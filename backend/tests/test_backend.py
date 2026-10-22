@@ -1057,3 +1057,132 @@ class EventVersionTests(unittest.TestCase):
             self.assertEqual(st.edits, e1 + 1)             # existing record changed: pollers reload
         finally:
             config.DATA_DIR, config.SNAPSHOT_DIR = old
+
+
+class SamplingSchedulerTests(unittest.TestCase):
+    """Multi-camera optimisation: per-module AI intervals, motion gate, newest-frame policy, sampled
+    confirmation, occupancy counting, per-module input size, settings validation."""
+
+    def _run(self, sch, motion=lambda t: False, secs=60, fps=16):
+        from backend.services.scheduler import ModuleSchedule
+        s = ModuleSchedule("x")
+        s.configure(sch["cfg"], sch["gate"])
+        t, runs, reasons = 1000.0, 0, []
+        for i in range(int(secs * fps)):
+            t += 1.0 / fps
+            run, why = s.decide(t, motion)
+            if run:
+                s.selected(t, i, t, why)
+                s.done(True, 10.0)
+                runs += 1
+                reasons.append(why)
+        return s, runs, reasons
+
+    def test_vehicle_interval_two_seconds(self):
+        s, runs, _ = self._run({"cfg": {"intervalSec": 2.0}, "gate": False})
+        self.assertEqual(runs, 30)                                   # 60 s / 2 s
+        self.assertEqual(s.c["sampling"] + runs, 60 * 16)            # every frame accounted for
+
+    def test_human_and_count_four_seconds(self):
+        _, runs, _ = self._run({"cfg": {"intervalSec": 4.0}, "gate": False})
+        self.assertEqual(runs, 15)
+
+    def test_motion_gate_only_fallback_without_motion(self):
+        s, runs, reasons = self._run({"cfg": {"intervalSec": 4.0, "motionGate": True, "fallbackSec": 30, "motionHoldSec": 10},
+                                      "gate": True}, motion=lambda t: False, secs=90)
+        self.assertEqual(reasons, ["fallback"] * runs)
+        self.assertEqual(runs, 3)                                    # t=0, 30, 60 s (fallback checks only)
+        self.assertGreater(s.c["motion"], 0)                         # avoided AI calls are counted
+
+    def test_motion_gate_runs_at_interval_with_motion(self):
+        _, runs, reasons = self._run({"cfg": {"intervalSec": 4.0, "motionGate": True, "fallbackSec": 30},
+                                      "gate": True}, motion=lambda t: True, secs=60)
+        self.assertEqual(runs, 15)
+        self.assertTrue(all(r == "motion" for r in reasons))
+
+    def test_vehicle_and_count_are_never_motion_gated(self):
+        from backend.services.scheduler import ModuleSchedule
+        s = ModuleSchedule("vehicle")
+        s.configure({"intervalSec": 2.0, "motionGate": True}, gate_allowed=False)
+        self.assertFalse(s.motion_gate)
+
+    def test_motion_gate_detects_change(self):
+        import numpy as np
+        from backend.detection.motion import MotionGate
+        g = MotionGate()
+        a = np.zeros((360, 640, 3), np.uint8)
+        b = a.copy(); b[100:250, 200:400] = 255
+        self.assertFalse(g.update(a, 1.0, 0.5))                      # first sample: reference only
+        self.assertFalse(g.update(a.copy(), 1.3, 0.5))               # identical picture: no motion
+        self.assertTrue(g.update(b, 1.6, 0.5))                       # big change: motion
+        self.assertTrue(g.active(5.0, 10)); self.assertFalse(g.active(20.0, 10))
+
+    def test_take_newest_discards_older_frames_counted(self):
+        import threading
+        from collections import deque
+        from backend.detection.frame_reader import LatestFrameReader
+        r = LatestFrameReader.__new__(LatestFrameReader)
+        r.lock = threading.Lock(); r.qcond = threading.Condition(r.lock); r.queue = deque()
+        for i in range(1, 6):
+            r.queue.append((i, None, float(i)))
+        item, n = r.take_newest()
+        self.assertEqual((item[0], n, len(r.queue)), (5, 4, 0))
+        self.assertEqual(r.take_newest(), (None, 0))
+
+    def test_sampled_dedupe(self):
+        from backend.detection.pipeline import PersonVehiclePipeline
+        p = PersonVehiclePipeline.__new__(PersonVehiclePipeline)
+        p.sample_seen = {}
+        box = (0.10, 0.10, 0.30, 0.30)
+        self.assertTrue(p._sample_is_new("vehicle", "4-Wheeler", box, 60))
+        self.assertFalse(p._sample_is_new("vehicle", "4-Wheeler", (0.11, 0.10, 0.31, 0.30), 60))   # same place
+        self.assertTrue(p._sample_is_new("vehicle", "Truck", box, 60))                              # other class
+        self.assertTrue(p._sample_is_new("vehicle", "4-Wheeler", (0.60, 0.60, 0.80, 0.80), 60))     # elsewhere
+        for e in p.sample_seen["vehicle"]:
+            e[2] -= 61                                                                              # window passed
+        self.assertTrue(p._sample_is_new("vehicle", "4-Wheeler", box, 60))
+
+    def test_count_occupancy_mode(self):
+        import numpy as np
+        from backend.detection.human_count import HumanCounter, PeopleTracker
+        hc = HumanCounter.__new__(HumanCounter)
+        hc.tracker = PeopleTracker(); hc.reset()
+        hc.configure({"confidence": 0.4, "counting": {}, "zones": ["z1"]},
+                     [{"id": "z1", "type": "rectangle", "x": 0, "y": 0, "width": 0.5, "height": 1}])
+        frame = np.zeros((100, 200, 3), np.uint8)
+        dets = np.array([[10, 10, 40, 90, 0.9], [20, 10, 60, 80, 0.8], [150, 10, 190, 90, 0.9], [30, 30, 50, 60, 0.2]], np.float32)
+        out, _ms, new = hc.occupancy(frame, frame.copy(), 1000.0, dets=dets)
+        self.assertEqual((hc.current, hc.detected, new, hc.unique), (2, 3, [], 0))   # 2 in zone, weak box ignored
+        st = hc.stats()
+        self.assertEqual((st["mode"], st["uniqueAvailable"]), ("occupancy", False))
+        self.assertEqual(st["minutes"][-1]["max"], 2)
+
+    def test_inference_size_keeps_boxes_in_frame_coordinates(self):
+        from pathlib import Path as _P
+        import cv2
+        import ultralytics
+        img = cv2.imread(str(_P(ultralytics.__file__).parent / "assets" / "bus.jpg"))
+        if img is None or not config.MODEL_PATH.is_file():
+            self.skipTest("test image or model missing")
+        from backend.detection.pipeline import PersonVehiclePipeline
+        from backend.detection.modules import module_config
+        p = PersonVehiclePipeline(config.MODEL_PATH, config.TRACKER_CONFIG, 640, "cpu")
+        plan = p.build_plan(None, module_config({}, "vehicle"), [])
+        _a, d640, _n, _ = p.process(img.copy(), plan, imgsz=640)
+        p.reset_tracking(); p.model.predictor = None
+        _a, d320, _n, _ = p.process(img.copy(), plan, imgsz=320)
+        bus640 = [d["box"] for d in d640 if d["label"] in ("Bus", "(deciding)")]
+        bus320 = [d["box"] for d in d320 if d["label"] in ("Bus", "(deciding)")]
+        self.assertTrue(bus640 and bus320)
+        from backend.detection.pipeline import iou
+        self.assertGreater(iou(bus640[0], bus320[0]), 0.8)           # same place on the ORIGINAL frame at both sizes
+        self.assertTrue(all(0 <= v <= 1 for v in bus320[0]))
+
+    def test_schedule_validation(self):
+        from backend.detection.modules import module_config, validate
+        ok = module_config({}, "vehicle")
+        self.assertEqual(validate("vehicle", ok, []), [])
+        self.assertEqual(ok["schedule"]["intervalSec"], config.VEHICLE_INTERVAL_SEC)
+        bad = module_config({"detection": {"modules": {"human": {"schedule": {"intervalSec": -1, "imgSize": 500, "x": 1}}}}}, "human")
+        errs = validate("human", bad, [])
+        self.assertTrue(any("intervalSec" in e for e in errs) and any("imgSize" in e for e in errs) and any("schedule.x" in e for e in errs))

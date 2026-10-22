@@ -153,6 +153,51 @@ DEFAULTS["object"] = {
     "alert": {"enabled": True, "labels": ["Moved", "Missing"], "severity": "high", "cooldownSec": 30},
 }
 
+# AI frame sampling per module (Method 1 / 4 / 8 of the multi-camera optimisation). intervalSec 0 = analyse
+# every frame (previous behaviour). imgSize = model input size for this module (frames are resized only for the
+# model; boxes are mapped back to the original frame by Ultralytics). Fire & Smoke keeps its own worker and
+# everyNFrames setting and is never motion-gated.
+DEFAULTS["vehicle"]["schedule"] = {"intervalSec": config.VEHICLE_INTERVAL_SEC, "captureFps": config.VEHICLE_CAPTURE_FPS,
+                                   "imgSize": config.IMG_SIZE, "confirmMargin": config.SAMPLED_CONFIRM_MARGIN,
+                                   "dedupeSec": config.SAMPLED_DEDUPE_SEC}
+DEFAULTS["human"]["schedule"] = {"intervalSec": config.HUMAN_INTERVAL_SEC, "captureFps": config.HUMAN_CAPTURE_FPS,
+                                 "imgSize": config.IMG_SIZE, "confirmMargin": config.SAMPLED_CONFIRM_MARGIN,
+                                 "dedupeSec": config.SAMPLED_DEDUPE_SEC, "motionGate": config.HUMAN_MOTION_GATE,
+                                 "motionMinAreaPct": config.MOTION_MIN_AREA_PCT, "motionHoldSec": config.MOTION_HOLD_SEC,
+                                 "fallbackSec": config.MOTION_FALLBACK_SEC}
+DEFAULTS["count"]["schedule"] = {"intervalSec": config.COUNT_INTERVAL_SEC, "captureFps": config.HUMAN_CAPTURE_FPS,
+                                 "imgSize": config.IMG_SIZE}
+DEFAULTS["object"]["schedule"] = {"intervalSec": 0.0, "motionGate": config.OBJECT_MOTION_GATE,
+                                  "motionMinAreaPct": config.MOTION_MIN_AREA_PCT, "motionHoldSec": config.MOTION_HOLD_SEC,
+                                  "fallbackSec": config.MOTION_FALLBACK_SEC}
+SCHEDULE_LIMITS = {"intervalSec": (0, 600, False), "captureFps": (0, 60, False), "imgSize": (160, 1920, True),
+                   "confirmMargin": (0, 0.5, False), "dedupeSec": (0, 3600, False), "motionMinAreaPct": (0.01, 50, False),
+                   "motionHoldSec": (0, 600, False), "fallbackSec": (1, 3600, False)}
+
+
+def _validate_schedule(module_id, cfg):
+    sch = cfg.get("schedule")
+    if sch is None or module_id not in ("human", "vehicle", "count", "object"):
+        return []
+    if not isinstance(sch, dict):
+        return ["schedule must be an object"]
+    errs = []
+    allowed = DEFAULTS[module_id]["schedule"]
+    for k, v in sch.items():
+        if k not in allowed:
+            errs.append(f"schedule.{k} is not a setting of {module_id}")
+        elif k == "motionGate":
+            if not isinstance(v, bool):
+                errs.append("schedule.motionGate must be true or false")
+        else:
+            lo, hi, integer = SCHEDULE_LIMITS[k]
+            n = len(errs)
+            _num(errs, f"schedule.{k}", v, lo, hi, integer)
+            if k == "imgSize" and len(errs) == n and int(v) % 32:
+                errs.append("schedule.imgSize must be a multiple of 32 (e.g. 480, 640, 960)")
+    return errs
+
+
 SEVERITIES = ("low", "medium", "high", "critical")
 SNAPSHOT_MODES = ("new_track", "off")
 
@@ -296,8 +341,8 @@ def validate(module_id, cfg, camera_zones):
     if module_id == "fire":
         return _validate_fire(cfg, camera_zones)
     if module_id == "object":
-        return _validate_object(cfg)
-    errs = []
+        return _validate_object(cfg) + _validate_schedule(module_id, cfg)
+    errs = _validate_schedule(module_id, cfg)
     m = MODULES[module_id]
     try:
         c = float(cfg.get("confidence"))

@@ -112,7 +112,9 @@
     const v = function (x) { return c && x !== undefined && x !== null ? esc(x) : '—'; };
     root.querySelector('#hc-stats').innerHTML =
       tile('users', 'success', live ? v(c && c.current) : '—', 'People now', 'Confirmed people visible in the current frame') +
-      tile('user', 'primary', v(c && c.unique), 'People counted', 'Unique people since detection started (each counted once)') +
+      (c && c.uniqueAvailable === false
+        ? tile('user', 'primary', 'n/a', 'People counted', 'Sampled mode (one analysis every few seconds): unique people cannot be tracked between samples - people in view are reported per sample. Set the interval to 0 in the module settings for unique counting.')
+        : tile('user', 'primary', v(c && c.unique), 'People counted', 'Unique people since detection started (each counted once)')) +
       tile('activity', 'purple', v(c && c.peak), 'Peak' + (c && c.peakAt ? ' · ' + ui.fmtTime(c.peakAt, { noYear: true }) : ''), 'Highest number of people at the same time') +
       tile('clock', 'warning', c ? Number(c.average60s).toFixed(1) : '—', 'Average (last 60 s)', 'Average people in view over the last minute');
   }

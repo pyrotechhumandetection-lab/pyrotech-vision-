@@ -260,6 +260,8 @@ class HumanCounter:
         self._minute = None                    # [minute_start, max, sum, n, new]
         self.recent = deque(maxlen=20)         # recently counted people (results table)
         self.completed_minutes = []            # finished minute records waiting to be persisted
+        self.occupancy_mode = False            # True while analysed at an interval (see occupancy())
+        self.last_boxes = []
 
     def configure(self, cfg, camera_zones):
         cnt = cfg.get("counting") or {}
@@ -268,6 +270,9 @@ class HumanCounter:
         self.tracker.keep_lost_sec = float(cnt.get("keepLostSec", 2.0))
         zones = {z["id"]: z for z in (camera_zones or []) if z.get("enabled", True)}
         self.zones = [zones[i] for i in (cfg.get("zones") or []) if i in zones]
+        img = int((cfg.get("schedule") or {}).get("imgSize") or 0)
+        if img:
+            self.detector.img_size = img          # model input size only; frames and boxes stay full size
 
     def _in_zone(self, box, polys):
         if not polys:
@@ -286,6 +291,9 @@ class HumanCounter:
         on this frame by the Person/Vehicle pipeline (shared pass) - None = run the own detector.
         Returns (annotated, inference_ms, newly_counted)."""
         h, w = raw.shape[:2]
+        if self.occupancy_mode:                  # back to analysing every frame: tracking starts fresh
+            self.occupancy_mode = False
+            self.tracker.reset()
         t0 = time.perf_counter()
         if dets is None:
             dets = self.detector.detect(raw, self.detect_conf)
@@ -314,6 +322,55 @@ class HumanCounter:
         self._sample(t, current, len(new))
         self._draw(annotated, seen, polys)
         return annotated, inf_ms, new
+
+    def occupancy(self, raw, annotated, t, dets=None):
+        """Sampled mode (an analysis every few seconds): unique people cannot be tracked across samples, so
+        this counts the people in view / in the counting zones ON THIS FRAME (occupancy). Minute history
+        (max / average), peak, last-person time and the occupancy alert work as before; 'newly counted' is
+        not available (0) and the unique total does not grow. Returns (annotated, inference_ms, [])."""
+        h, w = raw.shape[:2]
+        if not self.occupancy_mode:              # switching from tracking: forget tracks of the old mode
+            self.tracker.reset()
+            self.occupancy_mode = True
+        t0 = time.perf_counter()
+        if dets is None:
+            dets = self.detector.detect(raw, self.detect_conf)
+        inf_ms = (time.perf_counter() - t0) * 1000.0
+        polys = _zone_polys(self.zones, w, h)
+        boxes = []
+        for d in dets:
+            if d[4] >= self.conf:
+                boxes.append((d[:4], float(d[4]), self._in_zone(d[:4], polys)))
+        current = sum(1 for _, _, z in boxes if z)
+        self.current = current
+        self.detected = len(boxes)
+        self.last_boxes = [([round(float(b[0]) / w, 4), round(float(b[1]) / h, 4), round(float(b[2]) / w, 4),
+                             round(float(b[3]) / h, 4)], c, z) for b, c, z in boxes]
+        if current:
+            self.last_person_at = t
+        if current > self.peak:
+            self.peak, self.peak_at = current, t
+        self._sample(t, current, 0)
+        self.draw_occupancy(annotated)
+        return annotated, inf_ms, []
+
+    def draw_occupancy(self, img, age_s=None):
+        """Draw the last occupancy result (also used on live frames between two samples)."""
+        h, w = img.shape[:2]
+        polys = _zone_polys(self.zones, w, h)
+        for z, p in polys:
+            cv2.polylines(img, [p], True, _hex_bgr(z.get("color", "#13D99A")), 2)
+        for b, c, z in self.last_boxes:
+            x1, y1, x2, y2 = int(b[0] * w), int(b[1] * h), int(b[2] * w), int(b[3] * h)
+            col = COLOR_CONFIRMED if z else COLOR_OUT_OF_ZONE
+            cv2.rectangle(img, (x1, y1), (x2, y2), col, 2 if age_s is None else 1)
+        label = f"People now: {self.current}" + (f"  ({age_s:.0f} s ago)" if age_s is not None and age_s >= 1 else "")
+        scale = max(0.6, img.shape[1] / 1600)
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, scale, 2)
+        x0 = img.shape[1] - tw - 22
+        cv2.rectangle(img, (x0 - 6, 8), (img.shape[1] - 8, 22 + th), (20, 20, 20), -1)
+        cv2.putText(img, label, (x0, 14 + th), cv2.FONT_HERSHEY_SIMPLEX, scale, (255, 255, 255), 2)
+        return img
 
     # ------------------------------------------------------------------ statistics
     def _sample(self, t, current, new):
@@ -364,6 +421,8 @@ class HumanCounter:
             "since": iso(self.started_at), "lastPersonAt": iso(self.last_person_at),
             "minutes": list(self.minutes) + ([cur_min] if cur_min else []),
             "recent": list(self.recent),
+            "mode": "occupancy" if self.occupancy_mode else "tracking",
+            "uniqueAvailable": not self.occupancy_mode,
             "settings": {"confidence": self.conf, "minFrames": self.tracker.min_hits, "keepLostSec": self.tracker.keep_lost_sec,
                          "zones": [z.get("name") for z in self.zones]},
         }

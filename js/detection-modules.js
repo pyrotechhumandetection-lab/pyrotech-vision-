@@ -48,6 +48,30 @@
     return '<div class="notice notice-warning">' + icon('alert', 16) + '<div>Class support has not been verified — no model registry is connected. Selected classes are stored as <b>requested</b> classes; the backend must reject any class its model cannot detect.</div></div>';
   }
 
+  // AI frame sampling defaults of the backend (backend/config.py, AIV_* settings) - empty field = default
+  const SCHED = {
+    vehicle: { intervalSec: 2, captureFps: 16, imgSize: 640 },
+    human: { intervalSec: 4, captureFps: 6, imgSize: 640, motionGate: true, fallbackSec: 30 },
+    count: { intervalSec: 4, captureFps: 6, imgSize: 640 },
+    object: { motionGate: true, fallbackSec: 30 }
+  };
+  function num(name, label, val, dflt, hint, step) {
+    return '<div class="field"><label>' + esc(label) + '</label><input class="input" type="number" name="sch-' + name + '" step="' + (step || 'any') + '" min="0" value="' + (val === undefined || val === null ? '' : esc(val)) + '" placeholder="default ' + esc(dflt) + '"><span class="field-hint">' + hint + '</span></div>';
+  }
+  function scheduleHtml(modId, cfg) {
+    const d = SCHED[modId];
+    if (!d) return '';
+    const s = cfg.schedule || {};
+    let h = '<div class="field"><span class="field-label">AI frame sampling</span><div class="grid-2" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px">';
+    if ('intervalSec' in d) h += num('intervalSec', 'Analyse one frame every (s)', s.intervalSec, d.intervalSec + ' s', '0 = every frame (tracking confirmation). With an interval, detections are confirmed per analysed frame.');
+    if ('captureFps' in d) h += num('captureFps', 'Frames processed / shown per second', s.captureFps, d.captureFps + ' fps', 'Frames above this are skipped after decoding (set the camera\'s own fps to save decoding too).');
+    if ('imgSize' in d) h += num('imgSize', 'Model input size (px)', s.imgSize, d.imgSize, 'Multiple of 32. Smaller = faster, but small / distant objects are missed more often.', 32);
+    if ('fallbackSec' in d) h += num('fallbackSec', 'Check without motion every (s)', s.fallbackSec, d.fallbackSec + ' s', 'AI check even when nothing moves (motion is a trigger, not a detector).');
+    h += '</div>';
+    if ('motionGate' in d) h += check('sch-motionGate', 'Motion-triggered analysis (skip AI while the picture does not change)', s.motionGate === undefined ? d.motionGate : !!s.motionGate);
+    return h + '</div>';
+  }
+
   /** Settings form body for one module. */
   function settingsHtml(modId, cfg, zones) {
     const m = cat.moduleById(modId);
@@ -110,14 +134,27 @@
         body += '<div class="field-hint" id="' + p + '-classes">Supported classes: ' + esc(sel && sel.classes ? sel.classes.join(', ') : '—') + '</div>';
       }
     }
+    body += scheduleHtml(modId, cfg);
     if (modId !== 'object') body += zonesField(cfg, zones);
     return body + '</div>';
   }
 
   /** Read form values back into a module config (does not mutate input). */
+  function readSchedule(root, modId, cfg) {
+    if (!SCHED[modId]) return;
+    const sch = Object.assign({}, cfg.schedule || {});
+    root.querySelectorAll('input[name^="sch-"]').forEach(function (inp) {
+      const k = inp.name.slice(4);
+      if (inp.type === 'checkbox') sch[k] = inp.checked;
+      else if (inp.value.trim() === '') delete sch[k];            // empty = backend default
+      else sch[k] = k === 'imgSize' ? parseInt(inp.value, 10) : parseFloat(inp.value);
+    });
+    if (Object.keys(sch).length) cfg.schedule = sch; else delete cfg.schedule;
+  }
   function readSettings(root, modId, prev) {
     const cfg = JSON.parse(JSON.stringify(prev || {}));
     const q = function (n) { return root.querySelector('[name="' + n + '"]'); };
+    readSchedule(root, modId, cfg);
     cfg.enabled = q('enabled').checked;
     const range = root.querySelector('.range');
     cfg.confidence = Math.round(parseFloat(range.value) * 100) / 100;
@@ -156,6 +193,11 @@
     if (modId === 'vehicle' && !Object.keys(cfg.classes || {}).some(function (k) { return cfg.classes[k]; })) e.general = 'Select at least one vehicle class.';
     if (modId === 'human' && !(cfg.classes && (cfg.classes.person || cfg.classes.rider))) e.general = 'Select Person and/or Rider.';
     if (modId === 'custom' && !cfg.modelId) e.modelId = 'Select a model from the backend registry.';
+    const sc = cfg.schedule || {};
+    if (sc.intervalSec !== undefined && !(sc.intervalSec >= 0 && sc.intervalSec <= 600)) e.general = 'Analysis interval must be 0 - 600 s.';
+    if (sc.captureFps !== undefined && !(sc.captureFps >= 0 && sc.captureFps <= 60)) e.general = 'Frames per second must be 0 - 60.';
+    if (sc.imgSize !== undefined && !(sc.imgSize >= 160 && sc.imgSize <= 1920 && sc.imgSize % 32 === 0)) e.general = 'Model input size must be a multiple of 32 between 160 and 1920.';
+    if (sc.fallbackSec !== undefined && !(sc.fallbackSec >= 1 && sc.fallbackSec <= 3600)) e.general = 'Fallback check must be 1 - 3600 s.';
     return e;
   }
 

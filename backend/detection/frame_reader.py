@@ -198,6 +198,18 @@ class LatestFrameReader:
                     self.queue_stale += 1
             return self.queue.popleft() if self.queue else None
 
+    def take_newest(self):
+        """(item, n_skipped): the NEWEST queued frame, discarding older queued ones (they are counted by the
+        caller as replaced); (None, 0) when the queue is empty. Used when an analysis is due, so the AI gets
+        the most recent frame instead of the oldest waiting one."""
+        with self.qcond:
+            if not self.queue:
+                return None, 0
+            n = len(self.queue) - 1
+            item = self.queue.pop()
+            self.queue.clear()
+            return item, n
+
     def queue_len(self):
         with self.lock:
             return len(self.queue) if self.queue is not None else 0

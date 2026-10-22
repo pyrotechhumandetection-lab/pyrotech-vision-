@@ -112,6 +112,22 @@
     return keys.length ? keys.map(function (k) { return '<span class="badge badge-muted">' + esc(k) + ' <b>' + obj[k] + '</b></span>'; }).join(' ') : '<span class="dim">0</span>';
   }
 
+  /** AI frame sampling of this module (backend scheduler): interval, measured analyses per second, and what
+   *  happened to the other frames - all counters measured by the backend, never the configured value. */
+  function schedRow(m, modId) {
+    const sc = m.schedule && m.schedule[modId];
+    if (!sc) return '';
+    const every = sc.intervalSec ? 'one frame every ' + sc.intervalSec + ' s' : 'every frame';
+    const fps = sc.aiFps != null ? esc(sc.aiFps) + ' analyses/s <span class="dim">(measured, last ' + esc(sc.aiFpsWindowSec) + ' s)</span>' : '<span class="dim">measuring…</span>';
+    const parts = [esc(sc.framesProcessed) + ' analysed', esc(sc.skippedSampling) + ' skipped by interval'];
+    if (sc.motionGate) parts.push(esc(sc.skippedNoMotion) + ' AI calls avoided (no motion)', esc(sc.fallbackRuns) + ' fallback checks');
+    if (sc.rejectedStale) parts.push(esc(sc.rejectedStale) + ' stale');
+    if (sc.replacedQueue) parts.push(esc(sc.replacedQueue) + ' older queued frames replaced');
+    if (m.framesSkippedCapture) parts.push(esc(m.framesSkippedCapture) + ' above ' + esc(m.captureFpsTarget) + ' fps cap');
+    return '<dt>AI sampling</dt><dd>' + every + (sc.motionGate ? ' <span class="badge badge-muted">motion-triggered</span>' : '') + ' · ' + fps +
+      '<div class="dim" style="font-size:11.5px">' + parts.join(' · ') + (sc.lastFrameAgeMs != null ? ' · last frame ' + esc(sc.lastFrameAgeMs) + ' ms old at analysis (frame #' + esc(sc.lastFrameId) + ')' : '') + '</div></dd>';
+  }
+
   /** Frames received from the camera / analysed by the AI / skipped while the AI was busy (all measured). */
   function framesLine(m) {
     if (!m.framesReceived) return '<span class="dim">Unavailable</span>';
@@ -165,6 +181,7 @@
         ? '<dt>Fire model FPS</dt><dd>' + fmt(m.fireAnalysedFps, ' fps analysed') + (s.fire && s.fire.engine ? ' <span class="dim">· ' + esc(s.fire.engine) + ', ' + esc(s.fire.inferenceMs) + ' ms</span>' : '') +
           (m.fireSkipped ? ' <span class="dim">· ' + esc(m.fireSkipped) + ' frames skipped while the model was busy</span>' : '') + '</dd>'
         : '<dt>AI processing FPS</dt><dd>' + fmt(m.processingFps, ' fps') + '</dd>') +
+      schedRow(m, mod.id) +
       '<dt>Live view FPS</dt><dd>' + fmt(m.displayFps, ' fps sent') + (m.displayEncodeMs != null ? ' <span class="dim">· ' + esc(m.displayEncodeMs) + ' ms JPEG encode (own thread)</span>' : '') + '</dd>' +
       (m.lastDisconnectReason ? '<dt>Last disconnect</dt><dd class="dim">' + esc(m.lastDisconnectReason) + '</dd>' : '') +
       '<dt>Frames</dt><dd>' + framesLine(m) + '</dd>' +
