@@ -204,6 +204,26 @@ def core_name(mask):
     return {CORE_AUTO: "auto", CORE_0: "core 0", CORE_1: "core 1", CORE_2: "core 2", CORE_0_1_2: "cores 0+1+2"}.get(mask, str(mask))
 
 
+def _test_image(shape):
+    """1 x H x W x 3 uint8 RGB test image: Ultralytics' bus.jpg letterboxed, else smooth gradients."""
+    h, w = int(shape[1]), int(shape[2])
+    try:
+        import cv2
+        import ultralytics
+        im = cv2.imread(str(Path(ultralytics.__file__).parent / "assets" / "bus.jpg"))
+        if im is not None:
+            r = min(h / im.shape[0], w / im.shape[1])
+            nh, nw = round(im.shape[0] * r), round(im.shape[1] * r)
+            out = np.full((h, w, 3), 114, np.uint8)
+            top, left = (h - nh) // 2, (w - nw) // 2
+            out[top:top + nh, left:left + nw] = cv2.resize(im, (nw, nh))[:, :, ::-1]
+            return out[None]
+    except Exception:
+        pass
+    yy, xx = np.mgrid[0:h, 0:w]
+    return np.stack([xx * 255 // max(1, w - 1), yy * 255 // max(1, h - 1), (xx + yy) % 256], -1).astype(np.uint8)[None]
+
+
 # ---------------------------------------------------------------- RKNNLite-compatible runtime
 _IO_CHOICE = {}            # model sha1 -> (io variant, autotune table)
 _IO_LOCK = threading.Lock()
@@ -339,11 +359,9 @@ class RKNNLite:
     def autotune(self, runs=4):
         """Measure every I/O variant on a test image, keep the fastest one whose output equals the default
         (uint8 / float) output: scores within 0.01, boxes within 0.5 px. Returns the table (for the report)."""
-        rng = np.random.default_rng(1)
         dims = self.inputs[0]["dims"]
         shape = dims if self.inputs[0]["fmt"] == "NHWC" else [dims[0], dims[2], dims[3], dims[1]]
-        x = rng.integers(0, 256, size=shape, dtype=np.uint8)
-        x[:, : shape[1] // 2] //= 2                       # some structure, not only noise
+        x = _test_image(shape)             # a real photo: random noise drives the FP16 model into inf / NaN
         table, ref = [], None
         for io in self.IO_VARIANTS:
             try:
@@ -359,7 +377,12 @@ class RKNNLite:
                 continue
             if ref is None:
                 ref = y
-            d = np.abs(y.astype(np.float32) - ref.astype(np.float32)) if y.shape == ref.shape else None
+            d = None
+            if y.shape == ref.shape:
+                a, b = y.astype(np.float32), ref.astype(np.float32)
+                bad = ~np.isfinite(a) | ~np.isfinite(b)
+                with np.errstate(invalid="ignore", over="ignore"):
+                    d = np.where(bad, np.where(np.isnan(a) & np.isnan(b) | (a == b), 0.0, np.inf), np.abs(a - b))
             if d is None:
                 same = False
             elif d.ndim == 3:            # detection head 1 x (4 box + classes) x anchors

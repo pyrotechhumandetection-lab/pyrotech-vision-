@@ -431,10 +431,14 @@ def camera_frames(cam_id, n):
     import cv2
     from backend.services.cameras import CameraRegistry
     reg = CameraRegistry()
-    cam = reg.get(cam_id)
+    cams = reg.list()
+    cam = reg.get(cam_id) or next((c for c in cams if str(c.get("name", "")).strip().lower() == cam_id.strip().lower()
+                                   or str(c.get("id", "")).lower() == cam_id.strip().lower()), None)
     if not cam:
-        problem(f"camera {cam_id} not found - camera IDs: {', '.join(c['id'] for c in reg.list()) or 'none'}")
+        problem(f"camera {cam_id} not found - cameras: "
+                f"{', '.join(c['id'] + ' (' + str(c.get('name') or '') + ')' for c in cams) or 'none'}")
         return []
+    cam_id = f"{cam['id']} ({cam.get('name') or ''})"
     try:
         src, kind = reg.resolve_ai_source(cam)
     except ValueError as e:
