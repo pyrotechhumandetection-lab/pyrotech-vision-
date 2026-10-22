@@ -117,9 +117,13 @@
   function schedRow(m, modId) {
     const sc = m.schedule && m.schedule[modId];
     if (!sc) return '';
-    const every = sc.intervalSec ? 'one frame every ' + sc.intervalSec + ' s' : 'every frame';
+    const every = sc.mode === 'adaptive'
+      ? 'adaptive · <span class="badge ' + (sc.state === 'active' ? 'badge-success' : 'badge-muted') + '">' + (sc.state === 'active' ? 'ACTIVE (every frame)' : 'IDLE (check every ' + esc(sc.idleCheckSec) + ' s)') + '</span>' + (sc.activeSharePct != null ? ' <span class="dim">active ' + esc(sc.activeSharePct) + '% of the time</span>' : '')
+      : (sc.intervalSec ? 'one frame every ' + sc.intervalSec + ' s' : 'every frame');
     const fps = sc.aiFps != null ? esc(sc.aiFps) + ' analyses/s <span class="dim">(measured, last ' + esc(sc.aiFpsWindowSec) + ' s)</span>' : '<span class="dim">measuring…</span>';
-    const parts = [esc(sc.framesProcessed) + ' analysed', esc(sc.skippedSampling) + ' skipped by interval'];
+    const parts = sc.mode === 'adaptive'
+      ? [esc(sc.framesProcessed) + ' analysed', esc(sc.skippedIdle) + ' skipped while idle (AI calls avoided)', esc(sc.wakeByMotion) + ' wake-ups by motion', esc(sc.wakeByDetection) + ' by detection']
+      : [esc(sc.framesProcessed) + ' analysed', esc(sc.skippedSampling) + ' skipped by interval'];
     if (sc.motionGate) parts.push(esc(sc.skippedNoMotion) + ' AI calls avoided (no motion)', esc(sc.fallbackRuns) + ' fallback checks');
     if (sc.rejectedStale) parts.push(esc(sc.rejectedStale) + ' stale');
     if (sc.replacedQueue) parts.push(esc(sc.replacedQueue) + ' older queued frames replaced');

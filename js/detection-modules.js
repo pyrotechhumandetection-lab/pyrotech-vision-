@@ -50,10 +50,10 @@
 
   // AI frame sampling defaults of the backend (backend/config.py, AIV_* settings) - empty field = default
   const SCHED = {
-    vehicle: { intervalSec: 2, captureFps: 16, imgSize: 640 },
-    human: { intervalSec: 4, captureFps: 6, imgSize: 640, motionGate: true, fallbackSec: 30 },
-    count: { intervalSec: 4, captureFps: 6, imgSize: 640 },
-    object: { motionGate: true, fallbackSec: 30 }
+    vehicle: { mode: 'adaptive', idleCheckSec: 10, idleAfterSec: 10, intervalSec: 2, captureFps: 16, imgSize: 640 },
+    human: { mode: 'adaptive', idleCheckSec: 10, idleAfterSec: 10, intervalSec: 4, captureFps: 6, imgSize: 640, motionGate: true, fallbackSec: 30 },
+    count: { mode: 'adaptive', idleCheckSec: 10, idleAfterSec: 10, intervalSec: 4, captureFps: 6, imgSize: 640 },
+    object: { mode: 'adaptive', idleCheckSec: 10, idleAfterSec: 10, motionGate: true, fallbackSec: 30 }
   };
   function num(name, label, val, dflt, hint, step) {
     return '<div class="field"><label>' + esc(label) + '</label><input class="input" type="number" name="sch-' + name + '" step="' + (step || 'any') + '" min="0" value="' + (val === undefined || val === null ? '' : esc(val)) + '" placeholder="default ' + esc(dflt) + '"><span class="field-hint">' + hint + '</span></div>';
@@ -62,7 +62,14 @@
     const d = SCHED[modId];
     if (!d) return '';
     const s = cfg.schedule || {};
-    let h = '<div class="field"><span class="field-label">AI frame sampling</span><div class="grid-2" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px">';
+    const mode = s.mode || d.mode;
+    let h = '<div class="field"><span class="field-label">AI frame sampling</span>' +
+      '<select class="select" name="sch-mode" style="margin-bottom:8px">' +
+      [['adaptive', 'Adaptive (recommended): every frame while something happens, idle when the scene is still'], ['interval', 'Fixed interval: one analysed frame every N seconds'], ['every', 'Every frame, always (highest CPU)']]
+        .map(function (o) { return '<option value="' + o[0] + '"' + (mode === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select>' +
+      '<div class="grid-2" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px">';
+    h += num('idleCheckSec', 'Adaptive: AI check while idle every (s)', s.idleCheckSec, d.idleCheckSec + ' s', 'Safety check when nothing moves.');
+    h += num('idleAfterSec', 'Adaptive: idle after (s) without motion', s.idleAfterSec, d.idleAfterSec + ' s', 'Motion inside this module\'s zones, an unconfirmed object' + (modId === 'count' ? ' or people in view' : '') + ' keeps it active.');
     if ('intervalSec' in d) h += num('intervalSec', 'Analyse one frame every (s)', s.intervalSec, d.intervalSec + ' s', '0 = every frame (tracking confirmation). With an interval, detections are confirmed per analysed frame.');
     if ('captureFps' in d) h += num('captureFps', 'Frames processed / shown per second', s.captureFps, d.captureFps + ' fps', 'Frames above this are skipped after decoding (set the camera\'s own fps to save decoding too).');
     if ('imgSize' in d) h += num('imgSize', 'Model input size (px)', s.imgSize, d.imgSize, 'Multiple of 32. Smaller = faster, but small / distant objects are missed more often.', 32);
@@ -143,9 +150,10 @@
   function readSchedule(root, modId, cfg) {
     if (!SCHED[modId]) return;
     const sch = Object.assign({}, cfg.schedule || {});
-    root.querySelectorAll('input[name^="sch-"]').forEach(function (inp) {
+    root.querySelectorAll('input[name^="sch-"], select[name^="sch-"]').forEach(function (inp) {
       const k = inp.name.slice(4);
       if (inp.type === 'checkbox') sch[k] = inp.checked;
+      else if (k === 'mode') sch[k] = inp.value;
       else if (inp.value.trim() === '') delete sch[k];            // empty = backend default
       else sch[k] = k === 'imgSize' ? parseInt(inp.value, 10) : parseFloat(inp.value);
     });

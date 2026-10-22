@@ -88,6 +88,8 @@ class CameraSession:
         self.pv_imgsz = None
         self.held_pv = None                 # (detections, time) of the last Person/Vehicle analysis
         self.held_count_at = None
+        self.motion_zones = {}
+        self.motion_area = {}
         # Measured, never estimated:
         #   cameraFps      frames actually received + decoded from the camera per second (reader thread)
         #   processingFps  frames analysed by the AI model per second
@@ -456,12 +458,18 @@ class CameraSession:
                 runtime.take_wait_ms()                       # reset this thread's slot-wait counter
                 # ---- which modules analyse this frame (scheduler: interval / motion gate / every frame)
                 if self.gate_on:
+                    sid = self.motion.sample_id
                     self.motion.update(self.latest_raw, now, self.motion_min_area)
+                    if self.motion.sample_id != sid:          # new motion sample: motion per module (its zones)
+                        for m, sc in self.sched.items():
+                            if (sc.adaptive or sc.motion_gate) and \
+                                    self.motion.motion_in(self.motion_zones.get(m), self.motion_area.get(m, self.motion_min_area)):
+                                sc.motion_seen(now)
                 due = {}
                 for m in ("human", "vehicle", "count", "object"):
                     sc = self.sched.get(m)
                     if m in active and sc is not None:
-                        run, why = sc.decide(now, lambda t, sc=sc: self.motion.active(t, sc.hold))
+                        run, why = sc.decide(now)
                         if run:
                             due[m] = why
                 if due and queue_mode:                       # analyse the NEWEST frame, not the oldest waiting
@@ -501,6 +509,10 @@ class CameraSession:
                         if m in due:
                             self.sched[m].done(True, inf_ms)
                     self.held_pv = (dets, now)
+                    for m in ("human", "vehicle"):           # adaptive: an object still being confirmed keeps ACTIVE
+                        sc = self.sched.get(m)
+                        if sc is not None and sc.adaptive and any(d["module"] == m and d["inZone"] and not d["confirmed"] for d in dets):
+                            sc.keepalive(now)
                     st = self.pipeline.last_stages
                     for k in ("preprocess", "inference", "postprocess", "tracking"):
                         win["st_" + k] += st.get(k, 0.0)
@@ -511,7 +523,7 @@ class CameraSession:
                         if d["inZone"] and d["module"] in active:
                             counts[d["module"]][d["label"]] = counts[d["module"]].get(d["label"], 0) + 1
                     self.current = counts
-                elif pv_on and self.held_pv is not None and self.pv_sampled:
+                elif pv_on and self.held_pv is not None:
                     # between two analyses: show the last result, labelled with its age
                     annotated = self.pipeline.draw_held(frame, self.plan, self.held_pv[0], now - self.held_pv[1])
                 elif not pv_on:
@@ -532,6 +544,10 @@ class CameraSession:
                         win["shared"] += 1 if persons is not None else 0
                         self.sched["count"].done(True, c_ms)
                         self.held_count_at = now
+                        # adaptive: people present (or a person being confirmed) keep Human Count ACTIVE, so a
+                        # person standing still is never dropped and counted again later
+                        if self.counter.current > 0 or any(not tr.confirmed for tr in self.counter.tracker.tracks):
+                            self.sched["count"].keepalive(now)
                     except Exception as e:
                         log.exception("Human Count failure on %s", self.camera_id)
                         self.sched["count"].done(False)
@@ -709,11 +725,14 @@ class CameraSession:
                 continue
             sch = module_config(cam, m).get("schedule") or {}
             sc = self.sched.get(m) or ModuleSchedule(m)
-            sc.configure(sch, gate_allowed=m in ("human", "object"))     # never motion-gate vehicle / count
+            # fixed-interval mode: motion gate only for Human / Object (vehicle and count are never gated);
+            # adaptive mode: every module idles on its zones' motion
+            sc.configure(sch, gate_allowed=m in ("human", "object"))
             self.sched[m] = sc
-            if sc.motion_gate:
+            if sc.motion_gate or sc.adaptive:
                 gate_area.append(float(sch.get("motionMinAreaPct", config.MOTION_MIN_AREA_PCT)))
-            caps.append(float(sch.get("captureFps") or 0) if sc.sampled else 0.0)
+            self.motion_area[m] = float(sch.get("motionMinAreaPct", config.MOTION_MIN_AREA_PCT))
+            caps.append(float(sch.get("captureFps") or 0) if sc.mode != "every" else 0.0)
         if "fire" in active:
             caps.append(0.0)                  # Fire & Smoke keeps every frame (its own everyNFrames setting)
         # the session runs at the HIGHEST rate any running module needs; one module without a cap = no cap
@@ -730,6 +749,13 @@ class CameraSession:
                     self.pv_sampled[m] = {"margin": float(sch.get("confirmMargin", config.SAMPLED_CONFIRM_MARGIN)),
                                           "dedupeSec": float(sch.get("dedupeSec", config.SAMPLED_DEDUPE_SEC))}
         self.pv_imgsz = max(sizes) if sizes else None      # one shared pass: the larger input size of the two
+        # zones whose motion wakes each module (no zones = the whole picture)
+        self.motion_zones = {}
+        if self.plan is not None:
+            for m in ("human", "vehicle"):
+                self.motion_zones[m] = list(self.plan.get("zones", {}).get(m) or [])
+        if self.counter is not None:
+            self.motion_zones["count"] = list(getattr(self.counter, "zones", None) or [])
         self.cfg_dirty = False
 
     def _after_count(self, counted, annotated, captured):

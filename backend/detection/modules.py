@@ -170,7 +170,11 @@ DEFAULTS["count"]["schedule"] = {"intervalSec": config.COUNT_INTERVAL_SEC, "capt
 DEFAULTS["object"]["schedule"] = {"intervalSec": 0.0, "motionGate": config.OBJECT_MOTION_GATE,
                                   "motionMinAreaPct": config.MOTION_MIN_AREA_PCT, "motionHoldSec": config.MOTION_HOLD_SEC,
                                   "fallbackSec": config.MOTION_FALLBACK_SEC}
-SCHEDULE_LIMITS = {"intervalSec": (0, 600, False), "captureFps": (0, 60, False), "imgSize": (160, 1920, True),
+for _m in ("vehicle", "human", "count", "object"):
+    DEFAULTS[_m]["schedule"] = {"mode": config.SCHEDULE_MODE if config.SCHEDULE_MODE in ("adaptive", "interval", "every") else "adaptive",
+                                "idleCheckSec": config.IDLE_CHECK_SEC, "idleAfterSec": config.IDLE_AFTER_SEC,
+                                "motionMinAreaPct": config.MOTION_MIN_AREA_PCT, **DEFAULTS[_m]["schedule"]}
+SCHEDULE_LIMITS = {"idleCheckSec": (1, 600, False), "idleAfterSec": (1, 600, False), "intervalSec": (0, 600, False), "captureFps": (0, 60, False), "imgSize": (160, 1920, True),
                    "confirmMargin": (0, 0.5, False), "dedupeSec": (0, 3600, False), "motionMinAreaPct": (0.01, 50, False),
                    "motionHoldSec": (0, 600, False), "fallbackSec": (1, 3600, False)}
 
@@ -186,6 +190,9 @@ def _validate_schedule(module_id, cfg):
     for k, v in sch.items():
         if k not in allowed:
             errs.append(f"schedule.{k} is not a setting of {module_id}")
+        elif k == "mode":
+            if v not in ("adaptive", "interval", "every"):
+                errs.append("schedule.mode must be adaptive, interval or every")
         elif k == "motionGate":
             if not isinstance(v, bool):
                 errs.append("schedule.motionGate must be true or false")

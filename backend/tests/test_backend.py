@@ -1079,23 +1079,23 @@ class SamplingSchedulerTests(unittest.TestCase):
         return s, runs, reasons
 
     def test_vehicle_interval_two_seconds(self):
-        s, runs, _ = self._run({"cfg": {"intervalSec": 2.0}, "gate": False})
+        s, runs, _ = self._run({"cfg": {"mode": "interval", "intervalSec": 2.0}, "gate": False})
         self.assertEqual(runs, 30)                                   # 60 s / 2 s
         self.assertEqual(s.c["sampling"] + runs, 60 * 16)            # every frame accounted for
 
     def test_human_and_count_four_seconds(self):
-        _, runs, _ = self._run({"cfg": {"intervalSec": 4.0}, "gate": False})
+        _, runs, _ = self._run({"cfg": {"mode": "interval", "intervalSec": 4.0}, "gate": False})
         self.assertEqual(runs, 15)
 
     def test_motion_gate_only_fallback_without_motion(self):
-        s, runs, reasons = self._run({"cfg": {"intervalSec": 4.0, "motionGate": True, "fallbackSec": 30, "motionHoldSec": 10},
+        s, runs, reasons = self._run({"cfg": {"mode": "interval", "intervalSec": 4.0, "motionGate": True, "fallbackSec": 30, "motionHoldSec": 10},
                                       "gate": True}, motion=lambda t: False, secs=90)
         self.assertEqual(reasons, ["fallback"] * runs)
         self.assertEqual(runs, 3)                                    # t=0, 30, 60 s (fallback checks only)
         self.assertGreater(s.c["motion"], 0)                         # avoided AI calls are counted
 
     def test_motion_gate_runs_at_interval_with_motion(self):
-        _, runs, reasons = self._run({"cfg": {"intervalSec": 4.0, "motionGate": True, "fallbackSec": 30},
+        _, runs, reasons = self._run({"cfg": {"mode": "interval", "intervalSec": 4.0, "motionGate": True, "fallbackSec": 30},
                                       "gate": True}, motion=lambda t: True, secs=60)
         self.assertEqual(runs, 15)
         self.assertTrue(all(r == "motion" for r in reasons))
@@ -1103,7 +1103,7 @@ class SamplingSchedulerTests(unittest.TestCase):
     def test_vehicle_and_count_are_never_motion_gated(self):
         from backend.services.scheduler import ModuleSchedule
         s = ModuleSchedule("vehicle")
-        s.configure({"intervalSec": 2.0, "motionGate": True}, gate_allowed=False)
+        s.configure({"mode": "interval", "intervalSec": 2.0, "motionGate": True}, gate_allowed=False)
         self.assertFalse(s.motion_gate)
 
     def test_motion_gate_detects_change(self):
@@ -1183,6 +1183,73 @@ class SamplingSchedulerTests(unittest.TestCase):
         ok = module_config({}, "vehicle")
         self.assertEqual(validate("vehicle", ok, []), [])
         self.assertEqual(ok["schedule"]["intervalSec"], config.VEHICLE_INTERVAL_SEC)
+        self.assertEqual(ok["schedule"]["mode"], "adaptive")
         bad = module_config({"detection": {"modules": {"human": {"schedule": {"intervalSec": -1, "imgSize": 500, "x": 1}}}}}, "human")
         errs = validate("human", bad, [])
         self.assertTrue(any("intervalSec" in e for e in errs) and any("imgSize" in e for e in errs) and any("schedule.x" in e for e in errs))
+
+
+class AdaptiveScheduleTests(unittest.TestCase):
+    """Adaptive idle / active mode: every frame while something happens, idle checks only while nothing does."""
+
+    def _sched(self, **kw):
+        from backend.services.scheduler import ModuleSchedule
+        s = ModuleSchedule("vehicle")
+        s.configure(dict({"mode": "adaptive", "idleCheckSec": 10, "idleAfterSec": 10}, **kw), False)
+        s.state_since = s.keep_until = 0.0          # start of the simulated clock
+        s.keep_until = 10.0
+        return s
+
+    def _run(self, s, t0, t1, fps=16, motion=lambda t: False, detect=lambda t: False):
+        runs, t = [], t0
+        while t < t1:
+            if motion(t):
+                s.motion_seen(t)
+            run, why = s.decide(t)
+            if run:
+                s.selected(t, 0, t, why); s.done(True)
+                runs.append((t, why))
+                if detect(t):
+                    s.keepalive(t)
+            t += 1.0 / fps
+        return runs
+
+    def test_idle_scene_only_idle_checks(self):
+        s = self._sched()
+        runs = self._run(s, 0.0, 100.0)
+        active = [r for r in runs if r[1] == "active"]
+        checks = [r for r in runs if r[1] == "idle-check"]
+        self.assertTrue(all(t <= 10.0 for t, _ in active))         # active only the first 10 s after start
+        self.assertEqual(len(checks), 8)                            # then one AI check every 10 s (20, 30 ... 90 s)
+        self.assertEqual(s.state, "idle")
+        self.assertGreater(s.c["idle"], 1300)                       # frames not analysed, counted
+
+    def test_motion_wakes_every_frame_and_returns_to_idle(self):
+        s = self._sched()
+        self._run(s, 0.0, 30.0)                                     # idle by now
+        runs = self._run(s, 30.0, 60.0, motion=lambda t: 40.0 <= t < 45.0)
+        during = [r for r in runs if 40.0 <= r[0] < 55.0]
+        self.assertGreaterEqual(len(during), int(15 * 16 * 0.95))   # every frame from motion start to +10 s
+        self.assertEqual(s.c["wakeMotion"], 1)
+        self.assertEqual(s.state, "idle")                           # back to idle 10 s after the motion
+
+    def test_unconfirmed_detection_keeps_active(self):
+        s = self._sched()
+        self._run(s, 0.0, 30.0)
+        # an idle check finds something new (keepalive) -> active although nothing moves
+        runs = self._run(s, 30.0, 50.0, detect=lambda t: 30.0 <= t < 34.0)
+        self.assertTrue(any(why == "active" for _, why in runs))
+        self.assertGreaterEqual(s.c["wakeDetection"], 1)
+
+    def test_motion_only_inside_zone_counts(self):
+        import numpy as np
+        from backend.detection.motion import MotionGate
+        g = MotionGate()
+        a = np.zeros((360, 640, 3), np.uint8)
+        b = a.copy(); b[0:80, 500:640] = 255                       # change in the top-right corner only
+        g.update(a, 1.0); g.update(b, 1.3)
+        left = [{"id": "z", "type": "rectangle", "x": 0, "y": 0, "width": 0.5, "height": 1}]
+        right = [{"id": "r", "type": "rectangle", "x": 0.6, "y": 0, "width": 0.4, "height": 0.5}]
+        self.assertFalse(g.motion_in(left, 0.5))                    # trees / lights outside the zone ignored
+        self.assertTrue(g.motion_in(right, 0.5))
+        self.assertTrue(g.motion_in(None, 0.5))                     # no zones = whole picture

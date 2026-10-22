@@ -204,6 +204,15 @@ PREVIEW_IDLE_RELEASE_SEC = float(_env("AIV_PREVIEW_IDLE_RELEASE", "10"))
 #                after decoding, before any other work; the camera's own fps setting decides what is decoded).
 #   motion gate  Human Detection and Object Monitoring only: AI runs when the picture changes (plus a fallback
 #                check every AIV_MOTION_FALLBACK_SEC); never used for Vehicle, Human Count or Fire & Smoke.
+# Scheduling mode for Human / Vehicle / Human Count / Object Monitoring:
+#   adaptive (default) - IDLE while nothing happens (motion check inside the module's zones ~5x/s + one AI check
+#              every AIV_IDLE_CHECK_SEC); ACTIVE = every frame (original tracker confirmation, full accuracy) while
+#              there is motion in the zones, an unconfirmed object or (Human Count) people present; back to IDLE
+#              after AIV_IDLE_AFTER_SEC without any of these
+#   interval - fixed sampling (settings below); every - every frame (the original behaviour)
+SCHEDULE_MODE = str(_env("AIV_SCHEDULE_MODE", "adaptive")).strip().lower()
+IDLE_CHECK_SEC = float(_env("AIV_IDLE_CHECK_SEC", "10"))
+IDLE_AFTER_SEC = float(_env("AIV_IDLE_AFTER_SEC", "10"))
 VEHICLE_INTERVAL_SEC = float(_env("AIV_VEHICLE_INTERVAL", "2.0"))
 VEHICLE_CAPTURE_FPS = float(_env("AIV_VEHICLE_CAPTURE_FPS", "16"))
 HUMAN_INTERVAL_SEC = float(_env("AIV_HUMAN_INTERVAL", "4.0"))
