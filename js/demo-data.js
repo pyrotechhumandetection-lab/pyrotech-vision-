@@ -9,7 +9,7 @@
     { id: 'helmet', name: 'Helmet Detection', long: 'Construction Helmet Detection', icon: 'helmet', color: '#FFB547',
       desc: 'Detect construction helmets and flag workers without one.', classes: ['helmet', 'no_helmet'] },
     { id: 'ppe', name: 'PPE Detection', long: 'PPE Detection', icon: 'vest', color: '#FF8A3D',
-      desc: 'Check helmet, vest, gloves and boots compliance.', classes: ['helmet', 'vest', 'gloves', 'boots'] },
+      desc: 'Per person: construction helmet (and colour), safety vest (and colour), gloves.', classes: ['Helmet missing', 'Road helmet (not construction)', 'Vest missing', 'Vest wrong colour', 'Gloves missing'], live: true },
     { id: 'fire', name: 'Fire & Smoke', long: 'Fire & Smoke Detection', icon: 'flame', color: '#FF4D5B',
       desc: 'Detect visible flame and smoke in the scene.', classes: ['Fire', 'Smoke'], live: true },
     { id: 'human', name: 'Human Detection', long: 'Human Detection', icon: 'user', color: '#3478FF',
@@ -28,6 +28,9 @@
     helmet_ok:      { label: 'Helmet detected',  module: 'helmet', severity: 'low',      tone: 'success' },
     helmet_missing: { label: 'Helmet missing',   module: 'helmet', severity: 'high',     tone: 'danger' },
     ppe_incomplete: { label: 'PPE incomplete',   module: 'ppe',    severity: 'medium',   tone: 'warning' },
+    ppe_missing:    { label: 'PPE missing',      module: 'ppe',    severity: 'high',     tone: 'danger' },
+    ppe_vest_color: { label: 'Vest wrong colour', module: 'ppe',   severity: 'medium',   tone: 'warning' },
+    ppe_review:     { label: 'PPE needs review', module: 'ppe',    severity: 'low',      tone: 'info' },
     fire:           { label: 'Fire detected',    module: 'fire',   severity: 'critical', tone: 'critical' },
     smoke:          { label: 'Smoke detected',   module: 'fire',   severity: 'high',     tone: 'danger' },
     person:         { label: 'Person detected',  module: 'human',  severity: 'low',      tone: 'info' },
@@ -62,7 +65,8 @@
       sensitivity: 'medium',
       modules: {
         helmet: { enabled: false, confidence: 0.5, detectHelmet: true, detectMissing: true, alertOnMissing: true, zones: [] },
-        ppe: { enabled: false, confidence: 0.5, classes: { helmet: true, vest: true, gloves: false, boots: false }, rule: 'all', alertOnMissing: true, zones: [] },
+        // PPE mirrors the backend defaults (backend/detection/modules.py DEFAULTS["ppe"])
+        ppe: { enabled: false, confidence: 0.45, required: { helmet: true, vest: true, gloves: true }, vestColor: 'orange', zones: [] },
         // Fire & Smoke / Object Monitoring mirror the backend defaults (backend/detection/modules.py)
         fire: { enabled: false, classes: { fire: true, smoke: true }, classConf: { Fire: 0.30, Smoke: 0.65 }, confidence: 0.50, alert: { severity: 'critical' }, zones: [] },
         // human / vehicle mirror the backend defaults (original human_detect_yolo-2.py values)

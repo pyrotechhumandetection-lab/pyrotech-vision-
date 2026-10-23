@@ -40,6 +40,7 @@ TITLES = {
     "occupancy": "People count threshold reached", "head_count": "Head count",
     "fire": "Fire detected", "smoke": "Smoke detected",
     "object_moved": "Object moved", "object_missing": "Object missing", "object_restored": "Object back in place",
+    "ppe_missing": "PPE missing", "ppe_vest_color": "Safety vest wrong colour", "ppe_review": "PPE needs review",
 }
 
 

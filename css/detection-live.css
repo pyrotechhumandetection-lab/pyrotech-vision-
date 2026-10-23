@@ -11,7 +11,16 @@
 .dl-classes { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; align-items: center; }
 .dl-sub { padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--card-2); }
 .dl-ev-row { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)) !important; }
-@media (max-width: 1240px) { .dl-grid { grid-template-columns: minmax(0, 1fr); grid-template-areas: "live" "side" "events"; } }
+.dl-grid.is-ppe { grid-template-areas: "live side" "ppe side" "events side"; } .dl-ppe { grid-area: ppe; min-width: 0; }
+.dl-ppe .card-head select, .dl-events .card-head select { margin-left: 6px; }
+.ppe-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 8px; }
+.ppe-tile { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--card-2); }
+.ppe-tile b { font-size: 22px; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.ppe-tile span { font-size: 12px; color: var(--text-2); }
+.ppe-tile.ok b { color: var(--success); } .ppe-tile.bad b { color: var(--danger); } .ppe-tile.warn b { color: var(--warning); }
+.ppe-table td, .ppe-table th { font-size: 12.5px; vertical-align: top; }
+@media (max-width: 1240px) { .dl-grid, .dl-grid.is-ppe { grid-template-columns: minmax(0, 1fr); grid-template-areas: "live" "side" "events"; } .dl-grid.is-ppe { grid-template-areas: "live" "ppe" "side" "events"; } }
+@media (max-width: 600px) { .dl-ppe .card-head, .dl-events .card-head { flex-wrap: wrap; } }
 @media (max-width: 480px) { .dl-controls .btn span { display: none; } .dl-controls .btn { width: 38px; padding: 0; } .dl-kv { grid-template-columns: minmax(0, 1fr); } }
 
 /* Human Count page (same layout as the detection pages) */

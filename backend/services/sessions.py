@@ -60,6 +60,8 @@ class CameraSession:
         self.count_cfg = None
         self.fire = None             # Fire & Smoke engine (fire module)
         self.fire_cfg = None
+        self.ppe = None              # PPE Detection engine (ppe module)
+        self.ppe_cfg = None
         self.objmon = None           # Object Monitoring engine (object module)
         self.obj_cfg = None
         self.thread = None
@@ -111,7 +113,7 @@ class CameraSession:
                         "lastDisconnectReason": None, "framesSkippedCapture": 0, "captureFpsTarget": None,
                         "framesRecorded": None, "schedule": {}}
         self.current = {"human": {}, "vehicle": {}}             # label -> count visible in the latest frame
-        self.last_detection_at = {"human": None, "vehicle": None, "count": None, "fire": None, "object": None}
+        self.last_detection_at = {"human": None, "vehicle": None, "count": None, "fire": None, "object": None, "ppe": None}
         self._disconnect_alerted = False
 
     # ------------------------------------------------------------------ lifecycle
@@ -299,6 +301,23 @@ class CameraSession:
             raise SessionError("ENGINE_FAILURE", f"Could not load the fire & smoke model: {e}", 500)
         log.info("camera %s: Fire & Smoke engine ready (%s)", self.camera_id, fire_smoke.WEIGHTS.name)
 
+    def ensure_ppe(self):
+        """Load the PPE Detection engine (own models in backend/models/ppe, own worker thread)."""
+        if self.ppe is not None:
+            return
+        from backend.detection.ppe import engine as ppe_engine
+        if not ppe_engine.models_present():
+            raise SessionError("MODEL_NOT_FOUND", "PPE model file not found: backend/models/ppe/ppe_yolo11n.pt", 500)
+        try:
+            self.ppe = ppe_engine.PPEEngine(self._ppe_alert, thread_name=f"ppe:{self.camera_id}")
+        except Exception as e:
+            raise SessionError("ENGINE_FAILURE", f"Could not load the PPE model: {e}", 500)
+        cam = self.mgr.registry.get(self.camera_id) or {}
+        self.ppe_cfg = module_config(cam, "ppe")
+        self.ppe.configure(self.ppe_cfg, cam.get("zones"))
+        log.info("camera %s: PPE engine ready (%s, helmet classifier %s)", self.camera_id, ppe_engine.DETECTOR.name,
+                 "on" if ppe_engine.HELMET_CLS.is_file() else "missing")
+
     def ensure_object(self):
         """Load the Object Monitoring engine (Layer 1 matcher, Layer 2 YOLOE worker, optional Layer 3)."""
         if self.objmon is not None:
@@ -317,6 +336,9 @@ class CameraSession:
         if module_id == "fire" and self.fire is not None:
             self.fire.close()
             self.fire = None
+        if module_id == "ppe" and self.ppe is not None:
+            self.ppe.close()
+            self.ppe = None
         if module_id == "object" and self.objmon is not None:
             self.objmon._save_marks()
             self.objmon.close()
@@ -342,6 +364,29 @@ class CameraSession:
         self.mgr.events.on_module_alert(cam, "fire", label, name, snapshot, captured_at=captured_at, confidence=round(conf, 3),
                                         severity=sev, description=desc, alert=bool(acfg.get("enabled", True)),
                                         extra={"boxes": boxes, "reason": reason or None}, original=self.hd_original())
+
+    def _ppe_alert(self, kind, label, item, reason, view, snapshot, frame, captured_at):
+        """Confirmed missing PPE (or a wrong-colour vest / review warning) for one person -> event + snapshot of the
+        exact assessed frame (annotated) + its clean copy as the original + alert (existing alert system)."""
+        cam = self.mgr.registry.get(self.camera_id)
+        cfg = self.ppe_cfg or {}
+        if not cam or "ppe" not in self.modules or self.modules["ppe"]["paused"]:
+            return
+        self.last_detection_at["ppe"] = now_iso()
+        acfg = cfg.get("alert") or {}
+        alert_label = "Vest wrong colour" if kind == "ppe_vest_color" else ("PPE needs review" if kind == "ppe_review" else label)
+        sev = "low" if kind == "ppe_review" else ("medium" if kind == "ppe_vest_color" else acfg.get("severity", "high"))
+        want_alert = bool(acfg.get("enabled", True)) and (kind == "ppe_review" or alert_label in (acfg.get("labels") or []))
+        rec = view["items"].get(item.split(",")[0]) if item else None
+        conf = rec.get("confidence") if rec else None
+        desc = f"Person P{view['personId']}: {label} - {reason}. Status: {view['overall'].replace('_', ' ').lower()}."
+        assessment = {i: {k: v for k, v in r.items() if k != "box"} for i, r in view["items"].items()}
+        self.mgr.events.on_module_alert(cam, "ppe", kind, label, snapshot, captured_at=captured_at, confidence=conf,
+                                        severity=sev, description=desc, alert=want_alert,
+                                        extra={"personId": view["personId"], "trackId": view["personId"], "item": item,
+                                               "ppeStatus": view["overall"], "assessment": assessment,
+                                               "box": view.get("box")},
+                                        original=frame.copy())
 
     def _object_alert(self, view, kind, distance, image):
         cam = self.mgr.registry.get(self.camera_id)
@@ -380,7 +425,7 @@ class CameraSession:
             self.thread.join(timeout=5)
         if self.enc_thread:
             self.enc_thread.join(timeout=2)
-        for m in ("fire", "object"):
+        for m in ("fire", "object", "ppe"):
             self.close_engine(m)
         if self.reader:
             self.reader.release()
@@ -438,10 +483,11 @@ class CameraSession:
             active = {m: v for m, v in self.modules.items() if not v["paused"]}
             pv_on = any(m in ("human", "vehicle") for m in active) and self.pipeline is not None   # Person/Vehicle pipeline
             count_on = "count" in active and self.counter is not None                 # Human Count engine
-            fire_eng, obj_eng = self.fire, self.objmon     # local refs: a Stop may free an engine meanwhile
+            fire_eng, obj_eng, ppe_eng = self.fire, self.objmon, self.ppe   # local refs: a Stop may free an engine meanwhile
+            ppe_on = "ppe" in active and ppe_eng is not None                          # PPE Detection engine
             fire_on = "fire" in active and fire_eng is not None                       # Fire & Smoke engine
             obj_on = "object" in active and obj_eng is not None                       # Object Monitoring engine
-            any_on = pv_on or count_on or fire_on or obj_on
+            any_on = pv_on or count_on or fire_on or obj_on or ppe_on
             if not queue_mode and (pv_on or count_on or obj_on) and seq - last_seq > 1 and last_seq >= 0:
                 self.metrics["framesDropped"] += seq - last_seq - 1     # decoded, but the AI was still busy
             last_seq, last_seen = seq, now
@@ -597,6 +643,13 @@ class CameraSession:
                     annotated = fire_eng.draw(annotated)
                     win["st_fire"] += (time.perf_counter() - t_f) * 1000.0
                     ran = True
+                if ppe_on:       # newest frame to the PPE worker at its interval (full resolution when available)
+                    t_p = time.perf_counter()
+                    hd = self.hd_frame()
+                    if ppe_eng.submit(hd if hd is not None else self.latest_raw, captured or now):
+                        ran = True
+                    annotated = ppe_eng.draw(annotated)
+                    win["st_ppe"] += (time.perf_counter() - t_p) * 1000.0
                 win["gate"] += runtime.take_wait_ms()
                 if ran:
                     win["proc"] += 1
@@ -653,7 +706,7 @@ class CameraSession:
         return {"t0": t0 or time.time(), "proc": 0, "inf": 0.0, "inf_last": None, "loop": 0.0, "age": 0.0, "n": 0,
                 "lat": 0.0, "lat_max": 0.0, "gate": 0.0, "shared": 0, "st_detect_n": 0, "st_preprocess": 0.0,
                 "st_inference": 0.0, "st_postprocess": 0.0, "st_tracking": 0.0, "st_farZoom": 0.0, "st_draw": 0.0, "st_count": 0.0,
-                "st_object": 0.0, "st_fire": 0.0, "st_events": 0.0, "st_encode": 0.0}
+                "st_object": 0.0, "st_fire": 0.0, "st_ppe": 0.0, "st_events": 0.0, "st_encode": 0.0}
 
     def _update_rates(self, el, read0, w):
         m = self.metrics
@@ -685,7 +738,7 @@ class CameraSession:
                 for k in ("preprocess", "inference", "postprocess", "tracking", "farZoom"):
                     stg[k] = round(w["st_" + k] / dn, 1)
                 stg["drawAndRules"] = round(w["st_draw"] / dn, 1)
-            for k, key in (("count", "humanCount"), ("object", "objectLayer1"), ("fire", "fireHandOver"),
+            for k, key in (("count", "humanCount"), ("object", "objectLayer1"), ("fire", "fireHandOver"), ("ppe", "ppeHandOver"),
                            ("events", "events")):
                 if w["st_" + k]:
                     stg[key] = round(w["st_" + k] / n, 1)
@@ -734,6 +787,9 @@ class CameraSession:
         if self.objmon is not None:
             self.obj_cfg = module_config(cam, "object")
             self.objmon.configure(self.obj_cfg)
+        if self.ppe is not None:
+            self.ppe_cfg = module_config(cam, "ppe")
+            self.ppe.configure(self.ppe_cfg, cam.get("zones"))
         # ---- AI frame scheduling per module (interval, motion gate, capture cap, model input size)
         caps, gate_area = [], []
         for m in ("human", "vehicle", "count", "object"):
@@ -750,7 +806,7 @@ class CameraSession:
                 gate_area.append(float(sch.get("motionMinAreaPct", config.MOTION_MIN_AREA_PCT)))
             self.motion_area[m] = float(sch.get("motionMinAreaPct", config.MOTION_MIN_AREA_PCT))
             caps.append(float(sch.get("captureFps") or 0) if sc.mode != "every" else 0.0)
-        if "fire" in active:
+        if "fire" in active or "ppe" in active:
             caps.append(0.0)                  # Fire & Smoke keeps every frame (its own everyNFrames setting)
         # the session runs at the HIGHEST rate any running module needs; one module without a cap = no cap
         self.capture_cap = 0.0 if (not caps or 0.0 in caps) else max(caps)
@@ -903,6 +959,18 @@ class CameraSession:
                 "viewers": self.viewers, "sharedWith": [x for x in self.modules if x != module_id],
                 "modelFile": "firedetect-11s.pt", "fire": fs if m else None,
             }
+        if module_id == "ppe":
+            pv = self.ppe.view() if self.ppe else None
+            live = bool(m and not m["paused"] and pv)
+            return {
+                "state": st, "cameraState": self.state, "error": self.error,
+                "currentCounts": self.ppe.current_counts() if live else {},
+                "uniqueCounts": {}, "lastDetectionAt": self.last_detection_at.get("ppe"),
+                "startedAt": m["startedAt"] if m else None,
+                "metrics": dict(self.metrics, inferenceMs=(pv or {}).get("inferenceMs")) if pv else dict(self.metrics),
+                "viewers": self.viewers, "sharedWith": [x for x in self.modules if x != module_id],
+                "modelFile": "ppe_yolo11n.pt", "ppe": pv if m else None,
+            }
         if module_id == "object":
             ov = self.objmon.view() if self.objmon else None
             return {
@@ -974,6 +1042,8 @@ class SessionManager:
                     s.ensure_fire()
                 elif module_id == "object":
                     s.ensure_object()
+                elif module_id == "ppe":
+                    s.ensure_ppe()
                 else:
                     s.ensure_pipeline()
             except SessionError:
@@ -988,6 +1058,9 @@ class SessionManager:
                 if module_id == "fire":
                     s.fire.reset()             # alert window / smoke tracks start from zero
                     s.last_detection_at["fire"] = None
+                if module_id == "ppe":
+                    s.ppe.reset()              # people / summary start from zero
+                    s.last_detection_at["ppe"] = None
                 s.modules[module_id] = {"paused": False, "startedAt": now_iso()}
             s.modules[module_id]["paused"] = False
             s.error = None
@@ -1003,7 +1076,7 @@ class SessionManager:
             if module_id == "count":
                 s.flush_counts()
             s.modules.pop(module_id, None)
-            if module_id in ("fire", "object"):
+            if module_id in ("fire", "object", "ppe"):
                 s.close_engine(module_id)      # frees the model and its worker thread
             s.cfg_dirty = True
             if not s.in_use():

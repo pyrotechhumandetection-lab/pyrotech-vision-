@@ -39,6 +39,16 @@ MODULES = {
         "classKeys": {"fire": "Fire", "smoke": "Smoke"},
         "eventType": {"Fire": "fire", "Smoke": "smoke"},
     },
+    # PPE Detection: construction PPE per person (backend/detection/ppe/), same camera session, own worker
+    "ppe": {
+        "id": "ppe", "name": "PPE Detection",
+        "labels": ["Helmet missing", "Vest missing", "Gloves missing", "Road helmet (not construction)",
+                   "Vest wrong colour", "PPE needs review"],
+        "classKeys": {},
+        "eventType": {"Helmet missing": "ppe_missing", "Vest missing": "ppe_missing", "Gloves missing": "ppe_missing",
+                      "Road helmet (not construction)": "ppe_missing", "Vest wrong colour": "ppe_vest_color",
+                      "PPE needs review": "ppe_review"},
+    },
     # Object Monitoring: marked-object monitor (backend/detection/object_monitor/), same camera session
     "object": {
         "id": "object", "name": "Object Monitoring",
@@ -108,6 +118,29 @@ DEFAULTS["fire"] = {
     "snapshot": {"mode": "alert", "labels": ["Fire", "Smoke"], "cooldownSec": 0},
     "alert": {"enabled": True, "labels": ["Fire", "Smoke"], "severity": "critical", "smokeSeverity": "high", "cooldownSec": 10},
 }
+
+# PPE Detection defaults (gates and colour thresholds: backend/detection/ppe/rules.py, from the PPE project)
+DEFAULTS["ppe"] = {
+    "enabled": False,
+    "confidence": 0.45,                          # minimum PERSON confidence (the project's person filter); PPE items
+    #                                              use their own per-class thresholds in detection/ppe/rules.py
+    "imgSize": 640,
+    "intervalSec": 1.0,                          # one PPE assessment per second per camera (not every frame)
+    "required": {"helmet": True, "vest": True, "gloves": True},
+    "vestColor": "orange",                       # site policy; "" = any vest colour
+    "helmetClassifier": True,                    # construction / road / other helmet-crop classifier
+    "missAfter": 3,                              # consecutive assessments before an item is MISSING
+    "absenceMeansMissing": True,                 # helmet / vest: nothing found on a large visible person counts
+    "minPersonFrac": 0.15,                       # person box height (fraction of the frame) to judge head / torso
+    "reviewWarnings": False,                     # optional low-severity warning for NEEDS_REVIEW people
+    "repeatSec": 600,                            # same person still missing the same item: alert again after this
+    "zones": [],
+    "snapshot": {"mode": "new_track", "labels": [], "cooldownSec": 0},
+    "alert": {"enabled": True, "labels": ["Helmet missing", "Vest missing", "Gloves missing",
+                                          "Road helmet (not construction)", "Vest wrong colour"],
+              "severity": "high", "cooldownSec": 0},
+}
+PPE_VEST_COLORS = ("", "orange", "yellow", "green", "red", "blue")
 
 # Object Monitoring defaults = the standalone marked-object monitor's config.yaml (monitor, detector,
 # verifier sections; same key names for the monitor so its code is unchanged).
@@ -216,7 +249,7 @@ SNAPSHOT_MODES = ("new_track", "off")
 def module_config(camera, module_id):
     """Effective config = defaults deep-merged with what is stored on the camera."""
     stored = (((camera or {}).get("detection") or {}).get("modules") or {}).get(module_id) or {}
-    if module_id in ("fire", "object"):
+    if module_id in ("fire", "object", "ppe"):
         stored = _legacy(module_id, stored)
     cfg = deep_merge(copy.deepcopy(DEFAULTS[module_id]), stored)
     if module_id == "object":
@@ -246,6 +279,8 @@ def _legacy(module_id, stored):
             out.pop("confidence", None)          # the form's placeholder 0.45 is not the detector's threshold
     if module_id == "object":
         out.pop("confidence", None)
+    if module_id == "ppe" and any(k in stored for k in ("rule", "alertOnMissing", "classes")):
+        out.pop("confidence", None)              # the old placeholder form's 0.5 is not the detector's threshold
     return out
 
 
@@ -347,8 +382,39 @@ def _validate_object(cfg):
     return errs
 
 
+def _validate_ppe(cfg, camera_zones):
+    errs = []
+    _num(errs, "confidence", cfg.get("confidence"), 0.05, 0.99)
+    _num(errs, "imgSize", cfg.get("imgSize"), 320, 1280, True)
+    if not errs and int(cfg["imgSize"]) % 32:
+        errs.append("imgSize must be a multiple of 32 (e.g. 480, 640, 960)")
+    _num(errs, "intervalSec", cfg.get("intervalSec"), 0.2, 60)
+    _num(errs, "missAfter", cfg.get("missAfter"), 1, 30, True)
+    _num(errs, "minPersonFrac", cfg.get("minPersonFrac"), 0.02, 0.9)
+    _num(errs, "repeatSec", cfg.get("repeatSec"), 0, 86400)
+    req = cfg.get("required") or {}
+    if [k for k in req if k not in ("helmet", "vest", "gloves")]:
+        errs.append("required items are helmet, vest and gloves")
+    if cfg.get("enabled") and not any(req.get(k, True) for k in ("helmet", "vest", "gloves")):
+        errs.append("require at least one PPE item")
+    if (cfg.get("vestColor") or "") not in PPE_VEST_COLORS:
+        errs.append("vestColor must be one of: " + ", ".join(c or '"" (any)' for c in PPE_VEST_COLORS))
+    alert = cfg.get("alert") or {}
+    if alert.get("severity") not in SEVERITIES:
+        errs.append("alert.severity must be one of " + ", ".join(SEVERITIES))
+    if any(lbl not in MODULES["ppe"]["labels"] for lbl in alert.get("labels") or []):
+        errs.append("alert.labels contains unknown PPE alerts")
+    zone_ids = {z.get("id") for z in camera_zones or []}
+    bad = [z for z in cfg.get("zones") or [] if z not in zone_ids]
+    if bad:
+        errs.append("zones not defined on this camera: " + ", ".join(map(str, bad)))
+    return errs
+
+
 def validate(module_id, cfg, camera_zones):
     """Return a list of human-readable errors (empty = valid)."""
+    if module_id == "ppe":
+        return _validate_ppe(cfg, camera_zones)
     if module_id == "fire":
         return _validate_fire(cfg, camera_zones)
     if module_id == "object":

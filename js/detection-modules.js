@@ -94,17 +94,12 @@
       body += check('alertOnMissing', 'Raise an alert when a missing helmet is confirmed', cfg.alertOnMissing);
       body += classUnknownNote('helmet');
     } else if (modId === 'ppe') {
-      body += '<div class="field"><span class="field-label">Required PPE items</span><div class="row wrap" style="gap:16px">' +
-        ['helmet', 'vest', 'gloves', 'boots'].map(function (c) {
-          const sup = classSupported('ppe', c);
-          const label = { helmet: 'Helmet', vest: 'Safety vest', gloves: 'Gloves', boots: 'Safety boots' }[c];
-          return check('cls-' + c, label, cfg.classes && cfg.classes[c] && sup !== false, sup === false ? 'The loaded PPE model has no ' + c + ' class' : '');
-        }).join('') + '</div></div>';
-      body += '<div class="field"><label for="' + p + '-rule">Compliance rule</label><select class="select" id="' + p + '-rule" name="rule">' +
-        '<option value="all"' + (cfg.rule === 'all' ? ' selected' : '') + '>Every required item must be present</option>' +
-        '<option value="any"' + (cfg.rule === 'any' ? ' selected' : '') + '>Flag only when all required items are missing</option></select></div>';
-      body += check('alertOnMissing', 'Raise an alert when required PPE is missing', cfg.alertOnMissing);
-      body += classUnknownNote('ppe');
+      const rq = cfg.required || {};
+      body += '<div class="field"><span class="field-label">Required PPE (person-first: each detected person is checked)</span><div class="row wrap" style="gap:16px">' +
+        [['helmet', 'Construction helmet'], ['vest', 'Safety vest'], ['gloves', 'Gloves (only when hands are visible)']].map(function (c) { return check('req-' + c[0], c[1], rq[c[0]] !== false); }).join('') + '</div></div>';
+      body += '<div class="field"><label for="' + p + '-vest">Required vest colour</label><select class="select" id="' + p + '-vest" name="vestColor">' +
+        [['orange', 'Orange'], ['yellow', 'Yellow'], ['green', 'Green'], ['', 'Any colour']].map(function (o) { return '<option value="' + o[0] + '"' + ((cfg.vestColor == null ? 'orange' : cfg.vestColor) === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select></div>';
+      body += '<p class="field-hint">The slider above is the minimum person confidence. Helmet type / colour checks, the assessment interval, alerts and the per-person compliance view are on the <a href="#/detections/ppe">PPE Detection</a> page.</p>';
     } else if (modId === 'fire') {
       const fc = cfg.classes || { fire: cfg.fire !== false, smoke: cfg.smoke !== false };
       const fsev = (cfg.alert && cfg.alert.severity) || cfg.severity || 'critical';
@@ -181,7 +176,15 @@
       cfg.zones = [];
       return cfg;
     }
-    if (modId === 'ppe' || modId === 'vehicle' || modId === 'human') {
+    if (modId === 'ppe') {
+      cfg.required = { helmet: !!(q('req-helmet') && q('req-helmet').checked), vest: !!(q('req-vest') && q('req-vest').checked), gloves: !!(q('req-gloves') && q('req-gloves').checked) };
+      if (q('vestColor')) cfg.vestColor = q('vestColor').value;
+      ['classes', 'rule', 'alertOnMissing', 'severity'].forEach(function (k) { delete cfg[k]; });
+      if (typeof cfg.alert !== 'object') delete cfg.alert;
+      cfg.zones = Array.prototype.map.call(root.querySelectorAll('[name="zone"]:checked'), function (c) { return c.value; });
+      return cfg;
+    }
+    if (modId === 'vehicle' || modId === 'human') {
       cfg.classes = cfg.classes || {};
       root.querySelectorAll('[name^="cls-"]').forEach(function (c) { cfg.classes[c.name.slice(4)] = c.checked && !c.disabled; });
     }
@@ -197,7 +200,7 @@
     if (!(cfg.confidence >= 0.1 && cfg.confidence <= 0.99)) e.confidence = 'Confidence must be between 0.10 and 0.99.';
     if (!cfg.enabled) return e;
     if (modId === 'helmet' && !cfg.detectHelmet && !cfg.detectMissing) e.general = 'Select at least one helmet class to detect.';
-    if (modId === 'ppe' && !Object.keys(cfg.classes || {}).some(function (k) { return cfg.classes[k]; })) e.general = 'Select at least one required PPE item.';
+    if (modId === 'ppe' && !['helmet', 'vest', 'gloves'].some(function (k) { return (cfg.required || {})[k] !== false; })) e.general = 'Select at least one required PPE item.';
     if (modId === 'fire' && !(cfg.classes ? (cfg.classes.fire || cfg.classes.smoke) : (cfg.fire || cfg.smoke))) e.general = 'Enable fire detection, smoke detection or both.';
     if (modId === 'vehicle' && !Object.keys(cfg.classes || {}).some(function (k) { return k !== 'vehicleFar' && cfg.classes[k]; })) e.general = 'Select at least one vehicle class.';
     if (modId === 'human' && !(cfg.classes && (cfg.classes.person || cfg.classes.rider))) e.general = 'Select Person and/or Rider.';

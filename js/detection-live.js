@@ -22,8 +22,15 @@
     // Fire & Smoke: its own model + smoke rules on the same camera session (backend/detection/fire_smoke.py)
     fire: { id: 'fire', title: 'Fire & Smoke Detection', icon: 'flame', noun: 'fire / smoke',
       sub: 'Fire & smoke model firedetect-11s · smoke verifier (smoke / cloud / dust) · smoke rules · alert after M of the last K analysed frames',
-      classes: [['fire', 'Fire', ''], ['smoke', 'Smoke', '']] }
+      classes: [['fire', 'Fire', ''], ['smoke', 'Smoke', '']] },
+    // PPE: its own detector + helmet-type classifier, person-first, on the same camera session (backend/detection/ppe)
+    ppe: { id: 'ppe', title: 'PPE Detection', icon: 'vest', noun: 'PPE',
+      sub: 'Person-first PPE check · detector ppe_yolo11n (helmet, vest, gloves, person) · helmet-type classifier (construction / road) · helmet & vest colour',
+      classes: [] }
   };
+  const PPE_ST = { PRESENT: ['badge-success', 'Present'], MISSING: ['badge-danger', 'Missing'], UNCERTAIN: ['badge-warning', 'Uncertain'], NOT_ASSESSABLE: ['badge-muted', 'Not assessable'] };
+  const PPE_OVERALL = { COMPLIANT: ['badge-success', 'Compliant'], NON_COMPLIANT: ['badge-danger', 'Non-compliant'], NEEDS_REVIEW: ['badge-warning', 'Needs review'], NOT_FULLY_ASSESSED: ['badge-muted', 'Not fully assessed'] };
+  let ppeFilter = { overall: '', missing: '' }, evFilter = { item: '', kind: '', hours: '' }, evAll = [];
   function modTitle(x) { return MOD[x] ? MOD[x].title : ((cat.moduleById(x) || {}).long || x); }
   const STATE_UI = {
     backend_unavailable: ['badge-muted', 'Backend unavailable'], no_camera: ['badge-muted', 'No camera selected'],
@@ -50,11 +57,15 @@
       '<div class="dl-grid">' +
       '<section class="card dl-live" aria-labelledby="dl-live-h"></section>' +
       '<div class="dl-side"><section class="card" id="dl-status" aria-labelledby="dl-status-h"></section><section class="card" id="dl-settings" aria-labelledby="dl-set-h"></section></div>' +
+      (mod.id === 'ppe' ? '<section class="card dl-ppe" id="dl-ppe" aria-labelledby="dl-ppe-h"></section>' : '') +
       '<section class="card dl-events" id="dl-events" aria-labelledby="dl-ev-h"></section></div>';
+    if (mod.id === 'ppe') container.querySelector('.dl-grid').classList.add('is-ppe');
+    evAll = [];
     renderLive();
     renderStatus();
     renderSettings();
     renderEvents([]);
+    if (mod.id === 'ppe') renderPPE();
     unsub.push(state.on('backend', onBackend), state.on('cameras', function () { renderCameraSelect(); }));
     onBackend();
   }
@@ -108,7 +119,7 @@
     return status.state || 'stopped';
   }
 
-  function paint() { if (!root || busy) return; renderStatus(); paintLive(); }
+  function paint() { if (!root || busy) return; renderStatus(); paintLive(); if (mod.id === 'ppe') renderPPE(); }
 
   function fmt(v, unit) { return v === null || v === undefined ? '<span class="dim">Unavailable</span>' : esc(v) + (unit || ''); }
   function counts(obj) {
@@ -181,13 +192,15 @@
       '<dt>Detection engine</dt><dd>' + esc(su[1]) + (s.modelAvailable === false ? ' <span class="badge badge-danger">Model file missing</span>' : (s.modelFile ? ' <span class="dim">' + esc(s.modelFile) + '</span>' : '')) +
       (s.sharedWith && s.sharedWith.length ? '<div class="dim" style="font-size:12px">' + (mod.id === 'fire' ? 'Sharing the camera connection with: ' : 'Sharing the camera\'s inference pass with: ') + esc(s.sharedWith.map(modTitle).join(', ')) + '</div>' : '') + '</dd>' +
       '<dt>In view now</dt><dd>' + (k === 'processing' ? counts(s.currentCounts) : '<span class="dim">—</span>') + '</dd>' +
-      (mod.id === 'fire' ? fireRows(s) :
+      (mod.id === 'fire' ? fireRows(s) : mod.id === 'ppe' ? ppeRows(s) :
       '<dt>Confirmed tracks</dt><dd>' + (s.uniqueCounts && Object.keys(s.uniqueCounts).length ? counts(s.uniqueCounts) + '<div class="dim" style="font-size:11.5px">Since start. ByteTrack can re-assign an ID after occlusion.</div>' : '<span class="dim">—</span>') + '</dd>') +
       '<dt>Camera FPS (received)</dt><dd>' + fmt(m.cameraFps, ' fps') + (m.streamFps ? ' <span class="dim">· stream reports ' + esc(m.streamFps) + ' fps</span>' : '') + (m.resolution ? ' <span class="dim">· ' + esc(m.resolution) + '</span>' : '') + '</dd>' +
       '<dt>AI stream</dt><dd>' + aiStreamLine(m) + '</dd>' +
       (mod.id === 'fire'
         ? '<dt>Fire model FPS</dt><dd>' + fmt(m.fireAnalysedFps, ' fps analysed') + (s.fire && s.fire.engine ? ' <span class="dim">· ' + esc(s.fire.engine) + ', ' + esc(s.fire.inferenceMs) + ' ms</span>' : '') +
           (m.fireSkipped ? ' <span class="dim">· ' + esc(m.fireSkipped) + ' frames skipped while the model was busy</span>' : '') + '</dd>'
+        : mod.id === 'ppe'
+        ? '<dt>PPE assessments</dt><dd>' + (s.ppe ? esc(s.ppe.runs) + ' done · one every ' + esc(s.ppe.intervalSec) + ' s' + (s.ppe.inferenceMs != null ? ' <span class="dim">· ' + esc(s.ppe.inferenceMs) + ' ms each</span>' : '') + (s.ppe.skipped ? ' <span class="dim">· ' + esc(s.ppe.skipped) + ' skipped while busy</span>' : '') : '<span class="dim">—</span>') + '</dd>'
         : '<dt>AI processing FPS</dt><dd>' + fmt(m.processingFps, ' fps') + '</dd>') +
       schedRow(m, mod.id) +
       '<dt>Live view FPS</dt><dd>' + fmt(m.displayFps, ' fps sent') + (m.displayEncodeMs != null ? ' <span class="dim">· ' + esc(m.displayEncodeMs) + ' ms JPEG encode (own thread)</span>' : '') + '</dd>' +
@@ -214,6 +227,59 @@
       (f.errors ? '<dt>Detection errors</dt><dd><span class="badge badge-danger">' + esc(f.errors) + '</span></dd>' : '');
   }
 
+  /** PPE status rows - all reported by the backend PPE engine. */
+  function ppeRows(s) {
+    const p = s.ppe;
+    if (!p) return '<dt>PPE check</dt><dd><span class="dim">—</span></dd>';
+    const req = Object.keys(p.required || {}).filter(function (k) { return p.required[k]; });
+    return '<dt>Required PPE</dt><dd>' + (req.length ? req.map(function (k) { return '<span class="badge badge-muted">' + esc(k) + '</span>'; }).join(' ') : '<span class="dim">none</span>') +
+        (p.vestColor ? ' <span class="dim">· vest colour ' + esc(p.vestColor) + '</span>' : '') + '</dd>' +
+      '<dt>Helmet type check</dt><dd>' + (p.helmetClassifier === 'on' ? '<span class="badge badge-success">On</span> <span class="dim">construction / road classifier; unsure = review</span>' : '<span class="badge badge-muted">Off</span>') + '</dd>' +
+      (p.errors ? '<dt>Detection errors</dt><dd><span class="badge badge-danger">' + esc(p.errors) + '</span> <span class="dim">' + esc(p.lastError || '') + '</span></dd>' : '');
+  }
+
+  function ppeBadge(map, k) { const b = map[k] || ['badge-muted', k || '—']; return '<span class="badge ' + b[0] + '">' + esc(b[1]) + '</span>'; }
+  function selHtml(id, cur, opts, label) {
+    return '<label class="sr-only" for="' + id + '">' + esc(label) + '</label><select class="select select-sm" id="' + id + '" style="width:auto">' +
+      opts.map(function (o) { return '<option value="' + o[0] + '"' + (cur === o[0] ? ' selected' : '') + '>' + esc(o[1]) + '</option>'; }).join('') + '</select>';
+  }
+
+  /** Per-person compliance panel + summary counts (only real results from the backend). */
+  function renderPPE() {
+    const el = root && root.querySelector('#dl-ppe');
+    if (!el) return;
+    const p = status && status.ppe, live = stateKey() === 'processing' || stateKey() === 'paused';
+    const sm = (p && p.summary) || null;
+    const tile = function (label, v, tone) { return '<div class="ppe-tile' + (tone ? ' ' + tone : '') + '"><b>' + (v == null ? '—' : esc(v)) + '</b><span>' + esc(label) + '</span></div>'; };
+    const all = p && live ? p.people || [] : [];
+    const people = all.filter(function (v) {
+      if (ppeFilter.overall && v.overall !== ppeFilter.overall) return false;
+      if (ppeFilter.missing && (v.items[ppeFilter.missing] || {}).status !== 'MISSING') return false;
+      return true;
+    });
+    const cell = function (it, extra) {
+      if (!it) return '<td><span class="dim">—</span></td>';
+      return '<td title="' + esc(it.reason || '') + '">' + ppeBadge(PPE_ST, it.status) + (extra || '') + (it.confidence != null ? '<div class="dim" style="font-size:11px">conf ' + Number(it.confidence).toFixed(2) + '</div>' : '') + '</td>';
+    };
+    el.innerHTML = '<div class="card-head"><h2 id="dl-ppe-h">' + icon('vest', 18) + 'PPE compliance</h2><span class="spacer"></span>' +
+      selHtml('ppe-f-overall', ppeFilter.overall, [['', 'All statuses'], ['COMPLIANT', 'Compliant'], ['NON_COMPLIANT', 'Non-compliant'], ['NEEDS_REVIEW', 'Needs review'], ['NOT_FULLY_ASSESSED', 'Not fully assessed']], 'Compliance status') +
+      selHtml('ppe-f-missing', ppeFilter.missing, [['', 'Any item'], ['helmet', 'Helmet missing'], ['vest', 'Vest missing'], ['gloves', 'Gloves missing']], 'Missing item') + '</div>' +
+      '<div class="ppe-tiles">' + tile('People assessed', sm && sm.peopleAssessed) + tile('Compliant', sm && sm.compliant, 'ok') + tile('Non-compliant', sm && sm.nonCompliant, 'bad') + tile('Needs review', sm && sm.needsReview, 'warn') +
+      tile('Helmet missing', sm && sm.missingHelmet, 'bad') + tile('Road helmet', sm && sm.roadHelmet, 'bad') + tile('Vest missing', sm && sm.missingVest, 'bad') + tile('Vest wrong colour', sm && sm.vestWrongColor, 'warn') + tile('Gloves missing', sm && sm.missingGloves, 'bad') + '</div>' +
+      (sm ? '<p class="dim" style="font-size:11.5px;margin:6px 0 12px">Counts since start: ' + esc(p.summaryNote || '') + '.</p>' : '<p class="dim" style="font-size:12px;margin:6px 0 12px">Counts appear once PPE detection runs on this camera.</p>') +
+      (people.length ? '<div class="table-wrap"><table class="table ppe-table"><thead><tr><th>Person</th><th>Helmet</th><th>Vest</th><th>Gloves</th><th>Overall</th><th>Assessed</th></tr></thead><tbody>' + people.map(function (v) {
+        const h = v.items.helmet || {}, ve = v.items.vest || {}, g = v.items.gloves || {};
+        const hx = (h.color && h.color !== 'unknown' ? ' <span class="dim">' + esc(h.color) + '</span>' : (h.status === 'PRESENT' || h.status === 'UNCERTAIN' ? ' <span class="dim">colour unknown</span>' : '')) + (h.type === 'road' ? ' <span class="badge badge-danger">road helmet</span>' : '');
+        const vx = ve.status === 'PRESENT' ? ' <span class="dim">' + esc(ve.color || 'unknown') + '</span>' + (ve.colorCompliance === 'non-compliant' ? ' <span class="badge badge-warning">not ' + esc(ve.expectedColor) + '</span>' : ve.colorCompliance === 'uncertain' ? ' <span class="badge badge-muted">colour?</span>' : '') : '';
+        return '<tr><td><b>P' + esc(v.personId) + '</b>' + (v.personConf != null ? '<div class="dim" style="font-size:11px">' + Number(v.personConf).toFixed(2) + '</div>' : '') + '</td>' + cell(h, hx) + cell(ve, vx) + cell(g, g.count ? ' <span class="dim">' + esc(g.count) + ' seen</span>' : '') +
+          '<td>' + ppeBadge(PPE_OVERALL, v.overall) + '</td><td class="dim" style="font-size:12px">' + (v.assessedAt ? esc(ui.fmtTime(new Date(v.assessedAt * 1000).toISOString())) : '—') + '</td></tr>';
+      }).join('') + '</tbody></table></div><p class="dim" style="font-size:11.5px;margin-top:6px">Hover a status for the reason. Gloves are judged per person (the model cannot check each hand); hands not visible = not assessable.</p>'
+        : ui.emptyState('user', live ? (all.length ? 'No person matches the filters' : 'No person in view') : 'PPE detection not running', live ? 'People appear here after each assessment (one every ' + esc((p && p.intervalSec) || 1) + ' s).' : 'Start PPE detection for this camera.'));
+    window.AV.icons.hydrate(el);
+    el.querySelector('#ppe-f-overall').addEventListener('change', function (e) { ppeFilter.overall = e.target.value; renderPPE(); });
+    el.querySelector('#ppe-f-missing').addEventListener('change', function (e) { ppeFilter.missing = e.target.value; renderPPE(); });
+  }
+
   // ======================= B + C. camera select + live =======================
   function renderLive() {
     const el = root.querySelector('.dl-live');
@@ -228,7 +294,7 @@
       '<button class="btn btn-sm btn-ghost" id="dl-full">' + icon('maximize', 15) + '<span>Full Screen</span></button></div>' +
       '<div class="dl-stage" id="dl-stage"><div class="media-ph" id="dl-ph"></div><img class="dl-img" id="dl-img" alt="Annotated ' + mod.noun + ' detection stream" hidden>' +
       '<span class="badge badge-live dl-flag" id="dl-flag" hidden><span class="dot pulse"></span>LIVE · annotated</span></div>' +
-      '<p class="dim mt-8" style="font-size:12px">' + icon('info', 13) + (mod.id === 'fire' ? ' Red = fire, blue = smoke, thin grey = weak smoke (needs more evidence; "cloud?/dust?" = verifier verdict). A red frame and banner show while an alert is active. ' : ' Boxes, labels and confidences are drawn by the backend pipeline (MJPEG). ') + 'Detection keeps running when you leave this page; use Stop to end it.</p>';
+      '<p class="dim mt-8" style="font-size:12px">' + icon('info', 13) + (mod.id === 'fire' ? ' Red = fire, blue = smoke, thin grey = weak smoke (needs more evidence; "cloud?/dust?" = verifier verdict). A red frame and banner show while an alert is active. ' : mod.id === 'ppe' ? ' Person box: green = compliant, red = non-compliant, amber = needs review, grey = not fully assessed. H / V / G = helmet, vest, gloves. The picture is updated with each assessment. ' : ' Boxes, labels and confidences are drawn by the backend pipeline (MJPEG). ') + 'Detection keeps running when you leave this page; use Stop to end it.</p>';
     el.querySelector('#dl-cam').addEventListener('change', onCameraChange);
     el.querySelector('#dl-start').addEventListener('click', onStart);
     el.querySelector('#dl-stop').addEventListener('click', onStop);
@@ -373,6 +439,7 @@
   // ======================= D. settings =======================
   function renderSettings() {
     if (mod.id === 'fire') return renderFireSettings();
+    if (mod.id === 'ppe') return renderPPESettings();
     const el = root.querySelector('#dl-settings');
     if (!cfgResp) {
       el.innerHTML = '<div class="card-head"><h2 id="dl-set-h">' + icon('sliders', 18) + 'Detection Settings</h2></div><p class="muted" style="font-size:13px">' +
@@ -494,6 +561,73 @@
     el.querySelector('#dl-alert-on').addEventListener('change', function (e) { saveSettings({ alert: { enabled: e.target.checked } }, null, true); });
   }
 
+  // ---- PPE settings (backend/detection/modules.py DEFAULTS["ppe"])
+  function renderPPESettings() {
+    const el = root.querySelector('#dl-settings');
+    if (!cfgResp) {
+      el.innerHTML = '<div class="card-head"><h2 id="dl-set-h">' + icon('sliders', 18) + 'Detection Settings</h2></div><p class="muted" style="font-size:13px">' +
+        (api.status.connected ? 'Select a camera to load its PPE settings.' : 'Settings are stored on the backend per camera.') + '</p>';
+      return;
+    }
+    const c = cfgResp.config, d = cfgResp.defaults, zones = cfgResp.zones || [], rq = c.required || {}, al = c.alert || {};
+    const num = function (name, val, min, max, step, w) { return '<input class="input input-sm" type="number" name="' + name + '" id="pp-' + name + '" value="' + esc(val) + '" min="' + min + '" max="' + max + '" step="' + step + '" style="width:' + (w || 80) + 'px">'; };
+    const alertLabels = ['Helmet missing', 'Road helmet (not construction)', 'Vest missing', 'Vest wrong colour', 'Gloves missing'];
+    el.innerHTML = '<div class="card-head"><h2 id="dl-set-h">' + icon('sliders', 18) + 'Detection Settings</h2><span class="spacer"></span><span class="badge badge-info" title="Saved on the backend for this camera">' + esc(cfgResp.cameraId) + '</span></div>' +
+      '<form id="dl-form" class="stack" novalidate>' +
+      '<div class="field"><span class="field-label">Required PPE</span><div class="row wrap" style="gap:14px">' +
+      [['helmet', 'Construction helmet'], ['vest', 'Safety vest'], ['gloves', 'Gloves']].map(function (x) { return '<label class="check"><input type="checkbox" name="req-' + x[0] + '" ' + (rq[x[0]] !== false ? 'checked' : '') + '><span>' + x[1] + '</span></label>'; }).join('') +
+      '</div><span class="field-hint">Gloves are judged only when hands are clearly visible; the model has no per-hand check.</span></div>' +
+      '<div class="form-grid"><div class="field"><label for="pp-vestColor">Required vest colour</label><select class="select select-sm" id="pp-vestColor" name="vestColor">' +
+      [['orange', 'Orange'], ['yellow', 'Yellow'], ['green', 'Green'], ['', 'Any colour']].map(function (o) { return '<option value="' + o[0] + '"' + ((c.vestColor || '') === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select>' +
+      '<span class="field-hint">Checked only on a garment the model calls a vest — colour alone never makes a vest.</span></div>' +
+      '<div class="field"><label for="pp-confidence">Minimum person confidence</label>' + num('confidence', c.confidence, 0.05, 0.99, 0.01) + '<span class="field-hint">Default ' + esc(d.confidence) + '. PPE items use fixed per-item thresholds.</span></div>' +
+      '<div class="field"><label for="pp-intervalSec">Assess every (s)</label>' + num('intervalSec', c.intervalSec, 0.2, 60, 0.1) + '<span class="field-hint">Default ' + esc(d.intervalSec) + ' s. Frames in between are not analysed.</span></div>' +
+      '<div class="field"><label for="pp-imgSize">Model input size</label><select class="select select-sm" id="pp-imgSize" name="imgSize">' + [480, 640, 960].map(function (x) { return '<option value="' + x + '"' + (+c.imgSize === x ? ' selected' : '') + '>' + x + ' px' + (x === d.imgSize ? ' (default)' : '') + '</option>'; }).join('') + '</select></div>' +
+      '<div class="field"><label for="pp-missAfter">Missing after (assessments)</label>' + num('missAfter', c.missAfter, 1, 30, 1) + '<span class="field-hint">An item must be absent this many checks in a row before it is “missing”.</span></div>' +
+      '<div class="field"><label for="pp-minPersonFrac">Minimum person height</label>' + num('minPersonFrac', c.minPersonFrac, 0.02, 0.9, 0.01) + '<span class="field-hint">Fraction of the picture height; smaller people are “not assessable”.</span></div></div>' +
+      '<label class="check"><input type="checkbox" name="helmetClassifier" ' + (c.helmetClassifier !== false ? 'checked' : '') + '><span>Helmet type check (construction vs road helmet) <span class="dim">— unsure results go to review</span></span></label>' +
+      '<label class="check"><input type="checkbox" name="absenceMeansMissing" ' + (c.absenceMeansMissing !== false ? 'checked' : '') + '><span>No helmet / vest found on a clearly visible person counts toward “missing”</span></label>' +
+      '<div class="field"><span class="field-label">Detection zones</span>' + (zones.length ? '<div class="row wrap" style="gap:12px">' + zones.map(function (z) {
+        return '<label class="check"><input type="checkbox" name="zone" value="' + esc(z.id) + '" ' + ((c.zones || []).indexOf(z.id) >= 0 ? 'checked' : '') + (z.enabled === false ? ' disabled' : '') + '><span><span class="dot" style="color:' + esc(z.color || '#3478FF') + '"></span> ' + esc(z.name) + '</span></label>';
+      }).join('') + '</div><span class="field-hint">None selected = full frame. With zones, a person is checked where they stand (feet inside the zone).</span>'
+        : '<span class="field-hint">Full frame. Zones can be drawn in Camera Management.</span>') + '</div>' +
+      '<div class="dl-sub"><div class="row" style="justify-content:space-between"><b>Alert generation</b>' + ui.switchHtml('dl-alert-on', al.enabled !== false, 'Generate alerts', { cls: 'blue' }) + '</div>' +
+      '<div class="row wrap mt-8" style="gap:12px">' + alertLabels.map(function (l) { return '<label class="check"><input type="checkbox" name="alertl" value="' + esc(l) + '" ' + ((al.labels || []).indexOf(l) >= 0 ? 'checked' : '') + '><span>' + esc(l) + '</span></label>'; }).join('') + '</div>' +
+      '<div class="row wrap mt-8" style="gap:10px"><label class="dim" style="font-size:12.5px" for="pp-sev">Severity</label><select class="select select-sm" id="pp-sev" name="severity" style="width:auto">' + ['low', 'medium', 'high', 'critical'].map(function (x) { return '<option value="' + x + '"' + (al.severity === x ? ' selected' : '') + '>' + ui.cap(x) + '</option>'; }).join('') + '</select>' +
+      '<label class="dim" style="font-size:12.5px" for="pp-repeatSec">Repeat for the same person after (s, 0 = never)</label>' + num('repeatSec', c.repeatSec, 0, 86400, 1) + '</div>' +
+      '<label class="check mt-8"><input type="checkbox" name="reviewWarnings" ' + (c.reviewWarnings ? 'checked' : '') + '><span>Also warn when a person needs review (uncertain helmet type / vest colour)</span></label>' +
+      '<span class="field-hint">One alert per person and missing item; a new one only after it was fixed and goes missing again, or after the repeat time. Each event saves the exact assessed frame (Snapshots page).</span></div>' +
+      '<div class="notice notice-warning">' + icon('info', 16) + '<div>PPE analytics assist supervisors; they do not certify compliance. Results marked “uncertain” or “not assessable” need a human check.</div></div>' +
+      '<div class="field-error" id="dl-form-err"></div>' +
+      '<div class="row"><button class="btn btn-primary btn-sm" type="submit">' + icon('save', 14) + '<span>Apply settings</span></button><button class="btn btn-sm btn-ghost" type="button" id="dl-reset">Reset to defaults</button></div>' +
+      '<p class="dim" style="font-size:12px">Settings apply live to the running check — no restart needed.</p></form>';
+    window.AV.icons.hydrate(el);
+    const form = el.querySelector('#dl-form');
+    form.addEventListener('submit', function (e) { e.preventDefault(); const p = readPPEForm(form); if (p) saveSettings(p, form.querySelector('[type=submit]'), true); });
+    el.querySelector('#dl-reset').addEventListener('click', function () {
+      ui.confirm({ title: 'Reset PPE settings?', message: 'Restore the default PPE settings for ' + cfgResp.cameraId + '.', confirmText: 'Reset' })
+        .then(function (ok) { if (ok) saveSettings(JSON.parse(JSON.stringify(cfgResp.defaults)), null, true); });
+    });
+    el.querySelector('#dl-alert-on').addEventListener('change', function (e) { saveSettings({ alert: { enabled: e.target.checked } }, null, true); });
+  }
+
+  function readPPEForm(form) {
+    const q = function (n) { return form.querySelector('[name="' + n + '"]'); };
+    const f = function (n) { return parseFloat(q(n).value); };
+    const err = root.querySelector('#dl-form-err');
+    const req = { helmet: q('req-helmet').checked, vest: q('req-vest').checked, gloves: q('req-gloves').checked };
+    if (!req.helmet && !req.vest && !req.gloves) { err.textContent = 'Require at least one PPE item.'; return null; }
+    const out = {
+      required: req, vestColor: q('vestColor').value, confidence: f('confidence'), intervalSec: f('intervalSec'), imgSize: parseInt(q('imgSize').value, 10),
+      missAfter: parseInt(q('missAfter').value, 10), minPersonFrac: f('minPersonFrac'), repeatSec: f('repeatSec'),
+      helmetClassifier: q('helmetClassifier').checked, absenceMeansMissing: q('absenceMeansMissing').checked, reviewWarnings: q('reviewWarnings').checked,
+      zones: Array.prototype.map.call(form.querySelectorAll('[name="zone"]:checked'), function (c) { return c.value; }),
+      alert: { severity: q('severity').value, labels: Array.prototype.map.call(form.querySelectorAll('[name="alertl"]:checked'), function (c) { return c.value; }) }
+    };
+    if ([out.confidence, out.intervalSec, out.missAfter, out.minPersonFrac, out.repeatSec].some(function (x) { return !isFinite(x); })) { err.textContent = 'Fill in every number.'; return null; }
+    return out;
+  }
+
   function readFireForm(form) {
     const q = function (n) { return form.querySelector('[name="' + n + '"]'); };
     const f = function (n) { return parseFloat(q(n).value); };
@@ -536,22 +670,42 @@
   async function loadEvents() {
     if (!root || !api.status.connected || !camId) return;
     try {
-      const list = (await api.detection.events(mod.id, camId, 24)).map(state.fromBackend);
+      const list = (await api.detection.events(mod.id, camId, mod.id === 'ppe' ? 200 : 24)).map(state.fromBackend);
       const sig = list.length + '|' + (list[0] && list[0].id);
+      evAll = list;
       if (sig !== lastEvSig) { lastEvSig = sig; renderEvents(list); state.pollEvents(); }
     } catch (e) { /* status panel shows backend errors */ }
   }
 
+  function ppeEventFilter(list) {
+    const since = evFilter.hours ? Date.now() - parseFloat(evFilter.hours) * 3600000 : 0;
+    return list.filter(function (d) {
+      if (evFilter.item && String(d.item || '').split(',').indexOf(evFilter.item) < 0) return false;
+      if (evFilter.kind && d.type !== evFilter.kind) return false;
+      if (since && !(Date.parse(d.timestamp) >= since)) return false;
+      return true;
+    }).slice(0, 48);
+  }
   function renderEvents(list) {
     const el = root.querySelector('#dl-events');
-    el.innerHTML = '<div class="card-head"><h2 id="dl-ev-h">Recent ' + mod.noun + ' events</h2><span class="spacer"></span><a class="btn btn-sm btn-ghost" href="#/snapshots">Snapshots</a><a class="btn btn-sm btn-ghost" href="#/alerts">All alerts</a></div>' +
+    if (mod.id === 'ppe') list = ppeEventFilter(list);
+    el.innerHTML = '<div class="card-head"><h2 id="dl-ev-h">Recent ' + mod.noun + ' events</h2><span class="spacer"></span>' +
+      (mod.id === 'ppe' ? selHtml('ev-f-item', evFilter.item, [['', 'All items'], ['helmet', 'Helmet'], ['vest', 'Vest'], ['gloves', 'Gloves']], 'PPE item') +
+        selHtml('ev-f-kind', evFilter.kind, [['', 'All alerts'], ['ppe_missing', 'Missing PPE'], ['ppe_vest_color', 'Vest wrong colour'], ['ppe_review', 'Needs review']], 'Alert type') +
+        selHtml('ev-f-time', evFilter.hours, [['', 'Any time'], ['1', 'Last hour'], ['24', 'Last 24 h'], ['168', 'Last 7 days']], 'Time') : '') +
+      '<a class="btn btn-sm btn-ghost" href="#/snapshots">Snapshots</a><a class="btn btn-sm btn-ghost" href="#/alerts">All alerts</a></div>' +
       (list.length ? '<div class="det-row dl-ev-row">' + list.map(function (d) {
         const t = ui.eventType(d.type);
         return '<button class="det-card" data-ev="' + esc(d.id) + '"><span class="det-img">' + (d.image ? '<img src="' + esc(d.image) + '" alt="" loading="lazy">' : '<span class="media-ph">' + icon('image', 20) + '<span>No snapshot (policy/cooldown)</span></span>') +
           '<span class="det-label">' + ui.toneBadge(t.tone, d.label || t.label) + '</span></span><span class="det-info"><b class="ellipsis">' + esc(d.label) + (d.trackId != null ? ' · #' + esc(d.trackId) : '') + '</b><span>' + esc(ui.fmtTime(d.timestamp)) + '</span>' +
           '<span>Confidence: ' + (d.confidence != null ? Number(d.confidence).toFixed(2) : '<span class="dim">n/a</span>') + (d.alertId ? ' · ' + icon('bell', 11) + ' alert' : '') + (d.zone ? ' · ' + esc(d.zone) : '') + '</span></span></button>';
       }).join('') + '</div>'
-        : ui.emptyState('scan', 'No ' + mod.noun + ' events yet', !camId ? 'Select a camera.' : (mod.id === 'fire' ? 'An event (with snapshot) is recorded when fire or smoke is confirmed by the alert rule — not every frame.' : 'Events appear when the tracker confirms a new ' + mod.noun + ' (not every frame).')));
+        : ui.emptyState('scan', 'No ' + mod.noun + ' events' + (mod.id === 'ppe' && evAll.length ? ' match the filters' : ' yet'), !camId ? 'Select a camera.' : mod.id === 'ppe' ? 'An event (with the exact assessed frame) is recorded when a required item is confirmed missing — once per person and item.' : (mod.id === 'fire' ? 'An event (with snapshot) is recorded when fire or smoke is confirmed by the alert rule — not every frame.' : 'Events appear when the tracker confirms a new ' + mod.noun + ' (not every frame).')));
+    if (mod.id === 'ppe') {
+      el.querySelector('#ev-f-item').addEventListener('change', function (e) { evFilter.item = e.target.value; renderEvents(evAll); });
+      el.querySelector('#ev-f-kind').addEventListener('change', function (e) { evFilter.kind = e.target.value; renderEvents(evAll); });
+      el.querySelector('#ev-f-time').addEventListener('change', function (e) { evFilter.hours = e.target.value; renderEvents(evAll); });
+    }
     el.querySelectorAll('[data-ev]').forEach(function (b) { b.addEventListener('click', function () { const d = list.find(function (x) { return x.id === b.dataset.ev; }); if (d) window.AV.events.openDetection(d); }); });
   }
 
