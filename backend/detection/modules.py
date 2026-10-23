@@ -129,6 +129,8 @@ DEFAULTS["ppe"] = {
     "required": {"helmet": True, "vest": True, "gloves": True},
     "vestColor": "orange",                       # site policy; "" = any vest colour
     "helmetClassifier": True,                    # construction / road / other helmet-crop classifier
+    "rejectBlackHelmet": True,                   # a black helmet is not a construction helmet (site rule)
+    "riderCheck": True,                          # helmet of a person on a motorcycle / bicycle = road helmet
     "missAfter": 3,                              # consecutive assessments before an item is MISSING
     "absenceMeansMissing": True,                 # helmet / vest: nothing found on a large visible person counts
     "minPersonFrac": 0.15,                       # person box height (fraction of the frame) to judge head / torso

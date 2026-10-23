@@ -33,7 +33,8 @@ FORGET_SEC = 30.0                    # a person not seen for this long is droppe
 COLORS = {rules.COMPLIANT: (60, 170, 60), rules.NON_COMPLIANT: (40, 40, 220), rules.NEEDS_REVIEW: (0, 191, 255),
           rules.PARTIAL: (150, 150, 150)}
 HELMET_BGR = {"white": (240, 240, 240), "yellow": (60, 200, 235), "orange": (60, 130, 250), "red": (40, 40, 220),
-              "green": (60, 170, 60), "blue": (200, 120, 40), "other": (128, 128, 128), "unknown": (128, 128, 128)}
+              "green": (60, 170, 60), "blue": (200, 120, 40), "black": (30, 30, 30), "other": (128, 128, 128),
+              "unknown": (128, 128, 128)}
 SHORT = {rules.PRESENT: "OK", rules.MISSING: "MISSING", rules.UNCERTAIN: "?", rules.NOT_ASSESSABLE: "n/a"}
 
 _CLS = None
@@ -48,6 +49,59 @@ def helmet_classifier():
             from ultralytics import YOLO
             _CLS = YOLO(str(HELMET_CLS), task="classify")
         return _CLS
+
+
+# ---- rider check: the project's COCO detector (yolov8n; RKNN NPU / OpenVINO / PyTorch as configured) --------------
+RIDER_COCO = (1, 3)                 # bicycle, motorcycle
+RIDER_CONF = 0.35
+_RIDER = {"model": None, "imgsz": 640, "tried": False, "error": None}
+_RIDER_LOCK = threading.Lock()
+
+
+def rider_model():
+    """The main COCO detector, loaded once per process for the PPE rider check (None if it cannot load)."""
+    with _RIDER_LOCK:
+        if not _RIDER["tried"]:
+            _RIDER["tried"] = True
+            try:
+                from ultralytics import YOLO
+                engine, path = config.resolve_engine()
+                imgsz = 640
+                if engine == "rknn":
+                    from backend.detection.pipeline import load_rknn_prereqs
+                    imgsz, _p = load_rknn_prereqs(path)
+                _RIDER.update(model=YOLO(str(path), task="detect"), imgsz=imgsz, engine=engine)
+            except Exception as exc:            # the PPE check keeps working; riders are then not recognised
+                _RIDER["error"] = repr(exc)
+                log.warning("PPE rider check unavailable: %s", exc)
+        return _RIDER["model"]
+
+
+def two_wheelers(frame):
+    """[x1, y1, x2, y2] of bicycles / motorcycles in the frame."""
+    m = rider_model()
+    if m is None:
+        return []
+    with _RIDER_LOCK, gated():
+        r = m.predict(frame, imgsz=_RIDER["imgsz"], conf=RIDER_CONF, classes=list(RIDER_COCO), verbose=False)[0]
+    return [[float(v) for v in b.xyxy[0].tolist()] for b in r.boxes] if r.boxes is not None else []
+
+
+def on_two_wheeler(pbox, vehicles):
+    """Person sits on a bicycle / motorcycle: person centre over the vehicle (horizontally), vehicle in the lower
+    part of the person box, real overlap."""
+    px1, py1, px2, py2 = pbox
+    ph, pcx, pcy = py2 - py1, (px1 + px2) / 2, (py1 + py2) / 2
+    for vx1, vy1, vx2, vy2 in vehicles:
+        if not (vx1 <= pcx <= vx2):
+            continue
+        if vy1 > py1 + 0.85 * ph or vy2 < pcy:          # vehicle must cover the lower body
+            continue
+        ix = max(0.0, min(px2, vx2) - max(px1, vx1))
+        iy = max(0.0, min(py2, vy2) - max(py1, vy1))
+        if ix * iy >= 0.15 * (px2 - px1) * ph:
+            return True
+    return False
 
 
 def helmet_kind(frame, box, cls_model=None, min_prob=rules.HELMET_CLS_MIN):
@@ -96,6 +150,7 @@ class PPEEngine:
         self.summary_ids = {k: set() for k in ("assessed", "compliant", "nonCompliant", "review",
                                                "helmetMissing", "vestMissing", "glovesMissing", "vestColor", "roadHelmet")}
         self._synthetic = 0
+        self.riders_checked = 0
         self.thread_name = thread_name
         self._worker = threading.Thread(target=self._run, name=thread_name or "ppe-worker", daemon=True)
         self._worker.start()
@@ -239,6 +294,11 @@ class PPEEngine:
         views, due = [], []
         cls_model = helmet_classifier() if cfg.get("helmetClassifier", True) else None
         kind_fn = (lambda f, b: helmet_kind(f, b, cls_model)) if cls_model is not None else None
+        # rider check only when someone has a helmet (the extra COCO pass is skipped otherwise)
+        helmeted = [i for i in items if any(d["cls"] == "helmet" and d["conf"] >= rules.CLASS_CONF["helmet"][0] for d in items[i])]
+        vehicles = two_wheelers(frame) if helmeted and cfg.get("riderCheck", True) else []
+        self.riders_checked += 1 if helmeted and cfg.get("riderCheck", True) else 0
+        grey = rules.grey_picture(frame)
         for i, p in enumerate(persons):
             tid = p["tid"]
             if tid is None:                         # untracked this frame: own short-lived id
@@ -246,7 +306,8 @@ class PPEEngine:
                 tid = self._synthetic
             ps = self.people.get(tid) or rules.PersonState(tid)
             self.people[tid] = ps
-            ev = rules.assess_person(p, items[i], frame, cfg, kind_fn)
+            ev = rules.assess_person(p, items[i], frame, cfg, kind_fn,
+                                     rider=bool(vehicles) and on_two_wheeler(p["box"], vehicles), grey=grey)
             ps.update(ev, cfg, now)
             ps.box = [round(v, 1) for v in p["box"]]
             v = ps.view(req)
@@ -270,7 +331,7 @@ class PPEEngine:
         for item in rules.ITEMS:
             if it[item]["status"] == rules.MISSING:
                 s[item + "Missing"].add(tid)
-        if it["helmet"].get("type") == "road" and it["helmet"]["status"] == rules.MISSING:
+        if it["helmet"].get("type") in rules.NON_PPE_HELMET and it["helmet"]["status"] == rules.MISSING:
             s["roadHelmet"].add(tid)
         if it["vest"].get("colorCompliance") == "non-compliant":
             s["vestColor"].add(tid)
@@ -301,6 +362,9 @@ class PPEEngine:
                 "summaryNote": "unique tracked people since start (ByteTrack can give one person a new id after occlusion)",
                 "required": self.required(), "vestColor": (self.cfg or {}).get("vestColor"),
                 "helmetClassifier": "on" if (self.cfg or {}).get("helmetClassifier", True) and HELMET_CLS.is_file() else "off",
+                "riderCheck": ("off" if not (self.cfg or {}).get("riderCheck", True) else
+                               "unavailable" if _RIDER["tried"] and _RIDER["model"] is None else "on"),
+                "rejectBlackHelmet": bool((self.cfg or {}).get("rejectBlackHelmet", True)),
                 "runs": self.runs, "skipped": self.skipped, "errors": self.errors, "lastError": self.last_error,
                 "inferenceMs": round(self.latency_ms, 1) if self.latency_ms is not None else None,
                 "intervalSec": (self.cfg or {}).get("intervalSec")}
@@ -332,7 +396,8 @@ def draw_person(img, v, sx=1.0, sy=1.0, highlight=False):
     h = it["helmet"]
     if h.get("box"):
         _box(img, h["box"], sx, sy, HELMET_BGR.get(h.get("color"), (128, 128, 128)),
-             ("road helmet" if h.get("type") == "road" else f"helmet-{h.get('color', 'unknown')}"), 2)
+             ({"road": "road helmet", "rider": "rider helmet", "black": "black helmet"}.get(h.get("type"))
+              or f"helmet-{h.get('color', 'unknown')}"), 2)
     vs = it["vest"]
     if vs.get("box") and vs["status"] != rules.MISSING:
         _box(img, vs["box"], sx, sy, (60, 130, 250), f"vest-{vs.get('color', 'unknown')}", 1)

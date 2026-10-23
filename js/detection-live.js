@@ -234,7 +234,8 @@
     const req = Object.keys(p.required || {}).filter(function (k) { return p.required[k]; });
     return '<dt>Required PPE</dt><dd>' + (req.length ? req.map(function (k) { return '<span class="badge badge-muted">' + esc(k) + '</span>'; }).join(' ') : '<span class="dim">none</span>') +
         (p.vestColor ? ' <span class="dim">· vest colour ' + esc(p.vestColor) + '</span>' : '') + '</dd>' +
-      '<dt>Helmet type check</dt><dd>' + (p.helmetClassifier === 'on' ? '<span class="badge badge-success">On</span> <span class="dim">construction / road classifier; unsure = review</span>' : '<span class="badge badge-muted">Off</span>') + '</dd>' +
+      '<dt>Helmet type check</dt><dd>' + (p.helmetClassifier === 'on' ? '<span class="badge badge-success">On</span> <span class="dim">road-looking helmet = review</span>' : '<span class="badge badge-muted">Off</span>') + '</dd>' +
+      '<dt>Non-PPE helmets</dt><dd>' + (p.rejectBlackHelmet ? '<span class="badge badge-muted">black</span> ' : '') + ({ on: '<span class="badge badge-muted">riders</span>', unavailable: '<span class="badge badge-danger">rider check unavailable</span>' }[p.riderCheck] || '') + (!p.rejectBlackHelmet && p.riderCheck === 'off' ? '<span class="dim">none rejected</span>' : '') + '</dd>' +
       (p.errors ? '<dt>Detection errors</dt><dd><span class="badge badge-danger">' + esc(p.errors) + '</span> <span class="dim">' + esc(p.lastError || '') + '</span></dd>' : '');
   }
 
@@ -265,11 +266,11 @@
       selHtml('ppe-f-overall', ppeFilter.overall, [['', 'All statuses'], ['COMPLIANT', 'Compliant'], ['NON_COMPLIANT', 'Non-compliant'], ['NEEDS_REVIEW', 'Needs review'], ['NOT_FULLY_ASSESSED', 'Not fully assessed']], 'Compliance status') +
       selHtml('ppe-f-missing', ppeFilter.missing, [['', 'Any item'], ['helmet', 'Helmet missing'], ['vest', 'Vest missing'], ['gloves', 'Gloves missing']], 'Missing item') + '</div>' +
       '<div class="ppe-tiles">' + tile('People assessed', sm && sm.peopleAssessed) + tile('Compliant', sm && sm.compliant, 'ok') + tile('Non-compliant', sm && sm.nonCompliant, 'bad') + tile('Needs review', sm && sm.needsReview, 'warn') +
-      tile('Helmet missing', sm && sm.missingHelmet, 'bad') + tile('Road helmet', sm && sm.roadHelmet, 'bad') + tile('Vest missing', sm && sm.missingVest, 'bad') + tile('Vest wrong colour', sm && sm.vestWrongColor, 'warn') + tile('Gloves missing', sm && sm.missingGloves, 'bad') + '</div>' +
+      tile('Helmet missing', sm && sm.missingHelmet, 'bad') + tile('Non-PPE helmet', sm && sm.roadHelmet, 'bad') + tile('Vest missing', sm && sm.missingVest, 'bad') + tile('Vest wrong colour', sm && sm.vestWrongColor, 'warn') + tile('Gloves missing', sm && sm.missingGloves, 'bad') + '</div>' +
       (sm ? '<p class="dim" style="font-size:11.5px;margin:6px 0 12px">Counts since start: ' + esc(p.summaryNote || '') + '.</p>' : '<p class="dim" style="font-size:12px;margin:6px 0 12px">Counts appear once PPE detection runs on this camera.</p>') +
       (people.length ? '<div class="table-wrap"><table class="table ppe-table"><thead><tr><th>Person</th><th>Helmet</th><th>Vest</th><th>Gloves</th><th>Overall</th><th>Assessed</th></tr></thead><tbody>' + people.map(function (v) {
         const h = v.items.helmet || {}, ve = v.items.vest || {}, g = v.items.gloves || {};
-        const hx = (h.color && h.color !== 'unknown' ? ' <span class="dim">' + esc(h.color) + '</span>' : (h.status === 'PRESENT' || h.status === 'UNCERTAIN' ? ' <span class="dim">colour unknown</span>' : '')) + (h.type === 'road' ? ' <span class="badge badge-danger">road helmet</span>' : '');
+        const hx = (h.color && h.color !== 'unknown' ? ' <span class="dim">' + esc(h.color) + '</span>' : (h.status === 'PRESENT' || h.status === 'UNCERTAIN' ? ' <span class="dim">colour unknown</span>' : '')) + ({ rider: ' <span class="badge badge-danger">rider helmet</span>', black: ' <span class="badge badge-danger">black helmet</span>', roadLike: ' <span class="badge badge-warning">road-like?</span>' }[h.type] || '');
         const vx = ve.status === 'PRESENT' ? ' <span class="dim">' + esc(ve.color || 'unknown') + '</span>' + (ve.colorCompliance === 'non-compliant' ? ' <span class="badge badge-warning">not ' + esc(ve.expectedColor) + '</span>' : ve.colorCompliance === 'uncertain' ? ' <span class="badge badge-muted">colour?</span>' : '') : '';
         return '<tr><td><b>P' + esc(v.personId) + '</b>' + (v.personConf != null ? '<div class="dim" style="font-size:11px">' + Number(v.personConf).toFixed(2) + '</div>' : '') + '</td>' + cell(h, hx) + cell(ve, vx) + cell(g, g.count ? ' <span class="dim">' + esc(g.count) + ' seen</span>' : '') +
           '<td>' + ppeBadge(PPE_OVERALL, v.overall) + '</td><td class="dim" style="font-size:12px">' + (v.assessedAt ? esc(ui.fmtTime(new Date(v.assessedAt * 1000).toISOString())) : '—') + '</td></tr>';
@@ -572,6 +573,7 @@
     const c = cfgResp.config, d = cfgResp.defaults, zones = cfgResp.zones || [], rq = c.required || {}, al = c.alert || {};
     const num = function (name, val, min, max, step, w) { return '<input class="input input-sm" type="number" name="' + name + '" id="pp-' + name + '" value="' + esc(val) + '" min="' + min + '" max="' + max + '" step="' + step + '" style="width:' + (w || 80) + 'px">'; };
     const alertLabels = ['Helmet missing', 'Road helmet (not construction)', 'Vest missing', 'Vest wrong colour', 'Gloves missing'];
+    const alertText = { 'Road helmet (not construction)': 'Non-PPE helmet (rider / black)' };
     el.innerHTML = '<div class="card-head"><h2 id="dl-set-h">' + icon('sliders', 18) + 'Detection Settings</h2><span class="spacer"></span><span class="badge badge-info" title="Saved on the backend for this camera">' + esc(cfgResp.cameraId) + '</span></div>' +
       '<form id="dl-form" class="stack" novalidate>' +
       '<div class="field"><span class="field-label">Required PPE</span><div class="row wrap" style="gap:14px">' +
@@ -586,13 +588,15 @@
       '<div class="field"><label for="pp-missAfter">Missing after (assessments)</label>' + num('missAfter', c.missAfter, 1, 30, 1) + '<span class="field-hint">An item must be absent this many checks in a row before it is “missing”.</span></div>' +
       '<div class="field"><label for="pp-minPersonFrac">Minimum person height</label>' + num('minPersonFrac', c.minPersonFrac, 0.02, 0.9, 0.01) + '<span class="field-hint">Fraction of the picture height; smaller people are “not assessable”.</span></div></div>' +
       '<label class="check"><input type="checkbox" name="helmetClassifier" ' + (c.helmetClassifier !== false ? 'checked' : '') + '><span>Helmet type check (construction vs road helmet) <span class="dim">— unsure results go to review</span></span></label>' +
+      '<label class="check"><input type="checkbox" name="rejectBlackHelmet" ' + (c.rejectBlackHelmet !== false ? 'checked' : '') + '><span>Black helmet is not PPE <span class="dim">— reported as missing (not checked on night / IR pictures)</span></span></label>' +
+      '<label class="check"><input type="checkbox" name="riderCheck" ' + (c.riderCheck !== false ? 'checked' : '') + '><span>Helmet of a motorcycle / bicycle rider is not PPE <span class="dim">— extra vehicle check, only while someone wears a helmet</span></span></label>' +
       '<label class="check"><input type="checkbox" name="absenceMeansMissing" ' + (c.absenceMeansMissing !== false ? 'checked' : '') + '><span>No helmet / vest found on a clearly visible person counts toward “missing”</span></label>' +
       '<div class="field"><span class="field-label">Detection zones</span>' + (zones.length ? '<div class="row wrap" style="gap:12px">' + zones.map(function (z) {
         return '<label class="check"><input type="checkbox" name="zone" value="' + esc(z.id) + '" ' + ((c.zones || []).indexOf(z.id) >= 0 ? 'checked' : '') + (z.enabled === false ? ' disabled' : '') + '><span><span class="dot" style="color:' + esc(z.color || '#3478FF') + '"></span> ' + esc(z.name) + '</span></label>';
       }).join('') + '</div><span class="field-hint">None selected = full frame. With zones, a person is checked where they stand (feet inside the zone).</span>'
         : '<span class="field-hint">Full frame. Zones can be drawn in Camera Management.</span>') + '</div>' +
       '<div class="dl-sub"><div class="row" style="justify-content:space-between"><b>Alert generation</b>' + ui.switchHtml('dl-alert-on', al.enabled !== false, 'Generate alerts', { cls: 'blue' }) + '</div>' +
-      '<div class="row wrap mt-8" style="gap:12px">' + alertLabels.map(function (l) { return '<label class="check"><input type="checkbox" name="alertl" value="' + esc(l) + '" ' + ((al.labels || []).indexOf(l) >= 0 ? 'checked' : '') + '><span>' + esc(l) + '</span></label>'; }).join('') + '</div>' +
+      '<div class="row wrap mt-8" style="gap:12px">' + alertLabels.map(function (l) { return '<label class="check"><input type="checkbox" name="alertl" value="' + esc(l) + '" ' + ((al.labels || []).indexOf(l) >= 0 ? 'checked' : '') + '><span>' + esc(alertText[l] || l) + '</span></label>'; }).join('') + '</div>' +
       '<div class="row wrap mt-8" style="gap:10px"><label class="dim" style="font-size:12.5px" for="pp-sev">Severity</label><select class="select select-sm" id="pp-sev" name="severity" style="width:auto">' + ['low', 'medium', 'high', 'critical'].map(function (x) { return '<option value="' + x + '"' + (al.severity === x ? ' selected' : '') + '>' + ui.cap(x) + '</option>'; }).join('') + '</select>' +
       '<label class="dim" style="font-size:12.5px" for="pp-repeatSec">Repeat for the same person after (s, 0 = never)</label>' + num('repeatSec', c.repeatSec, 0, 86400, 1) + '</div>' +
       '<label class="check mt-8"><input type="checkbox" name="reviewWarnings" ' + (c.reviewWarnings ? 'checked' : '') + '><span>Also warn when a person needs review (uncertain helmet type / vest colour)</span></label>' +
@@ -620,7 +624,7 @@
     const out = {
       required: req, vestColor: q('vestColor').value, confidence: f('confidence'), intervalSec: f('intervalSec'), imgSize: parseInt(q('imgSize').value, 10),
       missAfter: parseInt(q('missAfter').value, 10), minPersonFrac: f('minPersonFrac'), repeatSec: f('repeatSec'),
-      helmetClassifier: q('helmetClassifier').checked, absenceMeansMissing: q('absenceMeansMissing').checked, reviewWarnings: q('reviewWarnings').checked,
+      helmetClassifier: q('helmetClassifier').checked, rejectBlackHelmet: q('rejectBlackHelmet').checked, riderCheck: q('riderCheck').checked, absenceMeansMissing: q('absenceMeansMissing').checked, reviewWarnings: q('reviewWarnings').checked,
       zones: Array.prototype.map.call(form.querySelectorAll('[name="zone"]:checked'), function (c) { return c.value; }),
       alert: { severity: q('severity').value, labels: Array.prototype.map.call(form.querySelectorAll('[name="alertl"]:checked'), function (c) { return c.value; }) }
     };

@@ -375,6 +375,8 @@ class CameraSession:
         self.last_detection_at["ppe"] = now_iso()
         acfg = cfg.get("alert") or {}
         alert_label = "Vest wrong colour" if kind == "ppe_vest_color" else ("PPE needs review" if kind == "ppe_review" else label)
+        if alert_label in ("Rider helmet (2-wheeler)", "Black helmet (not PPE)"):
+            alert_label = "Road helmet (not construction)"     # one alert switch for every non-PPE helmet
         sev = "low" if kind == "ppe_review" else ("medium" if kind == "ppe_vest_color" else acfg.get("severity", "high"))
         want_alert = bool(acfg.get("enabled", True)) and (kind == "ppe_review" or alert_label in (acfg.get("labels") or []))
         rec = view["items"].get(item.split(",")[0]) if item else None

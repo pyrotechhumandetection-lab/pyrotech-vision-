@@ -88,6 +88,32 @@ def _hue_name(h):
     return "other"
 
 
+# black helmet: share of dark pixels in the top of the helmet box (glossy shells keep some bright highlights)
+BLACK = {"v_dark": 60, "s_grey": 50, "v_grey": 80, "min_share": 0.50, "grey_frame_sat": 12}
+
+
+# helmet "type" values that are not PPE -> event label (the alert switch for all of them: "Road helmet (not construction)")
+NON_PPE_HELMET = {"road": "Road helmet (not construction)", "rider": "Rider helmet (2-wheeler)",
+                  "black": "Black helmet (not PPE)"}
+
+
+def is_black_helmet(crop):
+    """True when the top 60 % of the helmet box is mostly black / very dark grey."""
+    if crop is None or crop.ndim != 3 or min(crop.shape[:2]) < COLOR_MIN_SIDE:
+        return False
+    top = crop[:max(1, int(crop.shape[0] * HELMET_HSV["top_fraction"]))]
+    hsv = cv2.cvtColor(top, cv2.COLOR_BGR2HSV)
+    s, v = hsv[..., 1], hsv[..., 2]
+    dark = (v < BLACK["v_dark"]) | ((s < BLACK["s_grey"]) & (v < BLACK["v_grey"]))
+    return float(np.count_nonzero(dark)) / dark.size >= BLACK["min_share"]
+
+
+def grey_picture(frame):
+    """Night / IR (black-and-white) picture: colour checks are not possible."""
+    small = cv2.resize(frame, (64, 36), interpolation=cv2.INTER_AREA)
+    return float(cv2.cvtColor(small, cv2.COLOR_BGR2HSV)[..., 1].mean()) < BLACK["grey_frame_sat"]
+
+
 def helmet_color(crop):
     """white / yellow / orange / red / green / blue / other / unknown, from the top 60 % of the helmet box only
     (never the shirt, face or background). unknown = too small, too dark, or no dominant colour."""
@@ -203,9 +229,11 @@ def visibility(pbox, frame_hw, min_person_frac):
     return {"head": head, "torso": torso}
 
 
-def assess_person(person, items, frame, cfg, helmet_kind=None):
+def assess_person(person, items, frame, cfg, helmet_kind=None, rider=False, grey=False):
     """Per-frame evidence for one person. items: detections assigned to this person (dicts with cls/box/conf).
     helmet_kind(frame, box) -> ("construction" | "road" | "other", prob) or None (no classifier).
+    rider: the person sits on a motorcycle / bicycle (COCO detector) -> the helmet is a road helmet.
+    grey: night / IR picture -> the black-helmet colour rule cannot be applied.
     Returns {item: {"obs": PRESENT|MISSING|UNCERTAIN|NOT_ASSESSABLE|NOHIT, "conf", "box", "reason", "color"}}."""
     fh, fw = frame.shape[:2]
     vis = visibility(person["box"], (fh, fw), cfg["minPersonFrac"])
@@ -222,14 +250,25 @@ def assess_person(person, items, frame, cfg, helmet_kind=None):
     # helmet
     h, nh = by.get("helmet"), by.get("no_helmet")
     lo, hi = CLASS_CONF["helmet"]
-    if h and h["conf"] >= hi and not h.get("small"):
+    black = bool(h) and cfg.get("rejectBlackHelmet", True) and is_black_helmet(_crop(frame, h["box"]))
+    if h and h["conf"] >= hi and not h.get("small") and rider and cfg.get("riderCheck", True):
+        out["helmet"] = _ev(MISSING, h, "helmet on a motorcycle / bicycle rider - road helmet, not construction PPE",
+                            "black" if black else helmet_color(_crop(frame, h["box"])), "rider", None)
+    elif h and h["conf"] >= lo and not h.get("small") and black and grey:
+        out["helmet"] = _ev(UNCERTAIN, h, "dark helmet on a night / IR picture - colour cannot be checked", "unknown")
+    elif h and h["conf"] >= lo and not h.get("small") and black:
+        out["helmet"] = _ev(MISSING, h, "black helmet - not accepted as a construction helmet (site rule)", "black", "black", None)
+    elif h and h["conf"] >= hi and not h.get("small"):
         kind, prob = helmet_kind(frame, h["box"]) if helmet_kind else ("unverified", None)
         crop = _crop(frame, h["box"])
         color = helmet_color(crop)
         if kind == "construction":
             out["helmet"] = _ev(PRESENT, h, "construction helmet", color, kind, prob)
         elif kind == "road":
-            out["helmet"] = _ev(MISSING, h, "road (motorcycle / bicycle) helmet - not construction PPE", color, kind, prob)
+            # the classifier alone is not trusted for a MISSING: it called 47 / 47 white construction helmets "road" on
+            # the original project's own grids (a.png, b.png). Not accepted as PPE, sent to review instead.
+            out["helmet"] = _ev(UNCERTAIN, h, "looks like a road (motorcycle) helmet - not accepted, needs review",
+                                color, "roadLike", prob)
         elif kind == "unverified":
             out["helmet"] = _ev(PRESENT, h, "helmet (type not verified: classifier off)", color, kind, prob)
         else:
@@ -373,8 +412,8 @@ def alerts_due(ps, required, cfg, now):
         key = item
         if rec["status"] == MISSING:
             label = {"helmet": "Helmet missing", "vest": "Vest missing", "gloves": "Gloves missing"}[item]
-            if item == "helmet" and rec.get("type") == "road":
-                label = "Road helmet (not construction)"
+            if item == "helmet" and rec.get("type") in NON_PPE_HELMET:
+                label = NON_PPE_HELMET[rec["type"]]
             last = ps.alerted.get(key)
             if last is None or (repeat > 0 and now - last >= repeat):
                 ps.alerted[key] = now

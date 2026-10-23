@@ -39,10 +39,40 @@ class PPERuleTests(unittest.TestCase):
         ev = rules.assess_person(PERSON, [det("helmet", HELMET_BOX, 0.9)], FRAME, cfg(), lambda f, b: ("construction", 0.95))
         self.assertEqual(ev["helmet"]["obs"], rules.PRESENT)
 
-    def test_road_helmet_is_missing(self):
+    def test_classifier_road_alone_is_review_not_ppe(self):
         ev = rules.assess_person(PERSON, [det("helmet", HELMET_BOX, 0.9)], FRAME, cfg(), lambda f, b: ("road", 0.9))
-        self.assertEqual(ev["helmet"]["obs"], rules.MISSING)
+        self.assertEqual(ev["helmet"]["obs"], rules.UNCERTAIN)       # never PRESENT, never an automatic MISSING
         self.assertIn("road", ev["helmet"]["reason"])
+
+    def test_rider_helmet_is_missing(self):
+        ev = rules.assess_person(PERSON, [det("helmet", HELMET_BOX, 0.9)], FRAME, cfg(), lambda f, b: ("construction", 0.99), rider=True)
+        self.assertEqual((ev["helmet"]["obs"], ev["helmet"]["kind"]), (rules.MISSING, "rider"))
+        ev = rules.assess_person(PERSON, [det("helmet", HELMET_BOX, 0.9)], FRAME, cfg(riderCheck=False), lambda f, b: ("construction", 0.99), rider=True)
+        self.assertEqual(ev["helmet"]["obs"], rules.PRESENT)
+
+    def test_black_helmet_is_missing(self):
+        img = FRAME.copy()
+        img[HELMET_BOX[1]:HELMET_BOX[3], HELMET_BOX[0]:HELMET_BOX[2]] = (25, 25, 25)
+        img[HELMET_BOX[1] + 5:HELMET_BOX[1] + 12, HELMET_BOX[0] + 20:HELMET_BOX[0] + 40] = (230, 230, 230)   # gloss
+        construction = lambda f, b: ("construction", 0.99)
+        ev = rules.assess_person(PERSON, [det("helmet", HELMET_BOX, 0.9)], img, cfg(), construction)
+        self.assertEqual((ev["helmet"]["obs"], ev["helmet"]["color"]), (rules.MISSING, "black"))
+        ev = rules.assess_person(PERSON, [det("helmet", HELMET_BOX, 0.4)], img, cfg(), construction)    # weak + black
+        self.assertEqual(ev["helmet"]["obs"], rules.MISSING)
+        ev = rules.assess_person(PERSON, [det("helmet", HELMET_BOX, 0.9)], img, cfg(), construction, grey=True)
+        self.assertEqual(ev["helmet"]["obs"], rules.UNCERTAIN)                                           # IR picture
+        ev = rules.assess_person(PERSON, [det("helmet", HELMET_BOX, 0.9)], img, cfg(rejectBlackHelmet=False), construction)
+        self.assertEqual(ev["helmet"]["obs"], rules.PRESENT)
+
+    def test_coloured_helmets_are_not_black(self):
+        for bgr in ((240, 240, 240), (0, 200, 240), (0, 120, 250), (200, 110, 30), (40, 40, 200)):
+            self.assertFalse(rules.is_black_helmet(np.full((40, 60, 3), bgr, np.uint8)), bgr)
+
+    def test_on_two_wheeler(self):
+        rider = [500, 100, 640, 450]
+        self.assertTrue(ppe_engine.on_two_wheeler(rider, [[470, 250, 680, 560]]))     # motorcycle under the person
+        self.assertFalse(ppe_engine.on_two_wheeler(rider, [[700, 250, 900, 560]]))    # parked beside
+        self.assertFalse(ppe_engine.on_two_wheeler(rider, [[470, 430, 680, 700]]))    # in front, below the feet
 
     def test_unverified_helmet_type_is_uncertain(self):
         ev = rules.assess_person(PERSON, [det("helmet", HELMET_BOX, 0.9)], FRAME, cfg(), lambda f, b: ("other", 0.5))
