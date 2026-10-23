@@ -66,7 +66,7 @@
         // Fire & Smoke / Object Monitoring mirror the backend defaults (backend/detection/modules.py)
         fire: { enabled: false, classes: { fire: true, smoke: true }, classConf: { Fire: 0.30, Smoke: 0.65 }, confidence: 0.50, alert: { severity: 'critical' }, zones: [] },
         // human / vehicle mirror the backend defaults (original human_detect_yolo-2.py values)
-        human: { enabled: false, confidence: 0.35, classConf: { Person: 0.30 }, classes: { person: true, rider: true, personFar: false }, zones: [] },
+        human: { enabled: false, confidence: 0.35, classConf: { Person: 0.30 }, classes: { person: true, rider: true, personFar: true, animalFilter: true }, zones: [] },
         vehicle: { enabled: false, confidence: 0.35, classConf: { '2-Wheeler': 0.35, '4-Wheeler': 0.35, Bus: 0.55, Truck: 0.55 }, classes: { twoWheeler: true, fourWheeler: true, bus: true, truck: true }, zones: [] },
         // Human Count mirrors the backend defaults (backend/detection/modules.py)
         count: { enabled: false, confidence: 0.40, classConf: { Person: 0.40 }, classes: { person: true }, counting: { minFrames: 3, keepLostSec: 2.0 }, zones: [] },

@@ -131,6 +131,22 @@ class CameraRegistry:
             if c.get("status") == "online":
                 c["status"] = "unverified"
                 stale = True
+        # one-time upgrade (2026-10-23): far zoom for people and vehicles and the animal filter switched on for
+        # cameras saved before these options existed (their stored "personFar": false was the old default).
+        # Done once per data folder (data/migrations.json), so a user who switches them off later keeps that.
+        mig = JsonFile(str(config.DATA_DIR / "migrations.json"), {})
+        if not mig.data.get("farZoomAnimalFilter"):
+            for c in self.cams.data.get("cameras", []):
+                mods = (c.get("detection") or {}).get("modules") or {}
+                h = (mods.get("human") or {}).get("classes")
+                if isinstance(h, dict):
+                    h["personFar"], h["animalFilter"] = True, True
+                v = (mods.get("vehicle") or {}).get("classes")
+                if isinstance(v, dict):
+                    v["vehicleFar"] = True
+                stale = True
+            mig.data["farZoomAnimalFilter"] = True
+            mig.save()
         if stale:
             self.cams.save()
         if sys.platform != "win32":

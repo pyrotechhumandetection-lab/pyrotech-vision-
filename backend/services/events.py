@@ -51,6 +51,56 @@ def _slug(text):
     return re.sub(r"[^a-z0-9]+", "_", str(text).lower()).strip("_") or "event"
 
 
+FAR_BOX_HEIGHT = 0.15     # a confirmed box lower than 15 % of the picture height = far / small object
+
+
+def far_snapshot(frame, original, box, label, conf):
+    """Snapshot of a far (small) detection that can be read: the full-resolution picture (main stream) with the box,
+    plus an enlarged view of the object in the top-right corner. Other detections: the frame as it is."""
+    if frame is None or not box or len(box) != 4:
+        return frame
+    x1, y1, x2, y2 = (float(v) for v in box)
+    if y2 - y1 >= FAR_BOX_HEIGHT:
+        return frame
+    try:
+        base = original if original is not None and original.shape[0] > frame.shape[0] else frame
+        img = base.copy() if base is original else frame.copy()
+        h, w = img.shape[:2]
+        bx1, by1, bx2, by2 = int(x1 * w), int(y1 * h), int(x2 * w), int(y2 * h)
+        col = (0, 255, 255)
+        if base is original:                       # the HD original has no drawings yet
+            cv2.rectangle(img, (bx1, by1), (bx2, by2), col, max(2, w // 640))
+            cv2.putText(img, f"{label} {conf:.2f}" if conf is not None else label, (bx1, max(by1 - 8, 18)),
+                        cv2.FONT_HERSHEY_SIMPLEX, max(0.5, w / 1600), col, max(1, w // 960))
+        # enlarged view: the object with some context (2.5x its size), in the picture corner farthest from it
+        bw, bh = max(1, bx2 - bx1), max(1, by2 - by1)
+        side = int(max(2.5 * max(bw, bh), 64))
+        cx, cy = (bx1 + bx2) // 2, (by1 + by2) // 2
+        side = min(side, w, h)
+        cx1, cy1 = max(0, min(w - side, cx - side // 2)), max(0, min(h - side, cy - side // 2))
+        crop = base[cy1:cy1 + side, cx1:cx1 + side].copy()
+        if crop.size == 0:
+            return img
+        cv2.rectangle(crop, (bx1 - cx1, by1 - cy1), (bx2 - cx1, by2 - cy1), col, 2)
+        inset = int(h * 0.45)
+        zoom = cv2.resize(crop, (inset, inset), interpolation=cv2.INTER_CUBIC)
+        pad = max(4, h // 150)
+        x0 = pad * 2 if cx > w / 2 else w - inset - 2 * pad          # opposite side of the object
+        y0 = h - inset - 2 * pad if cy < h / 2 else pad * 2
+        cv2.rectangle(img, (x0 - pad, y0 - pad), (x0 + inset + pad, y0 + inset + pad), (255, 255, 255), -1)
+        img[y0:y0 + inset, x0:x0 + inset] = zoom
+        txt = f"ZOOM x{inset / max(1, crop.shape[0]):.1f}"
+        fs = max(0.6, h / 800)
+        cv2.putText(img, txt, (x0 + 10, y0 + inset - 14), cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 0, 0), 5)
+        cv2.putText(img, txt, (x0 + 10, y0 + inset - 14), cv2.FONT_HERSHEY_SIMPLEX, fs, (255, 255, 255), 2)
+        # line from the object to the zoom view
+        cv2.line(img, (cx, cy), (x0 + inset // 2 if x0 > cx else x0 + inset, y0 if y0 > cy else y0 + inset), col, max(1, w // 1280))
+        return img
+    except Exception:          # never lose the snapshot because of the zoom view
+        log.exception("far snapshot zoom failed")
+        return frame
+
+
 class EventStore:
     def __init__(self):
         d = config.DATA_DIR
@@ -292,6 +342,7 @@ class EventStore:
                     extra["firstSeenToConfirmMs"] = item["firstSeenToConfirmMs"]   # tracker confirmation delay
                 if module == "vehicle":
                     extra["vehicleClass"] = VEHICLE_CATEGORY.get(label)
+                frame = far_snapshot(frame, original, item.get("box"), label, item.get("confidence"))
                 snap = self.save_snapshot(frame, camera, module, label, confidence=item.get("confidence"), event_id=event["id"],
                                           severity=acfg.get("severity") if want_alert else None, captured_at=captured_at, extra=extra,
                                           original=original)

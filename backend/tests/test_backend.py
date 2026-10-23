@@ -99,7 +99,15 @@ class ModuleTests(unittest.TestCase):
         plan = PersonVehiclePipeline.build_plan(None, module_config({}, "vehicle"), [])
         self.assertEqual(plan["coco"], [1, 2, 3, 5, 7])
         plan = PersonVehiclePipeline.build_plan(module_config({}, "human"), None, [])
-        self.assertEqual(plan["coco"], [0, 1, 3])          # 2-wheelers needed for the rider rule
+        # 2-wheelers needed for the rider rule; animals asked too (animal filter), never reported
+        self.assertEqual(plan["coco"], [0, 1, 3, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23])
+        self.assertTrue(plan["animals"])
+        self.assertIn(0, plan["farCoco"])
+        h = module_config({}, "human")
+        h["classes"].update(animalFilter=False, personFar=False)
+        plan = PersonVehiclePipeline.build_plan(h, None, [])
+        self.assertEqual(plan["coco"], [0, 1, 3])
+        self.assertEqual(plan["farCoco"], [])
         self.assertNotIn("2-Wheeler", plan["draw_labels"])  # but not drawn/reported without the vehicle module
 
 
@@ -1356,3 +1364,102 @@ class RknnNpuTests(unittest.TestCase):
                 rt.LIB_CANDIDATES[:] = saved
         finally:
             os.environ["AIV_RKNN_LIB"] = self.lib
+
+
+class FarZoomAnimalFilterTests(unittest.TestCase):
+    """Animal filter and far zoom (pipeline._pre_track / _far_tiles) and the far-detection snapshot."""
+
+    def _pipe(self):
+        from backend.detection.pipeline import PersonVehiclePipeline
+        p = PersonVehiclePipeline.__new__(PersonVehiclePipeline)
+        p.animal_suppressed = 0
+        return p
+
+    def _pred(self, rows):
+        import numpy as np
+        import torch
+        from ultralytics.engine.results import Results
+        r = Results(np.zeros((360, 640, 3), np.uint8), "x", {i: str(i) for i in range(80)},
+                    boxes=torch.tensor(rows, dtype=torch.float32).reshape(-1, 6))
+        return type("P", (), {"results": [r]})()
+
+    def test_animal_is_not_a_person(self):
+        p = self._pipe()
+        pred = self._pred([[100, 100, 200, 180, 0.45, 0],     # "person" on the dog
+                           [98, 102, 202, 182, 0.70, 16],     # dog
+                           [400, 50, 440, 200, 0.80, 0]])     # real person elsewhere
+        p._pre = {"far": None, "animals": True}
+        p._pre_track(pred)
+        cls = pred.results[0].boxes.cls.tolist()
+        self.assertEqual(cls, [0.0])                          # dog and the dog-"person" gone, real person kept
+        self.assertEqual(pred.results[0].boxes.xyxy.tolist()[0][0], 400.0)
+        self.assertEqual(p.animal_suppressed, 1)
+
+    def test_person_stronger_than_animal_is_kept(self):
+        p = self._pipe()
+        pred = self._pred([[100, 50, 160, 200, 0.90, 0], [110, 120, 170, 200, 0.40, 16]])   # person walking a dog
+        p._pre = {"far": None, "animals": True}
+        p._pre_track(pred)
+        self.assertEqual(pred.results[0].boxes.cls.tolist(), [0.0])
+
+    def test_far_boxes_join_before_the_tracker(self):
+        import numpy as np
+        p = self._pipe()
+        pred = self._pred([[300, 200, 360, 340, 0.8, 0]])
+        far = np.array([[302, 205, 358, 335, 0.6, 0],         # same person -> not added twice
+                        [50, 40, 56, 58, 0.5, 0],             # far person -> added
+                        [500, 30, 530, 45, 0.55, 2]], np.float32)   # far car -> added
+        p._pre = {"far": far, "animals": False}
+        p._pre_track(pred)
+        self.assertEqual(sorted(pred.results[0].boxes.cls.tolist()), [0.0, 0.0, 2.0])
+
+    def test_far_tiles_map_to_the_analysed_frame(self):
+        import numpy as np
+        import torch
+        from ultralytics.engine.results import Results
+        p = self._pipe()
+        calls = []
+
+        class FakeModel:
+            def predict(self, tile, **kw):
+                calls.append(tile.shape)
+                b = torch.tensor([[10, 20, 30, 60, 0.7, 0]], dtype=torch.float32)
+                return [Results(tile, "t", {0: "person"}, boxes=b)]
+        p.far_model, p.device, p.img_size = FakeModel(), None, 640
+        hd = np.zeros((1296, 2304, 3), np.uint8)
+        d = p._far_tiles(hd, (360, 640, 3), {"predict_conf": 0.35, "farCoco": [0]}, 640)
+        self.assertEqual(len(calls), 2)                         # 2 tiles over the top half
+        self.assertEqual(calls[0][0], 648)                      # top half of the HD frame
+        self.assertAlmostEqual(float(d[0][0]), 10 * 640 / 2304, places=3)   # tile 1 box in AI-frame pixels
+        self.assertEqual(len(d), 2)
+
+    def test_far_snapshot_has_hd_box_and_zoom(self):
+        import numpy as np
+        from backend.services.events import far_snapshot
+        small = np.zeros((360, 640, 3), np.uint8)
+        hd = np.random.default_rng(0).integers(0, 255, (1296, 2304, 3), dtype=np.uint8)
+        out = far_snapshot(small, hd, [0.10, 0.10, 0.12, 0.16], "Person", 0.5)
+        self.assertEqual(out.shape, hd.shape)                   # full-resolution picture
+        # object top-left -> zoom view bottom-right; the opposite corner is unchanged
+        self.assertFalse(np.array_equal(out[-500:-20, -500:-20], hd[-500:-20, -500:-20]))
+        self.assertTrue(np.array_equal(out[900:, :1000], hd[900:, :1000]))
+        big = far_snapshot(small, hd, [0.1, 0.1, 0.5, 0.9], "Person", 0.9)
+        self.assertIs(big, small)                               # near objects: unchanged
+
+    def test_existing_cameras_get_the_options_once(self):
+        import json
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            cams = {"cameras": [{"id": "C1", "detection": {"modules": {
+                "human": {"classes": {"person": True, "personFar": False}},
+                "vehicle": {"classes": {"bus": True}}}}}]}
+            Path(d, "cameras.json").write_text(json.dumps(cams))
+            with mock.patch.object(config, "DATA_DIR", Path(d)):
+                reg = CameraRegistry()
+                m = reg.get("C1")["detection"]["modules"]
+                self.assertTrue(m["human"]["classes"]["personFar"] and m["human"]["classes"]["animalFilter"])
+                self.assertTrue(m["vehicle"]["classes"]["vehicleFar"])
+                c = reg.cams.data["cameras"][0]
+                c["detection"]["modules"]["human"]["classes"]["personFar"] = False   # user switches it off
+                reg.cams.save()
+                self.assertFalse(CameraRegistry().get("C1")["detection"]["modules"]["human"]["classes"]["personFar"])

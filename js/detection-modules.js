@@ -117,14 +117,15 @@
       const hc = cfg.classes || {};
       body += '<div class="field"><span class="field-label">Classes (existing YOLOv8 + ByteTrack pipeline)</span><div class="row wrap" style="gap:16px">' +
         check('cls-person', 'Person', hc.person !== false) + check('cls-rider', 'Rider (person on a 2-wheeler)', hc.rider !== false) +
-        check('cls-personFar', 'Distant people (extra upscaled pass - slower)', !!hc.personFar) + '</div></div>';
+        check('cls-personFar', 'Far people (zoomed pass on the far half - slower)', hc.personFar !== false) +
+        check('cls-animalFilter', 'Ignore animals (not reported as people)', hc.animalFilter !== false) + '</div></div>';
       body += '<p class="field-hint">Counting of confirmed unique tracks is built into the pipeline. For live control, snapshots and alerts use the Human Detection page.</p>';
     } else if (modId === 'count') {
       body += '<p class="field-hint">People counting AI (person detector + people tracker). Each person is counted once while visible. Live counts, statistics, counting settings and occupancy alerts are on the Human Count page.</p>';
     } else if (modId === 'vehicle') {
       const vc = cfg.classes || {};
       body += '<div class="field"><span class="field-label">Vehicle classes (existing YOLOv8 + ByteTrack pipeline)</span><div class="row wrap" style="gap:16px">' +
-        [['twoWheeler', '2-Wheeler (bicycle, motorcycle)'], ['fourWheeler', '4-Wheeler (car)'], ['bus', 'Bus'], ['truck', 'Truck']].map(function (c) { return check('cls-' + c[0], c[1], vc[c[0]] !== false); }).join('') + '</div></div>';
+        [['twoWheeler', '2-Wheeler (bicycle, motorcycle)'], ['fourWheeler', '4-Wheeler (car)'], ['bus', 'Bus'], ['truck', 'Truck'], ['vehicleFar', 'Far / fast vehicles (zoomed pass on the far half - slower)']].map(function (c) { return check('cls-' + c[0], c[1], vc[c[0]] !== false); }).join('') + '</div></div>';
       body += '<p class="field-hint">Auto-rickshaws have no COCO class; the model usually reports them as 2- or 4-wheelers. Per-class thresholds, snapshots and alerts are on the Vehicle Detection page.</p>';
     } else if (modId === 'object') {
       body += '<p class="field-hint">Marked-object monitoring: draw a box around any object on the live picture of the <a href="#/detections/object">Object Monitoring</a> page; an alert is raised when it is <b>moved</b> or goes <b>missing</b>. It works from the object\'s appearance, so no class has to be chosen here. Detection zones are not used by this module.</p>';
@@ -198,7 +199,7 @@
     if (modId === 'helmet' && !cfg.detectHelmet && !cfg.detectMissing) e.general = 'Select at least one helmet class to detect.';
     if (modId === 'ppe' && !Object.keys(cfg.classes || {}).some(function (k) { return cfg.classes[k]; })) e.general = 'Select at least one required PPE item.';
     if (modId === 'fire' && !(cfg.classes ? (cfg.classes.fire || cfg.classes.smoke) : (cfg.fire || cfg.smoke))) e.general = 'Enable fire detection, smoke detection or both.';
-    if (modId === 'vehicle' && !Object.keys(cfg.classes || {}).some(function (k) { return cfg.classes[k]; })) e.general = 'Select at least one vehicle class.';
+    if (modId === 'vehicle' && !Object.keys(cfg.classes || {}).some(function (k) { return k !== 'vehicleFar' && cfg.classes[k]; })) e.general = 'Select at least one vehicle class.';
     if (modId === 'human' && !(cfg.classes && (cfg.classes.person || cfg.classes.rider))) e.general = 'Select Person and/or Rider.';
     if (modId === 'custom' && !cfg.modelId) e.modelId = 'Select a model from the backend registry.';
     const sc = cfg.schedule || {};

@@ -185,7 +185,7 @@ class CameraSession:
         """Open the main stream while it is needed, close it when it is not (it costs decoding CPU)."""
         active = any(not v["paused"] for v in self.modules.values())
         need = self._separate_ai_stream() and not self.stopping and (
-            self.main_viewers > 0 or (self.snapshot_source == "main" and active))
+            self.main_viewers > 0 or (self.snapshot_source == "main" and active) or self.far_zoom_on())
         vr = self.view_reader
         if need and vr is None and not self.view_opening and now >= self.view_retry_at:
             self.view_opening = True
@@ -209,6 +209,19 @@ class CameraSession:
             log.warning("camera %s: main stream not available for HD snapshots (%s) - retrying in 60 s", self.camera_id, e.message)
         finally:
             self.view_opening = False
+
+    def far_zoom_on(self):
+        return bool((self.plan or {}).get("farCoco")) and any(m in ("human", "vehicle") and not v["paused"] for m, v in self.modules.items())
+
+    def hd_frame(self):
+        """Newest main-stream frame for the far zoom (AI on a substream), or None = zoom into the AI frame."""
+        if not self._separate_ai_stream():
+            return None
+        vr = self.view_reader
+        if vr is None:
+            return None
+        _ok, _seq, frame, t = vr.read_latest()
+        return frame if frame is not None and time.time() - t <= 1.0 else None
 
     def hd_original(self):
         """Newest main-stream frame (copy) for snapshot originals, or None (same stream / not open / stale)."""
@@ -499,7 +512,8 @@ class CameraSession:
                     try:
                         annotated, dets, new, inf_ms = self.pipeline.process(
                             frame, self.plan, share_person_conf=self.counter.detect_conf if shared else None,
-                            sampled=self.pv_sampled or None, imgsz=self.pv_imgsz)
+                            sampled=self.pv_sampled or None, imgsz=self.pv_imgsz,
+                            hd=self.hd_frame() if (self.plan or {}).get("farCoco") else None)
                     except Exception as e:     # engine failure: stop processing, keep the stream, tell the UI
                         log.exception("pipeline failure on %s", self.camera_id)
                         for m in ("human", "vehicle"):
@@ -516,10 +530,11 @@ class CameraSession:
                         if sc is not None and sc.adaptive and any(d["module"] == m and d["inZone"] and not d["confirmed"] for d in dets):
                             sc.keepalive(now)
                     st = self.pipeline.last_stages
-                    for k in ("preprocess", "inference", "postprocess", "tracking"):
+                    for k in ("preprocess", "inference", "postprocess", "tracking", "farZoom"):
                         win["st_" + k] += st.get(k, 0.0)
+                    self.metrics["animalsNotReportedAsPerson"] = self.pipeline.animal_suppressed
                     win["st_detect_n"] += 1 if st else 0
-                    win["st_draw"] += max(0.0, inf_ms - sum(st.get(k, 0.0) for k in ("preprocess", "inference", "postprocess", "tracking")))
+                    win["st_draw"] += max(0.0, inf_ms - sum(st.get(k, 0.0) for k in ("preprocess", "inference", "postprocess", "tracking", "farZoom")))
                     counts = {"human": {}, "vehicle": {}}
                     for d in dets:
                         if d["inZone"] and d["module"] in active:
@@ -637,7 +652,7 @@ class CameraSession:
     def _new_window(t0=None):
         return {"t0": t0 or time.time(), "proc": 0, "inf": 0.0, "inf_last": None, "loop": 0.0, "age": 0.0, "n": 0,
                 "lat": 0.0, "lat_max": 0.0, "gate": 0.0, "shared": 0, "st_detect_n": 0, "st_preprocess": 0.0,
-                "st_inference": 0.0, "st_postprocess": 0.0, "st_tracking": 0.0, "st_draw": 0.0, "st_count": 0.0,
+                "st_inference": 0.0, "st_postprocess": 0.0, "st_tracking": 0.0, "st_farZoom": 0.0, "st_draw": 0.0, "st_count": 0.0,
                 "st_object": 0.0, "st_fire": 0.0, "st_events": 0.0, "st_encode": 0.0}
 
     def _update_rates(self, el, read0, w):
@@ -667,7 +682,7 @@ class CameraSession:
         stg = {"readerCpu": round(r.read_cpu_ms, 1) if r.read_cpu_ms is not None else None}
         if n:
             if dn:
-                for k in ("preprocess", "inference", "postprocess", "tracking"):
+                for k in ("preprocess", "inference", "postprocess", "tracking", "farZoom"):
                     stg[k] = round(w["st_" + k] / dn, 1)
                 stg["drawAndRules"] = round(w["st_draw"] / dn, 1)
             for k, key in (("count", "humanCount"), ("object", "objectLayer1"), ("fire", "fireHandOver"),

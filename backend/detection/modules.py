@@ -15,13 +15,14 @@ MODULES = {
     "human": {
         "id": "human", "name": "Human Detection",
         "labels": list(HUMAN_LABELS),
-        "classKeys": {"person": "Person", "rider": "Rider", "personFar": "Person (far)"},
+        # personFar / animalFilter are options, not classes (far zoom, animals not reported as people)
+        "classKeys": {"person": "Person", "rider": "Rider", "personFar": "Person (far)", "animalFilter": None},
         "eventType": {"Person": "person", "Rider": "rider", "Person (far)": "person"},
     },
     "vehicle": {
         "id": "vehicle", "name": "Vehicle Detection",
         "labels": list(VEHICLE_LABELS),
-        "classKeys": {"twoWheeler": "2-Wheeler", "fourWheeler": "4-Wheeler", "bus": "Bus", "truck": "Truck"},
+        "classKeys": {"twoWheeler": "2-Wheeler", "fourWheeler": "4-Wheeler", "bus": "Bus", "truck": "Truck", "vehicleFar": None},
         "eventType": {lbl: "vehicle" for lbl in VEHICLE_LABELS},
     },
     # Human Count: separate people-counting engine (backend/detection/human_count.py), same camera session
@@ -47,13 +48,16 @@ MODULES = {
     },
 }
 
+OPTION_KEYS = ("personFar", "vehicleFar", "animalFilter")     # switches stored with the classes, not classes
+
 # Defaults reproduce the original human_detect_yolo-2.py behaviour.
 DEFAULTS = {
     "human": {
         "enabled": False,
         "confidence": 0.35,                       # original CONF (predictor base threshold)
         "classConf": {"Person": 0.30},            # original CLASS_CONF_OVERRIDE[0]
-        "classes": {"person": True, "rider": True, "personFar": False},   # personFar = ENABLE_FAR_DETECTION
+        # personFar: zoomed tiles over the far half (pipeline FAR_ZOOM_*); animalFilter: animals never reported as Person
+        "classes": {"person": True, "rider": True, "personFar": True, "animalFilter": True},
         "zones": [],
         # original SAVE_SNAPSHOTS=True: one snapshot when each new Person/Rider is confirmed
         "snapshot": {"mode": "new_track", "labels": ["Person", "Rider"], "cooldownSec": 0},
@@ -64,7 +68,7 @@ DEFAULTS = {
         "enabled": False,
         "confidence": 0.35,
         "classConf": {"2-Wheeler": 0.35, "4-Wheeler": 0.35, "Bus": 0.55, "Truck": 0.55},
-        "classes": {"twoWheeler": True, "fourWheeler": True, "bus": True, "truck": True},
+        "classes": {"twoWheeler": True, "fourWheeler": True, "bus": True, "truck": True, "vehicleFar": True},
         "zones": [],
         # The original saved no vehicle snapshots; new_track + cooldown avoids flooding the disk.
         "snapshot": {"mode": "new_track", "labels": list(VEHICLE_LABELS), "cooldownSec": config.DEFAULT_SNAPSHOT_COOLDOWN_SEC},
@@ -370,7 +374,7 @@ def validate(module_id, cfg, camera_zones):
     unknown = [k for k in classes if k not in m["classKeys"]]
     if unknown:
         errs.append(f"unsupported classes for {module_id}: {', '.join(unknown)} (supported: {', '.join(m['classKeys'])})")
-    if cfg.get("enabled") and not any(classes.get(k, True) for k in m["classKeys"] if k != "personFar"):
+    if cfg.get("enabled") and not any(classes.get(k, True) for k in m["classKeys"] if k not in OPTION_KEYS):
         errs.append("select at least one class")
     zone_ids = {z.get("id") for z in camera_zones or []}
     bad = [z for z in cfg.get("zones") or [] if z not in zone_ids]

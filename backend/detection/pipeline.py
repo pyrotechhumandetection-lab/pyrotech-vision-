@@ -6,7 +6,9 @@ Preserved exactly from the original script:
   * per-class minimum confidence (CLASS_CONF_OVERRIDE) applied after the predictor's base conf
   * MIN_HITS_TO_CONFIRM = 2, VOTES_BEFORE_LOCKING = 5 (label voting per track id)
   * Rider = Person whose box centre lies inside / just above (RIDER_Y_MARGIN) a 2-Wheeler box
-  * optional far-person pass on an upscaled crop of the top region (ENABLE_FAR_DETECTION, default off)
+  * far people / vehicles: zoomed tiles over the top half of the full-resolution frame (personFar / vehicleFar,
+    on by default), joined to the normal pass before the tracker (replaces the original upscaled far-person pass)
+  * animal filter: animals are asked from the model too, so a dog / cow is not reported as a person (animalFilter)
   * same box colours and "<label> #<id> <conf>" annotation
 
 Changed for the web service (no change to how objects are detected):
@@ -28,6 +30,7 @@ Changed for fast-moving vehicles (accuracy rule kept):
     detections (e.g. a parked scooter scored 0.41 as "4-Wheeler") still need the original 5-vote majority.
 """
 import logging
+import os
 import time
 
 import cv2
@@ -57,10 +60,21 @@ VOTES_BEFORE_LOCKING = 5
 UNANIMOUS_VOTES_TO_LOCK = 3        # vehicle tracks only - see module docstring
 EARLY_LOCK_CONF_MARGIN = 0.10      # ... and only when those votes average >= class threshold + this margin
 RIDER_Y_MARGIN = 40
-FAR_REGION_FRACTION = 0.5
-FAR_UPSCALE = 2.0
-FAR_CONF = 0.25
-FAR_DEDUPE_IOU = 0.3
+
+# COCO animals: requested together with "person" so the model can say "dog" instead of a weak "person"
+# (animal filter, see _pre_track); they are never reported or tracked.
+ANIMAL_COCO_IDS = {14, 15, 16, 17, 18, 19, 20, 21, 22, 23}   # bird cat dog horse sheep cow elephant bear zebra giraffe
+ANIMAL_OVERLAP = 0.45            # person box overlapping an animal box this much (IoU, or 70 % of the person inside)
+ANIMAL_CONF_RATIO = 0.8          # ... and the animal at least 0.8 x the person's confidence -> the "person" is the animal
+# Far zoom (personFar / vehicleFar): the far (top) part of the FULL-RESOLUTION frame is cut into tiles and each tile
+# is analysed at the model's input size, i.e. far objects are seen about FAR_ZOOM_TILES x larger. The boxes join the
+# normal pass BEFORE the tracker, so far people / vehicles are tracked, confirmed and alerted like any other.
+# (.env: AIV_FAR_ZOOM_REGION, AIV_FAR_ZOOM_TILES, AIV_FAR_ZOOM_EVERY). Test frames with ~140 px tall people in a
+# 2304x1296 picture: the normal 640 px pass found 21 of 63, two zoom tiles 61.
+FAR_ZOOM_REGION = min(1.0, max(0.2, float(os.environ.get("AIV_FAR_ZOOM_REGION", "0.5"))))   # top half (far objects)
+FAR_ZOOM_TILES = min(4, max(1, int(os.environ.get("AIV_FAR_ZOOM_TILES", "2"))))   # side-by-side tiles, 2 = ~2x zoom
+FAR_ZOOM_EVERY = max(1, int(os.environ.get("AIV_FAR_ZOOM_EVERY", "2")))   # every 2nd analysed frame
+FAR_ZOOM_OVERLAP = 0.12          # tiles overlap so an object on the seam is whole in one of them
 
 HUMAN_LABELS = ("Person", "Rider", "Person (far)")
 LABEL_COLORS = {"Person": (0, 255, 0), "Rider": RIDER_COLOR, "Person (far)": FAR_COLOR,
@@ -180,6 +194,9 @@ class PersonVehiclePipeline:
         self.half = engine == "pytorch" and _cfg.use_half()
         self.nms_iou = _cfg.NMS_IOU
         self.far_model = None
+        self._pre = None             # far-zoom boxes / animal filter for the current model call (see _pre_track)
+        self._far_n = 0
+        self.model.callbacks["on_predict_postprocess_end"].insert(0, self._pre_track)
         self.last_stages = {}        # ms of the last frame: preprocess / inference / postprocess / tracking / gateWait
         self.shared_persons = None   # person detections of the last frame for Human Count (see process(share_person_conf))
         self._share = None           # active share request during one model call
@@ -253,6 +270,7 @@ class PersonVehiclePipeline:
         self.locked_label = {}
         self.confirmed_ids = {lbl: set() for lbl in HUMAN_LABELS + VEHICLE_LABELS}
         self.promoted_far_ids = set()
+        self.animal_suppressed = 0
 
     # ------------------------------------------------------------------ config
     @staticmethod
@@ -266,7 +284,7 @@ class PersonVehiclePipeline:
         base_confs = []
         draw_labels = set()
         zone_by_module = {}
-        far = False
+        far, far_v, animals = False, False, False
         if human_cfg:
             base = float(human_cfg.get("confidence", 0.35))
             base_confs.append(base)
@@ -279,9 +297,8 @@ class PersonVehiclePipeline:
                 key = lbl.lower()
                 if classes.get(key, True):
                     draw_labels.add(lbl)
-            far = bool(classes.get("personFar", False))
-            if far:
-                draw_labels.add("Person (far)")
+            far = bool(classes.get("personFar", True))
+            animals = bool(classes.get("animalFilter", True))
             cc = human_cfg.get("classConf", {})
             thresholds["Person"] = max(base, float(cc.get("Person", 0.30)))
             thresholds["Rider"] = thresholds["Person"]
@@ -293,6 +310,7 @@ class PersonVehiclePipeline:
             keymap = {"2-Wheeler": "twoWheeler", "4-Wheeler": "fourWheeler", "Bus": "bus", "Truck": "truck"}
             cc = vehicle_cfg.get("classConf", {})
             defaults = {"2-Wheeler": 0.35, "4-Wheeler": 0.35, "Bus": 0.55, "Truck": 0.55}
+            far_v = bool(classes.get("vehicleFar", True))
             for lbl, key in keymap.items():
                 if classes.get(key, True):
                     coco.update(LABEL_TO_COCO[lbl])
@@ -300,17 +318,27 @@ class PersonVehiclePipeline:
                 thresholds[lbl] = max(base, float(cc.get(lbl, defaults[lbl])))
             zone_by_module["vehicle"] = vehicle_cfg.get("zones") or []
         zones = {z["id"]: z for z in (camera_zones or []) if z.get("enabled", True)}
+        far_coco = set()
+        if far and PERSON_CLASS in coco:
+            far_coco.add(PERSON_CLASS)
+        if far_v:
+            far_coco.update(c for c in coco if c in VEHICLE_CLASS_MAP)
+        if animals and PERSON_CLASS in coco:
+            coco.update(ANIMAL_COCO_IDS)
+            if far_coco:
+                far_coco.update(ANIMAL_COCO_IDS)
         return {
+            "animals": animals and PERSON_CLASS in coco,
+            "farCoco": sorted(far_coco) if PERSON_CLASS in far_coco or any(c in VEHICLE_CLASS_MAP for c in far_coco) else [],
             "coco": sorted(coco),
             "predict_conf": min(base_confs) if base_confs else 0.35,
             "thresholds": thresholds,
             "draw_labels": draw_labels,
             "zones": {m: [zones[i] for i in ids if i in zones] for m, ids in zone_by_module.items()},
-            "far": far,
         }
 
     # ------------------------------------------------------------------ frame
-    def process(self, frame, plan, share_person_conf=None, sampled=None, imgsz=None):
+    def process(self, frame, plan, share_person_conf=None, sampled=None, imgsz=None, hd=None):
         """Run the original detection logic on one frame.
 
         sampled: {module: {"margin": m, "dedupeSec": d}} for modules analysed at an interval (one frame every
@@ -320,6 +348,7 @@ class PersonVehiclePipeline:
         within dedupeSec is not reported again (a parked car does not raise an alert every sample).
         Modules not listed keep the original track-based confirmation unchanged.
         imgsz: model input size for this pass (default: the pipeline's img_size).
+        hd: full-resolution frame of the same moment (main stream) for the far zoom; None = zoom into `frame`.
 
         share_person_conf: Human Count runs on the same camera and needs person boxes above this
         confidence - they are taken from this model pass (self.shared_persons, Nx5 xyxy+conf) instead of
@@ -352,6 +381,14 @@ class PersonVehiclePipeline:
             kwargs.update(fp16_kwargs())
         if self.nms_iou is not None:
             kwargs["iou"] = self.nms_iou
+        far_ms, far_boxes = 0.0, None
+        if plan.get("farCoco"):
+            self._far_n += 1
+            if self._far_n % FAR_ZOOM_EVERY == 1 or FAR_ZOOM_EVERY <= 1:
+                tf = time.perf_counter()
+                far_boxes = self._far_tiles(hd if hd is not None else frame, frame.shape, plan, kwargs.get("imgsz"))
+                far_ms = (time.perf_counter() - tf) * 1000.0
+        self._pre = {"far": far_boxes, "animals": plan.get("animals", False)}
         t0 = time.perf_counter()
         try:
             with gated() as slot:
@@ -360,11 +397,14 @@ class PersonVehiclePipeline:
                 t2 = time.perf_counter()
         finally:
             self._share = None
-        inference_ms = (time.perf_counter() - t0) * 1000.0 - slot.wait_ms
+            self._pre = None
+        inference_ms = (time.perf_counter() - t0) * 1000.0 - slot.wait_ms + far_ms
         sp = getattr(results[0], "speed", None) or {}
         pre, inf, post = (float(sp.get(k) or 0.0) for k in ("preprocess", "inference", "postprocess"))
         self.last_stages = {"preprocess": pre, "inference": inf, "postprocess": post,
                             "tracking": max(0.0, (t2 - t1) * 1000.0 - pre - inf - post), "gateWait": slot.wait_ms}
+        if far_ms:
+            self.last_stages["farZoom"] = far_ms
 
         thresholds = plan["thresholds"]
         person_boxes, two_wheeler_boxes, all_boxes = [], [], []
@@ -468,9 +508,6 @@ class PersonVehiclePipeline:
                                "box": [round(x1 / w, 4), round(y1 / h, 4), round(x2 / w, 4), round(y2 / h, 4)],
                                "confirmed": confirmed, "inZone": in_zone})
 
-        if plan["far"]:
-            inference_ms += self._far_pass(frame, person_boxes, plan, new_confirmations, detections)
-
         return frame, detections, new_confirmations, inference_ms
 
     # ------------------------------------------------------------ shared person pass
@@ -478,7 +515,8 @@ class PersonVehiclePipeline:
         """Runs after NMS and BEFORE the tracker callback that model.track() registers."""
         if self._share_cb_installed:
             return
-        self.model.callbacks["on_predict_postprocess_end"].insert(0, self._split_shared)
+        cbs = self.model.callbacks["on_predict_postprocess_end"]
+        cbs.insert(cbs.index(self._pre_track) + 1 if self._pre_track in cbs else 0, self._split_shared)
         self._share_cb_installed = True
 
     def _split_shared(self, predictor):
@@ -500,42 +538,90 @@ class PersonVehiclePipeline:
         if not keep.all():
             predictor.results[0] = res[np.flatnonzero(keep)]
 
-    def _far_pass(self, frame, person_boxes, plan, new_confirmations, detections):
-        """Original 'Fix #1' far-person pass (upscaled top-region crop, person only)."""
+    # ------------------------------------------------------------ far zoom + animal filter
+    def _far_tiles(self, src, ai_shape, plan, imgsz):
+        """Tiles over the top FAR_ZOOM_REGION of `src` (full resolution) -> boxes (N x 6: x1 y1 x2 y2 conf cls) in
+        the coordinates of the analysed frame (ai_shape), merged across tiles (class-aware NMS)."""
         from ultralytics import YOLO
-        if self.far_model is None:
+        if self.far_model is None:          # own model instance: model.track() keeps its tracker on self.model
             self.far_model = YOLO(self.model_path, task="detect")
-        h, w = frame.shape[:2]
-        crop_h = int(h * FAR_REGION_FRACTION)
-        far_resized = cv2.resize(frame[0:crop_h, 0:w], None, fx=FAR_UPSCALE, fy=FAR_UPSCALE)
-        with gated():
-            t0 = time.perf_counter()
-            far_results = self.far_model.track(far_resized, persist=True, tracker=self.tracker_config,
-                                               imgsz=self.img_size, conf=FAR_CONF, classes=[PERSON_CLASS], verbose=False)
-            ms = (time.perf_counter() - t0) * 1000.0
-        main_boxes = [(x1, y1, x2, y2) for _, x1, y1, x2, y2 in person_boxes]
-        for box in far_results[0].boxes:
-            if box.id is None:
+        sh, sw = src.shape[:2]
+        ah, aw = ai_shape[:2]
+        rh = int(sh * FAR_ZOOM_REGION)
+        n = max(1, FAR_ZOOM_TILES)
+        tw = int(sw / n * (1 + FAR_ZOOM_OVERLAP)) if n > 1 else sw
+        step = (sw - tw) / (n - 1) if n > 1 else 0
+        out = []
+        kw = dict(imgsz=int(imgsz or self.img_size), conf=plan["predict_conf"], classes=plan["farCoco"], verbose=False)
+        if self.device is not None:
+            kw["device"] = self.device
+        for i in range(n):
+            x0 = int(round(i * step))
+            tile = src[0:rh, x0:x0 + tw]
+            with gated():
+                r = self.far_model.predict(tile, **kw)[0]
+            if r.boxes is None or not len(r.boxes):
                 continue
-            far_id = f"far-{int(box.id[0])}"
-            if far_id in self.promoted_far_ids:
-                continue
-            conf = float(box.conf[0])
-            fx1, fy1, fx2, fy2 = box.xyxy[0].tolist()
-            ox1, oy1, ox2, oy2 = int(fx1 / FAR_UPSCALE), int(fy1 / FAR_UPSCALE), int(fx2 / FAR_UPSCALE), int(fy2 / FAR_UPSCALE)
-            if any(iou((ox1, oy1, ox2, oy2), mb) > FAR_DEDUPE_IOU for mb in main_boxes):
-                self.confirmed_ids["Person (far)"].discard(far_id)
-                self.promoted_far_ids.add(far_id)
-                continue
-            self.hit_counts[far_id] = self.hit_counts.get(far_id, 0) + 1
-            if self.hit_counts[far_id] >= MIN_HITS_TO_CONFIRM and far_id not in self.confirmed_ids["Person (far)"]:
-                self.confirmed_ids["Person (far)"].add(far_id)
-                new_confirmations.append({"trackId": far_id, "label": "Person (far)", "module": "human", "confidence": round(conf, 3), "zone": None})
-            cv2.rectangle(frame, (ox1, oy1), (ox2, oy2), FAR_COLOR, 2)
-            cv2.putText(frame, f"Person(far) {conf:.2f}", (ox1, max(oy1 - 8, 14)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, FAR_COLOR, 2)
-            detections.append({"trackId": far_id, "label": "Person (far)", "module": "human", "confidence": round(conf, 3),
-                               "box": [round(ox1 / w, 4), round(oy1 / h, 4), round(ox2 / w, 4), round(oy2 / h, 4)], "confirmed": True, "inZone": True})
-        return ms
+            d = r.boxes.data.cpu().numpy().astype(np.float32)[:, :6]
+            d[:, [0, 2]] = (d[:, [0, 2]] + x0) * (aw / sw)
+            d[:, [1, 3]] = d[:, [1, 3]] * (ah / sh)
+            out.append(d)
+        if not out:
+            return np.zeros((0, 6), np.float32)
+        d = np.concatenate(out)
+        keep = []
+        for c in np.unique(d[:, 5]):
+            idx = np.flatnonzero(d[:, 5] == c)
+            boxes = [[float(b[0]), float(b[1]), float(b[2] - b[0]), float(b[3] - b[1])] for b in d[idx]]
+            k = cv2.dnn.NMSBoxes(boxes, d[idx, 4].astype(float).tolist(), 0.0, 0.5)
+            keep += [int(idx[j]) for j in np.array(k).reshape(-1)]
+        return d[sorted(keep)]
+
+    def _pre_track(self, predictor):
+        """After NMS, before the tracker: add the far-zoom boxes the normal pass did not find, then drop "person"
+        boxes that are really animals (and the animal boxes themselves - animals are never reported)."""
+        req = self._pre
+        if req is None or (req["far"] is None and not req["animals"]):
+            return
+        import torch
+        res = predictor.results[0]
+        data = res.boxes.data.cpu().numpy().astype(np.float32) if res.boxes is not None and len(res.boxes) else np.zeros((0, 6), np.float32)
+        data = data[:, :6]
+        changed = False
+        far = req["far"]
+        if far is not None and len(far):
+            add = []
+            for b in far:
+                cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+                dup = False
+                for m in data:
+                    same = int(m[5]) == int(b[5]) or (int(m[5]) in VEHICLE_CLASS_MAP and int(b[5]) in VEHICLE_CLASS_MAP)
+                    if same and (iou(tuple(b[:4]), tuple(m[:4])) > 0.3 or (m[0] <= cx <= m[2] and m[1] <= cy <= m[3])):
+                        dup = True
+                        break
+                if not dup:
+                    add.append(b)
+            if add:
+                data = np.concatenate([data, np.array(add, np.float32)])
+                changed = True
+        if req["animals"] and len(data):
+            cls = data[:, 5].astype(int)
+            animal = np.isin(cls, list(ANIMAL_COCO_IDS))
+            if animal.any():
+                drop = animal.copy()
+                for i in np.flatnonzero(cls == PERSON_CLASS):
+                    p = data[i]
+                    pa = max(1e-6, (p[2] - p[0]) * (p[3] - p[1]))
+                    for a in data[animal]:
+                        ix = max(0.0, min(p[2], a[2]) - max(p[0], a[0])) * max(0.0, min(p[3], a[3]) - max(p[1], a[1]))
+                        if (iou(tuple(p[:4]), tuple(a[:4])) >= ANIMAL_OVERLAP or ix / pa >= 0.7) and a[4] >= ANIMAL_CONF_RATIO * p[4]:
+                            drop[i] = True
+                            self.animal_suppressed += 1
+                            break
+                data = data[~drop]
+                changed = True
+        if changed:
+            res.update(boxes=torch.from_numpy(np.ascontiguousarray(data)))
 
     def unique_counts(self):
         return {label: len(ids) for label, ids in self.confirmed_ids.items()}

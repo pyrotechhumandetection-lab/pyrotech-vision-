@@ -10,11 +10,15 @@
   const ui = window.AV.ui, icon = window.AV.icon, state = window.AV.state, api = window.AV.api, cat = window.AV.catalog;
   const esc = ui.esc;
 
+  const OPTION_KEYS = ['personFar', 'vehicleFar', 'animalFilter'];   // switches stored with the classes, not classes
   const MOD = {
     vehicle: { id: 'vehicle', title: 'Vehicle Detection', icon: 'car', noun: 'vehicle',
-      classes: [['twoWheeler', '2-Wheeler', 'bicycle + motorcycle'], ['fourWheeler', '4-Wheeler', 'car'], ['bus', 'Bus', ''], ['truck', 'Truck', '']] },
+      classes: [['twoWheeler', '2-Wheeler', 'bicycle + motorcycle'], ['fourWheeler', '4-Wheeler', 'car'], ['bus', 'Bus', ''], ['truck', 'Truck', ''],
+        ['vehicleFar', 'Far / fast vehicles', 'zoomed pass on the far half of the full-resolution picture, slower']] },
     human: { id: 'human', title: 'Human Detection', icon: 'user', noun: 'person',
-      classes: [['person', 'Person', ''], ['rider', 'Rider', 'person on a 2-wheeler'], ['personFar', 'Person (far)', 'extra upscaled pass, slower']] },
+      classes: [['person', 'Person', ''], ['rider', 'Rider', 'person on a 2-wheeler'],
+        ['personFar', 'Far people', 'zoomed pass on the far half of the full-resolution picture, slower'],
+        ['animalFilter', 'Ignore animals', 'dogs, cows, cats ... are not reported as people']] },
     // Fire & Smoke: its own model + smoke rules on the same camera session (backend/detection/fire_smoke.py)
     fire: { id: 'fire', title: 'Fire & Smoke Detection', icon: 'flame', noun: 'fire / smoke',
       sub: 'Fire & smoke model firedetect-11s · smoke verifier (smoke / cloud / dust) · smoke rules · alert after M of the last K analysed frames',
@@ -384,9 +388,9 @@
       '<div class="field"><label for="dl-conf">Base confidence (predictor)</label><div class="range-row"><input class="range" type="range" id="dl-conf" name="confidence" min="0.10" max="0.95" step="0.01" value="' + Number(c.confidence).toFixed(2) + '" data-range-out="dl-conf-out"><output class="range-val" id="dl-conf-out"></output></div>' +
       '<span class="field-hint">Original value 0.35. Each class must also pass its own minimum below.</span></div>' +
       '<div class="field"><span class="field-label">Classes &amp; per-class minimum confidence</span><div class="dl-classes">' + mod.classes.map(function (x) {
-        const on = (c.classes || {})[x[0]] !== false && !(x[0] === 'personFar' && !(c.classes || {}).personFar);
+        const on = (c.classes || {})[x[0]] !== false;      // options (far zoom, animal filter) are on unless switched off
         return '<label class="check"><input type="checkbox" name="cls-' + x[0] + '" ' + (on ? 'checked' : '') + '><span>' + esc(x[1]) + (x[2] ? ' <span class="dim">(' + esc(x[2]) + ')</span>' : '') + '</span></label>' +
-          (ccEditable.indexOf(x[1]) >= 0 ? num('cc-' + x[1], (c.classConf || {})[x[1]] != null ? c.classConf[x[1]] : '', 0.05, 0.99, 0.01) : '<span class="dim" style="font-size:12px">' + (x[1] === 'Rider' ? 'uses Person' : 'fixed 0.25') + '</span>');
+          (ccEditable.indexOf(x[1]) >= 0 ? num('cc-' + x[1], (c.classConf || {})[x[1]] != null ? c.classConf[x[1]] : '', 0.05, 0.99, 0.01) : '<span class="dim" style="font-size:12px">' + (x[1] === 'Rider' ? 'uses Person' : (OPTION_KEYS.indexOf(x[0]) >= 0 ? 'option' : 'fixed 0.25')) + '</span>');
       }).join('') + '</div></div>' +
       '<div class="field"><span class="field-label">Detection zones</span>' + (zones.length ? '<div class="row wrap" style="gap:12px">' + zones.map(function (z) {
         return '<label class="check"><input type="checkbox" name="zone" value="' + esc(z.id) + '" ' + ((c.zones || []).indexOf(z.id) >= 0 ? 'checked' : '') + (z.enabled === false ? ' disabled' : '') + '><span><span class="dot" style="color:' + esc(z.color || '#3478FF') + '"></span> ' + esc(z.name) + '</span></label>';
@@ -512,7 +516,7 @@
 
   async function saveSettings(patch, btn, full) {
     const err = root.querySelector('#dl-form-err');
-    if (!full && patch.classes && !Object.keys(patch.classes).some(function (k) { return k !== 'personFar' && patch.classes[k]; })) { if (err) err.textContent = 'Select at least one class.'; return; }
+    if (!full && patch.classes && !Object.keys(patch.classes).some(function (k) { return OPTION_KEYS.indexOf(k) < 0 && patch.classes[k]; })) { if (err) err.textContent = 'Select at least one class.'; return; }
     if (btn) ui.setBusy(btn, true, 'Applying…');
     try {
       const r = await api.detection.saveConfig(mod.id, camId, patch);
