@@ -1552,6 +1552,10 @@ for c in cams:
     print(f"  {str(c.get('cameraId')):16} engine {c.get('engine') or '-':9} device {c.get('device') or '-':15} "
           f"{c.get('precision') or '':5} input {c.get('imgSize') or '-':4} AI {fps if fps is not None else '-'} fps, "
           f"camera {c.get('cameraFps') if c.get('cameraFps') is not None else '-'} fps")
+    stg = {k: v for k, v in (c.get("stageMs") or {}).items() if v}
+    if stg:   # where the time of one analysed frame goes (ms, last second)
+        print("      time per analysed frame: " + ", ".join(f"{k} {v}" for k, v in stg.items())
+              + f"  | loop {c.get('loopMs')} ms, frame age {c.get('frameAgeMs')} ms, live view {c.get('displayFps')} fps")
     for mod, sc in sorted((c.get("schedule") or {}).items()):
         st = sc.get("state")
         print(f"      {mod:8} {sc.get('mode') or '-'}{' ' + st.upper() if st else '':8} AI {sc.get('aiFps') if sc.get('aiFps') is not None else '-'} fps "
