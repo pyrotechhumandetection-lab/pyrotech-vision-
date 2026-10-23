@@ -1429,9 +1429,19 @@ class FarZoomAnimalFilterTests(unittest.TestCase):
         hd = np.zeros((1296, 2304, 3), np.uint8)
         d = p._far_tiles(hd, (360, 640, 3), {"predict_conf": 0.35, "farCoco": [0]}, 640)
         self.assertEqual(len(calls), 2)                         # 2 tiles over the top half
-        self.assertEqual(calls[0][0], 648)                      # top half of the HD frame
+        self.assertEqual(calls[0][:2], (648, 1152))             # half height x half width = exactly 2x zoom
         self.assertAlmostEqual(float(d[0][0]), 10 * 640 / 2304, places=3)   # tile 1 box in AI-frame pixels
         self.assertEqual(len(d), 2)
+
+    def test_far_tile_rects_exact_2x(self):
+        from backend.detection.pipeline import far_tile_rects
+        self.assertEqual(far_tile_rects(1920, 1080, 2.0, 0.5, False), [(0, 0, 960, 540), (960, 0, 1920, 540)])
+        seam = far_tile_rects(1920, 1080, 2.0, 0.5, True)
+        self.assertIn((480, 0, 1440, 540), seam)
+        self.assertEqual(len(seam), 3)
+        r3 = far_tile_rects(1920, 1080, 3.0, 0.5, False)        # 3x: 640x360 tiles, 3 across, 2 rows cover 540
+        self.assertEqual(len(r3), 6)
+        self.assertTrue(all(x1 - x0 == 640 and y1 - y0 == 360 for x0, y0, x1, y1 in r3))
 
     def test_far_snapshot_has_hd_box_and_zoom(self):
         import numpy as np

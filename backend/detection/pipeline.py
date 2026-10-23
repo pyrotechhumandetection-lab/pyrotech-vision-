@@ -67,14 +67,15 @@ ANIMAL_COCO_IDS = {14, 15, 16, 17, 18, 19, 20, 21, 22, 23}   # bird cat dog hors
 ANIMAL_OVERLAP = 0.45            # person box overlapping an animal box this much (IoU, or 70 % of the person inside)
 ANIMAL_CONF_RATIO = 0.8          # ... and the animal at least 0.8 x the person's confidence -> the "person" is the animal
 # Far zoom (personFar / vehicleFar): the far (top) part of the FULL-RESOLUTION frame is cut into tiles and each tile
-# is analysed at the model's input size, i.e. far objects are seen about FAR_ZOOM_TILES x larger. The boxes join the
-# normal pass BEFORE the tracker, so far people / vehicles are tracked, confirmed and alerted like any other.
-# (.env: AIV_FAR_ZOOM_REGION, AIV_FAR_ZOOM_TILES, AIV_FAR_ZOOM_EVERY). Test frames with ~140 px tall people in a
-# 2304x1296 picture: the normal 640 px pass found 21 of 63, two zoom tiles 61.
+# is analysed at the model's input size. Each tile is 1/FAR_ZOOM of the picture's width AND height (same shape as the
+# picture), so far objects are seen exactly FAR_ZOOM x larger than in the normal pass. The boxes join the normal pass
+# BEFORE the tracker, so far people / vehicles are tracked, confirmed and alerted like any other.
+# (.env: AIV_FAR_ZOOM, AIV_FAR_ZOOM_REGION, AIV_FAR_ZOOM_EVERY, AIV_FAR_ZOOM_SEAM). Test frames with ~140 px tall
+# people in a 2304x1296 picture: the normal 640 px pass found 21 of 63, two zoom tiles 61.
+FAR_ZOOM = min(4.0, max(1.5, float(os.environ.get("AIV_FAR_ZOOM", "2"))))          # 2x: tiles of half width x half height
 FAR_ZOOM_REGION = min(1.0, max(0.2, float(os.environ.get("AIV_FAR_ZOOM_REGION", "0.5"))))   # top half (far objects)
-FAR_ZOOM_TILES = min(4, max(1, int(os.environ.get("AIV_FAR_ZOOM_TILES", "2"))))   # side-by-side tiles, 2 = ~2x zoom
-FAR_ZOOM_EVERY = max(1, int(os.environ.get("AIV_FAR_ZOOM_EVERY", "2")))   # every 2nd analysed frame
-FAR_ZOOM_OVERLAP = 0.12          # tiles overlap so an object on the seam is whole in one of them
+FAR_ZOOM_EVERY = max(1, int(os.environ.get("AIV_FAR_ZOOM_EVERY", "1")))   # always on: every analysed frame
+FAR_ZOOM_SEAM = os.environ.get("AIV_FAR_ZOOM_SEAM", "0") == "1"   # extra tile centred on each seam (+1 inference)
 
 HUMAN_LABELS = ("Person", "Rider", "Person (far)")
 LABEL_COLORS = {"Person": (0, 255, 0), "Rider": RIDER_COLOR, "Person (far)": FAR_COLOR,
@@ -124,6 +125,22 @@ def fp16_kwargs():
 
 def label_module(label):
     return "human" if label in HUMAN_LABELS else "vehicle"
+
+
+def far_tile_rects(sw, sh, zoom=None, region=None, seam=None):
+    """(x0, y0, x1, y1) tiles over the top `region` of a sw x sh picture, each sw/zoom x sh/zoom (same shape as the
+    picture -> exactly `zoom` x magnification at the model input). 2x over the top half = 2 tiles side by side."""
+    zoom = zoom or FAR_ZOOM
+    region = FAR_ZOOM_REGION if region is None else region
+    seam = FAR_ZOOM_SEAM if seam is None else seam
+    tw, th = int(round(sw / zoom)), int(round(sh / zoom))
+    rh = max(th, int(round(sh * region)))
+    cols, rows = int(np.ceil(sw / tw - 1e-6)), int(np.ceil(rh / th - 1e-6))
+    xs = [int(round(i * (sw - tw) / (cols - 1))) if cols > 1 else 0 for i in range(cols)]
+    if seam and cols > 1:
+        xs += [int(round((xs[i] + xs[i + 1]) / 2)) for i in range(cols - 1)]
+    ys = [int(round(j * (rh - th) / (rows - 1))) if rows > 1 else 0 for j in range(rows)]
+    return [(x, y, x + tw, y + th) for y in ys for x in sorted(xs)]
 
 
 def box_center(x1, y1, x2, y2):
@@ -547,24 +564,19 @@ class PersonVehiclePipeline:
             self.far_model = YOLO(self.model_path, task="detect")
         sh, sw = src.shape[:2]
         ah, aw = ai_shape[:2]
-        rh = int(sh * FAR_ZOOM_REGION)
-        n = max(1, FAR_ZOOM_TILES)
-        tw = int(sw / n * (1 + FAR_ZOOM_OVERLAP)) if n > 1 else sw
-        step = (sw - tw) / (n - 1) if n > 1 else 0
         out = []
         kw = dict(imgsz=int(imgsz or self.img_size), conf=plan["predict_conf"], classes=plan["farCoco"], verbose=False)
         if self.device is not None:
             kw["device"] = self.device
-        for i in range(n):
-            x0 = int(round(i * step))
-            tile = src[0:rh, x0:x0 + tw]
+        for x0, y0, x1, y1 in far_tile_rects(sw, sh):
+            tile = src[y0:y1, x0:x1]
             with gated():
                 r = self.far_model.predict(tile, **kw)[0]
             if r.boxes is None or not len(r.boxes):
                 continue
             d = r.boxes.data.cpu().numpy().astype(np.float32)[:, :6]
             d[:, [0, 2]] = (d[:, [0, 2]] + x0) * (aw / sw)
-            d[:, [1, 3]] = d[:, [1, 3]] * (ah / sh)
+            d[:, [1, 3]] = (d[:, [1, 3]] + y0) * (ah / sh)
             out.append(d)
         if not out:
             return np.zeros((0, 6), np.float32)
