@@ -100,6 +100,13 @@ class App:
             from backend.detection import fire_smoke
             model_file, model_ok = fire_smoke.WEIGHTS.name, fire_smoke.WEIGHTS.is_file()
             tracking = "Alert after M of the last K analysed frames per class; weak smoke needs fire nearby or rising/growing smoke"
+        elif module_id == "pcross":
+            tracking = "ByteTrack ids + line rules: one count per person and crossing (dead band, cooldown, id hand-over, duplicate filter)"
+        elif module_id == "twhelmet":
+            from backend.detection.crossing import judge
+            js = judge.status()
+            tracking = ("ByteTrack ids on two-wheelers; helmet judged per rider over several frames. Helmet model: "
+                        + (js["model"] or "none") + (" (custom)" if js["custom"] else " - NOT validated on motorcycle helmets; unsure = no alert"))
         elif module_id == "object":
             from backend.detection.object_monitor import engine as obj_engine
             model_file = DEFAULTS["object"]["detector"]["model"]
@@ -523,6 +530,9 @@ def mod_config_get(app, q, body, mod):
             "defaults": DEFAULTS[mod], "zones": [{"id": z.get("id"), "name": z.get("name"), "color": z.get("color"), "enabled": z.get("enabled", True)} for z in cam.get("zones") or []],
             "liveApply": ["confidence", "classConf", "classes", "zones", "snapshot", "alert"] + (["counting"] if mod == "count" else [])
             + (["iou", "imgSize", "everyNFrames", "removeGreenOverlay", "verifier", "alertRule", "smokeRules"] if mod == "fire" else [])
+            + (["line", "direction", "targetFps", "refPoint", "minTrackFrames", "hysteresis", "recrossSec", "handoverSec", "dedupeSec", "minBoxFrac",
+                "excludeRiders", "includeBicycles", "helmetMinConf", "noHelmetMinConf", "minMissingVotes", "minHelmetVotes", "judgeEvery",
+                "maxJudgePerFrame"] if mod in ("pcross", "twhelmet") else [])
             + (["monitor", "detector.conf", "detector.nameConf", "detector.nameConfFull", "detector.intervalS", "detector.showLabels"] if mod == "object" else []),
             "restartRequired": ["detector.model", "detector.imgsz", "detector.iou", "detector.tiles", "detector.enabled", "verifier"] if mod == "object" else []}
 

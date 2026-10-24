@@ -3,7 +3,7 @@
   'use strict';
   const ui = window.AV.ui, icon = window.AV.icon, state = window.AV.state, api = window.AV.api, cat = window.AV.catalog, media = window.AV.media;
   const esc = ui.esc;
-  const DASH_MODULES = ['helmet', 'ppe', 'fire', 'human', 'vehicle', 'count', 'object', 'custom'];
+  const DASH_MODULES = ['helmet', 'ppe', 'fire', 'human', 'vehicle', 'count', 'twhelmet', 'pcross', 'object', 'custom'];
 
   let root = null, unsub = [], metricsTimer = null, fpsHistory = [], detTab = 'all', detPage = 0, alertSev = 'all';
 
@@ -195,7 +195,7 @@
   // ---------- recent detections ----------
   function renderDets() {
     const el = root.querySelector('#dash-dets');
-    const tabs = [['all', 'All'], ['helmet', 'Helmet'], ['ppe', 'PPE'], ['fire', 'Fire & Smoke'], ['human', 'Human'], ['vehicle', 'Vehicle'], ['object', 'Object']];
+    const tabs = [['all', 'All'], ['helmet', 'Helmet'], ['ppe', 'PPE'], ['fire', 'Fire & Smoke'], ['human', 'Human'], ['vehicle', 'Vehicle'], ['twhelmet', 'Two-wheeler helmet'], ['pcross', 'Line crossing'], ['object', 'Object']];
     let list = state.detections();
     if (detTab !== 'all') list = list.filter(function (d) { return ui.eventType(d.type).module === detTab; });
     const per = 5, pages = Math.max(1, Math.ceil(list.length / per));

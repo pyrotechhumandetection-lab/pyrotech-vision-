@@ -254,6 +254,8 @@
     router.register('/detections/fire', Object.assign({}, P.detectionLive, { title: 'Fire & Smoke Detection', render: function (c) { return P.detectionLive.render(c, { module: 'fire' }); } }));
     router.register('/detections/object', P.objectMonitor);
     router.register('/detections/ppe', Object.assign({}, P.detectionLive, { title: 'PPE Detection', render: function (c) { return P.detectionLive.render(c, { module: 'ppe' }); } }));
+    router.register('/detections/twhelmet', Object.assign({}, P.detectionLive, { title: 'Two-Wheeler Helmet (Line)', render: function (c) { return P.detectionLive.render(c, { module: 'twhelmet' }); } }));
+    router.register('/detections/pcross', Object.assign({}, P.detectionLive, { title: 'Person Line Crossing & Counting', render: function (c) { return P.detectionLive.render(c, { module: 'pcross' }); } }));
     router.register('/detections/human', Object.assign({}, P.detectionLive, { title: 'Human Detection', render: function (c) { return P.detectionLive.render(c, { module: 'human' }); } }));
     router.register('/detections/:module', P.detections);
     router.register('/alerts', P.alerts);

@@ -18,6 +18,10 @@
       desc: 'Detect and track 2-wheelers, 4-wheelers, buses and trucks.', classes: ['2-Wheeler', '4-Wheeler', 'Bus', 'Truck'], live: true },
     { id: 'count', name: 'Human Count', long: 'Human Count', icon: 'users', color: '#13D99A',
       desc: 'Count people live; each person is counted once.', classes: ['Person'], live: true },
+    { id: 'twhelmet', name: 'Two-Wheeler Helmet (Line)', long: 'Two-Wheeler Helmet Detection with Line Crossing', icon: 'helmet', color: '#FFB547',
+      desc: 'Draw a line; when a motorcycle / scooter crosses it, check its rider for a helmet.', classes: ['Helmet compliant', 'Helmet missing', 'Helmet unverified'], live: true },
+    { id: 'pcross', name: 'Person Line Crossing', long: 'Person Line Crossing & Counting', icon: 'users', color: '#13D99A',
+      desc: 'Draw a line; people crossing IN and OUT are tracked and counted once.', classes: ['Person IN', 'Person OUT'], live: true },
     { id: 'object', name: 'Object Monitoring', long: 'Object Monitoring', icon: 'box', color: '#2BB8FF',
       desc: 'Mark objects on the live picture; alert when one is moved or missing.', classes: ['Moved', 'Missing'], live: true },
     { id: 'custom', name: 'Custom Model', long: 'Custom AI Model', icon: 'model', color: '#B07CFF',
@@ -31,6 +35,11 @@
     ppe_missing:    { label: 'PPE missing',      module: 'ppe',    severity: 'high',     tone: 'danger' },
     ppe_vest_color: { label: 'Vest wrong colour', module: 'ppe',   severity: 'medium',   tone: 'warning' },
     ppe_review:     { label: 'PPE needs review', module: 'ppe',    severity: 'low',      tone: 'info' },
+    twhelmet_compliant: { label: 'Two-wheeler helmet compliant', module: 'twhelmet', severity: 'low', tone: 'success' },
+    twhelmet_missing:   { label: 'Two-wheeler helmet missing',   module: 'twhelmet', severity: 'high', tone: 'danger' },
+    twhelmet_unverified:{ label: 'Two-wheeler helmet not verified', module: 'twhelmet', severity: 'low', tone: 'warning' },
+    line_cross_in:  { label: 'Person crossed line (IN)',  module: 'pcross', severity: 'low', tone: 'info' },
+    line_cross_out: { label: 'Person crossed line (OUT)', module: 'pcross', severity: 'low', tone: 'info' },
     fire:           { label: 'Fire detected',    module: 'fire',   severity: 'critical', tone: 'critical' },
     smoke:          { label: 'Smoke detected',   module: 'fire',   severity: 'high',     tone: 'danger' },
     person:         { label: 'Person detected',  module: 'human',  severity: 'low',      tone: 'info' },
@@ -75,6 +84,9 @@
         // Human Count mirrors the backend defaults (backend/detection/modules.py)
         count: { enabled: false, confidence: 0.40, classConf: { Person: 0.40 }, classes: { person: true }, counting: { minFrames: 3, keepLostSec: 2.0 }, zones: [] },
         object: { enabled: false, confidence: 0.15, zones: [] },
+        // line-crossing modules mirror the backend defaults (backend/detection/modules.py); the line is drawn on their pages
+        twhelmet: { enabled: false, confidence: 0.35 },
+        pcross: { enabled: false, confidence: 0.35 },
         custom: { enabled: false, confidence: 0.5, modelId: '', zones: [] }
       }
     };

@@ -122,6 +122,8 @@
       body += '<div class="field"><span class="field-label">Vehicle classes (existing YOLOv8 + ByteTrack pipeline)</span><div class="row wrap" style="gap:16px">' +
         [['twoWheeler', '2-Wheeler (bicycle, motorcycle)'], ['fourWheeler', '4-Wheeler (car)'], ['bus', 'Bus'], ['truck', 'Truck'], ['vehicleFar', 'Far / fast vehicles (zoomed pass on the far half - slower)']].map(function (c) { return check('cls-' + c[0], c[1], vc[c[0]] !== false); }).join('') + '</div></div>';
       body += '<p class="field-hint">Auto-rickshaws have no COCO class; the model usually reports them as 2- or 4-wheelers. Per-class thresholds, snapshots and alerts are on the Vehicle Detection page.</p>';
+    } else if (modId === 'twhelmet' || modId === 'pcross') {
+      body += '<p class="field-hint">Line crossing: the virtual line, direction, tracking and alert settings are on the <a href="#/detections/' + modId + '">' + (modId === 'twhelmet' ? 'Two-Wheeler Helmet (Line)' : 'Person Line Crossing') + '</a> page — draw the line on that camera\'s live picture.</p>';
     } else if (modId === 'object') {
       body += '<p class="field-hint">Marked-object monitoring: draw a box around any object on the live picture of the <a href="#/detections/object">Object Monitoring</a> page; an alert is raised when it is <b>moved</b> or goes <b>missing</b>. It works from the object\'s appearance, so no class has to be chosen here. Detection zones are not used by this module.</p>';
     } else if (modId === 'custom') {
@@ -138,7 +140,7 @@
       }
     }
     body += scheduleHtml(modId, cfg);
-    if (modId !== 'object') body += zonesField(cfg, zones);
+    if (modId !== 'object' && modId !== 'twhelmet' && modId !== 'pcross') body += zonesField(cfg, zones);
     return body + '</div>';
   }
 
@@ -168,6 +170,10 @@
       cfg.alert = Object.assign({}, typeof cfg.alert === 'object' && cfg.alert ? cfg.alert : {}, { severity: q('severity').value });
       delete cfg.fire; delete cfg.smoke; delete cfg.severity;
       cfg.zones = Array.prototype.map.call(root.querySelectorAll('[name="zone"]:checked'), function (c) { return c.value; });
+      return cfg;
+    }
+    if (modId === 'twhelmet' || modId === 'pcross') {
+      delete cfg.zones;                       // the line and every other setting are edited on the module page
       return cfg;
     }
     if (modId === 'object') {

@@ -105,3 +105,16 @@
 .om-log { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow: auto; font-size: 12.5px; display: flex; flex-direction: column; gap: 4px; }
 .om-log li { padding: 4px 0; border-bottom: 1px solid var(--border); }
 .om-lower { display: flex; flex-direction: column; gap: var(--gap); min-width: 0; }
+
+/* ---- line-crossing modules: line editor on the live picture (js/line-crossing.js) */
+.lc-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
+.lc-bar .lc-hint { font-size: 12px; flex-basis: 100%; color: var(--text-2); }
+.lc-save { display: inline-flex; gap: 6px; }
+.lc-save[hidden], .lc-draw[hidden] { display: none; }
+.lc-draw { position: absolute; z-index: 5; touch-action: none; pointer-events: none; }
+.lc-draw.is-draw { pointer-events: auto; cursor: crosshair; outline: 2px dashed rgba(255, 210, 63, .6); outline-offset: -2px; }
+.lc-svg { position: absolute; inset: 0; overflow: visible; }
+.lc-l, .lc-a { stroke: #FFD23F; stroke-width: 3; stroke-linecap: round; }
+.lc-p { fill: #FFD23F; stroke: #000; stroke-width: 1.5; }
+.lc-t { fill: #FFD23F; font-weight: 700; font-size: 13px; paint-order: stroke; stroke: #000; stroke-width: 3px; }
+#lc-draw[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--primary-soft); }

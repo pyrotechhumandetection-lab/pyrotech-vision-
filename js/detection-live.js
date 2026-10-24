@@ -28,6 +28,7 @@
       sub: 'Person-first PPE check · detector ppe_yolo11n (helmet, vest, gloves, person) · helmet-type classifier (construction / road) · helmet & vest colour',
       classes: [] }
   };
+  Object.assign(MOD, window.AV.cross.MOD);   // line-crossing modules (js/line-crossing.js)
   const PPE_ST = { PRESENT: ['badge-success', 'Present'], MISSING: ['badge-danger', 'Missing'], UNCERTAIN: ['badge-warning', 'Uncertain'], NOT_ASSESSABLE: ['badge-muted', 'Not assessable'] };
   const PPE_OVERALL = { COMPLIANT: ['badge-success', 'Compliant'], NON_COMPLIANT: ['badge-danger', 'Non-compliant'], NEEDS_REVIEW: ['badge-warning', 'Needs review'], NOT_FULLY_ASSESSED: ['badge-muted', 'Not fully assessed'] };
   let ppeFilter = { overall: '', missing: '' }, evFilter = { item: '', kind: '', hours: '' }, evAll = [];
@@ -58,14 +59,16 @@
       '<section class="card dl-live" aria-labelledby="dl-live-h"></section>' +
       '<div class="dl-side"><section class="card" id="dl-status" aria-labelledby="dl-status-h"></section><section class="card" id="dl-settings" aria-labelledby="dl-set-h"></section></div>' +
       (mod.id === 'ppe' ? '<section class="card dl-ppe" id="dl-ppe" aria-labelledby="dl-ppe-h"></section>' : '') +
+      (mod.cross ? '<section class="card dl-ppe" id="dl-cross" aria-labelledby="dl-cross-h"></section>' : '') +
       '<section class="card dl-events" id="dl-events" aria-labelledby="dl-ev-h"></section></div>';
-    if (mod.id === 'ppe') container.querySelector('.dl-grid').classList.add('is-ppe');
+    if (mod.id === 'ppe' || mod.cross) container.querySelector('.dl-grid').classList.add('is-ppe');
     evAll = [];
     renderLive();
     renderStatus();
     renderSettings();
     renderEvents([]);
     if (mod.id === 'ppe') renderPPE();
+    if (mod.cross) renderCross();
     unsub.push(state.on('backend', onBackend), state.on('cameras', function () { renderCameraSelect(); }));
     onBackend();
   }
@@ -119,7 +122,20 @@
     return status.state || 'stopped';
   }
 
-  function paint() { if (!root || busy) return; renderStatus(); paintLive(); if (mod.id === 'ppe') renderPPE(); }
+  function paint() { if (!root || busy) return; renderStatus(); paintLive(); if (mod.id === 'ppe') renderPPE(); if (mod.cross) renderCross(); }
+
+  function renderCross() {
+    const el = root && root.querySelector('#dl-cross');
+    if (!el) return;
+    const k = stateKey();
+    el.innerHTML = window.AV.cross.panel(mod.id, status, k === 'processing' || k === 'paused');
+    window.AV.icons.hydrate(el);
+  }
+  const crossCtx = {
+    root: function () { return root; }, status: function () { return status; }, cfgResp: function () { return cfgResp; }, camId: function () { return camId; },
+    img: function () { return root.querySelector('#dl-img'); }, streamOn: function () { return streamOn; }, save: function (p, b, f) { return saveSettings(p, b, f); },
+    layerRect: function () { const r = root.querySelector('#lc-layer').getBoundingClientRect(); return { w: r.width || 1, h: r.height || 1 }; }
+  };
 
   function fmt(v, unit) { return v === null || v === undefined ? '<span class="dim">Unavailable</span>' : esc(v) + (unit || ''); }
   function counts(obj) {
@@ -192,7 +208,7 @@
       '<dt>Detection engine</dt><dd>' + esc(su[1]) + (s.modelAvailable === false ? ' <span class="badge badge-danger">Model file missing</span>' : (s.modelFile ? ' <span class="dim">' + esc(s.modelFile) + '</span>' : '')) +
       (s.sharedWith && s.sharedWith.length ? '<div class="dim" style="font-size:12px">' + (mod.id === 'fire' ? 'Sharing the camera connection with: ' : 'Sharing the camera\'s inference pass with: ') + esc(s.sharedWith.map(modTitle).join(', ')) + '</div>' : '') + '</dd>' +
       '<dt>In view now</dt><dd>' + (k === 'processing' ? counts(s.currentCounts) : '<span class="dim">—</span>') + '</dd>' +
-      (mod.id === 'fire' ? fireRows(s) : mod.id === 'ppe' ? ppeRows(s) :
+      (mod.id === 'fire' ? fireRows(s) : mod.id === 'ppe' ? ppeRows(s) : mod.cross ? window.AV.cross.rows(s, mod.id) :
       '<dt>Confirmed tracks</dt><dd>' + (s.uniqueCounts && Object.keys(s.uniqueCounts).length ? counts(s.uniqueCounts) + '<div class="dim" style="font-size:11.5px">Since start. ByteTrack can re-assign an ID after occlusion.</div>' : '<span class="dim">—</span>') + '</dd>') +
       '<dt>Camera FPS (received)</dt><dd>' + fmt(m.cameraFps, ' fps') + (m.streamFps ? ' <span class="dim">· stream reports ' + esc(m.streamFps) + ' fps</span>' : '') + (m.resolution ? ' <span class="dim">· ' + esc(m.resolution) + '</span>' : '') + '</dd>' +
       '<dt>AI stream</dt><dd>' + aiStreamLine(m) + '</dd>' +
@@ -201,6 +217,7 @@
           (m.fireSkipped ? ' <span class="dim">· ' + esc(m.fireSkipped) + ' frames skipped while the model was busy</span>' : '') + '</dd>'
         : mod.id === 'ppe'
         ? '<dt>PPE assessments</dt><dd>' + (s.ppe ? esc(s.ppe.runs) + ' done · one every ' + esc(s.ppe.intervalSec) + ' s' + (s.ppe.inferenceMs != null ? ' <span class="dim">· ' + esc(s.ppe.inferenceMs) + ' ms each</span>' : '') + (s.ppe.skipped ? ' <span class="dim">· ' + esc(s.ppe.skipped) + ' skipped while busy</span>' : '') : '<span class="dim">—</span>') + '</dd>'
+        : mod.cross ? ''
         : '<dt>AI processing FPS</dt><dd>' + fmt(m.processingFps, ' fps') + '</dd>') +
       schedRow(m, mod.id) +
       '<dt>Live view FPS</dt><dd>' + fmt(m.displayFps, ' fps sent') + (m.displayEncodeMs != null ? ' <span class="dim">· ' + esc(m.displayEncodeMs) + ' ms JPEG encode (own thread)</span>' : '') + '</dd>' +
@@ -293,9 +310,10 @@
       '<button class="btn btn-sm" id="dl-snap">' + icon('snapshot', 15) + '<span>Capture Snapshot</span></button>' +
       '<button class="btn btn-sm btn-ghost" id="dl-refresh">' + icon('refresh', 15) + '<span>Refresh Stream</span></button>' +
       '<button class="btn btn-sm btn-ghost" id="dl-full">' + icon('maximize', 15) + '<span>Full Screen</span></button></div>' +
-      '<div class="dl-stage" id="dl-stage"><div class="media-ph" id="dl-ph"></div><img class="dl-img" id="dl-img" alt="Annotated ' + mod.noun + ' detection stream" hidden>' +
+      (mod.cross ? window.AV.cross.toolbarHtml(mod.id) : '') +
+      '<div class="dl-stage" id="dl-stage"><div class="media-ph" id="dl-ph"></div><img class="dl-img" id="dl-img" alt="Annotated ' + mod.noun + ' detection stream" hidden>' + (mod.cross ? window.AV.cross.overlayHtml() : '') +
       '<span class="badge badge-live dl-flag" id="dl-flag" hidden><span class="dot pulse"></span>LIVE · annotated</span></div>' +
-      '<p class="dim mt-8" style="font-size:12px">' + icon('info', 13) + (mod.id === 'fire' ? ' Red = fire, blue = smoke, thin grey = weak smoke (needs more evidence; "cloud?/dust?" = verifier verdict). A red frame and banner show while an alert is active. ' : mod.id === 'ppe' ? ' Person box: green = compliant, red = non-compliant, amber = needs review, grey = not fully assessed. H / V / G = helmet, vest, gloves. The picture is updated with each assessment. ' : ' Boxes, labels and confidences are drawn by the backend pipeline (MJPEG). ') + 'Detection keeps running when you leave this page; use Stop to end it.</p>';
+      '<p class="dim mt-8" style="font-size:12px">' + icon('info', 13) + (mod.id === 'fire' ? ' Red = fire, blue = smoke, thin grey = weak smoke (needs more evidence; "cloud?/dust?" = verifier verdict). A red frame and banner show while an alert is active. ' : mod.cross ? ' The line, its IN arrow and the tracked boxes are drawn by the backend (a box turns red for 1.5 s when it crosses). Draw or change the line with the buttons above the picture. ' : mod.id === 'ppe' ? ' Person box: green = compliant, red = non-compliant, amber = needs review, grey = not fully assessed. H / V / G = helmet, vest, gloves. The picture is updated with each assessment. ' : ' Boxes, labels and confidences are drawn by the backend pipeline (MJPEG). ') + 'Detection keeps running when you leave this page; use Stop to end it.</p>';
     el.querySelector('#dl-cam').addEventListener('change', onCameraChange);
     el.querySelector('#dl-start').addEventListener('click', onStart);
     el.querySelector('#dl-stop').addEventListener('click', onStop);
@@ -316,6 +334,7 @@
     });
     el.querySelector('#dl-img').addEventListener('load', function () { retryN = 0; });
     window.AV.icons.hydrate(el);
+    if (mod.cross) window.AV.cross.attach(crossCtx);
     renderCameraSelect();
   }
 
@@ -368,6 +387,7 @@
     img.hidden = false;
     root.querySelector('#dl-ph').hidden = true;
     streamOn = true;
+    if (mod.cross) window.AV.cross.fit(img);
   }
   function detachStream() {
     if (!root) return;
@@ -376,6 +396,7 @@
     img.hidden = true;
     root.querySelector('#dl-ph').hidden = false;
     streamOn = false;
+    if (mod.cross) window.AV.cross.onStream(false);
   }
 
   // ======================= controls =======================
@@ -441,6 +462,7 @@
   function renderSettings() {
     if (mod.id === 'fire') return renderFireSettings();
     if (mod.id === 'ppe') return renderPPESettings();
+    if (mod.cross) return renderCrossSettings();
     const el = root.querySelector('#dl-settings');
     if (!cfgResp) {
       el.innerHTML = '<div class="card-head"><h2 id="dl-set-h">' + icon('sliders', 18) + 'Detection Settings</h2></div><p class="muted" style="font-size:13px">' +
@@ -560,6 +582,26 @@
         .then(function (ok) { if (ok) saveSettings(JSON.parse(JSON.stringify(cfgResp.defaults)), null, true); });
     });
     el.querySelector('#dl-alert-on').addEventListener('change', function (e) { saveSettings({ alert: { enabled: e.target.checked } }, null, true); });
+  }
+
+  // ---- line-crossing settings (backend/detection/modules.py DEFAULTS["twhelmet"] / ["pcross"]); markup in js/line-crossing.js
+  function renderCrossSettings() {
+    const el = root.querySelector('#dl-settings');
+    if (!cfgResp) {
+      el.innerHTML = '<div class="card-head"><h2 id="dl-set-h">' + icon('sliders', 18) + 'Settings</h2></div><p class="muted" style="font-size:13px">' +
+        (api.status.connected ? 'Select a camera to load its settings.' : 'Settings are stored on the backend per camera.') + '</p>';
+      return;
+    }
+    el.innerHTML = window.AV.cross.settingsHtml(mod.id, cfgResp);
+    window.AV.icons.hydrate(el);
+    const form = el.querySelector('#dl-form');
+    form.addEventListener('submit', function (e) { e.preventDefault(); const p = window.AV.cross.readForm(mod.id, form, root.querySelector('#dl-form-err')); if (p) saveSettings(p, form.querySelector('[type=submit]'), true); });
+    el.querySelector('#dl-reset').addEventListener('click', function () {
+      ui.confirm({ title: 'Reset settings?', message: 'Restore the default ' + mod.title + ' settings for ' + cfgResp.cameraId + '. The line is kept.', confirmText: 'Reset' })
+        .then(function (ok) { if (ok) { const d = JSON.parse(JSON.stringify(cfgResp.defaults)); delete d.line; saveSettings(d, null, true); } });
+    });
+    el.querySelector('#dl-alert-on').addEventListener('change', function (e) { saveSettings({ alert: { enabled: e.target.checked } }, null, true); });
+    window.AV.cross.refreshHint();
   }
 
   // ---- PPE settings (backend/detection/modules.py DEFAULTS["ppe"])
@@ -717,6 +759,7 @@
     clearInterval(timer); clearInterval(evTimer); clearTimeout(retryTimer);
     detachStream();
     unsub.forEach(function (f) { f(); }); unsub = [];
+    if (mod && mod.cross) window.AV.cross.release();
     root = null;
   }
 

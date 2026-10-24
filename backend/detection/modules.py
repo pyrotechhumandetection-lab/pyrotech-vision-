@@ -49,6 +49,21 @@ MODULES = {
                       "Road helmet (not construction)": "ppe_missing", "Vest wrong colour": "ppe_vest_color",
                       "PPE needs review": "ppe_review"},
     },
+    # Two-wheeler helmet check when a motorcycle / scooter crosses a virtual line, and person line crossing &
+    # counting (backend/detection/crossing/): one shared tracked pass and worker thread per camera session
+    "twhelmet": {
+        "id": "twhelmet", "name": "Two-Wheeler Helmet (Line Crossing)",
+        "labels": ["Helmet compliant", "Helmet missing", "Helmet unverified"],
+        "classKeys": {},
+        "eventType": {"Helmet compliant": "twhelmet_compliant", "Helmet missing": "twhelmet_missing",
+                      "Helmet unverified": "twhelmet_unverified"},
+    },
+    "pcross": {
+        "id": "pcross", "name": "Person Line Crossing & Counting",
+        "labels": ["Person IN", "Person OUT"],
+        "classKeys": {},
+        "eventType": {"Person IN": "line_cross_in", "Person OUT": "line_cross_out"},
+    },
     # Object Monitoring: marked-object monitor (backend/detection/object_monitor/), same camera session
     "object": {
         "id": "object", "name": "Object Monitoring",
@@ -143,6 +158,32 @@ DEFAULTS["ppe"] = {
               "severity": "high", "cooldownSec": 0},
 }
 PPE_VEST_COLORS = ("", "orange", "yellow", "green", "red", "blue")
+
+# Line-crossing modules (backend/detection/crossing/). The line is stored per camera in NORMALISED coordinates with the
+# resolution it was drawn on; None = no line drawn yet.
+_CROSS_COMMON = {
+    "enabled": False,
+    "line": None,                                # {"x1","y1","x2","y2" (0-1), "refWidth", "refHeight"}
+    "direction": "both",                         # which crossings count: "in" = towards the arrow side, "out" = against it
+    "confidence": 0.35,                          # minimum detector confidence of a tracked object
+    "targetFps": 10,                             # analysed frames per second per camera (newest frame only)
+    "refPoint": "bottom",                        # bottom = where the object touches the ground, center = box centre
+    "minTrackFrames": 3,                         # a track must be seen in this many frames before it can count
+    "hysteresis": 0.05,                          # dead band around the line, fraction of the object's box height
+    "recrossSec": 2.0,                           # the same track id cannot cross again within this time
+    "handoverSec": 1.0,                          # a lost id replaced by a new one nearby within this time = same object
+    "dedupeSec": 1.0,                            # two same-direction crossings at the same spot within this time = one
+    "minBoxFrac": 0.04,                          # objects lower than this fraction of the picture height are ignored
+}
+DEFAULTS["pcross"] = dict(copy.deepcopy(_CROSS_COMMON), excludeRiders=True,
+                          snapshot={"mode": "crossing"},
+                          alert={"enabled": False, "labels": ["Person IN", "Person OUT"], "severity": "low", "cooldownSec": 0})
+DEFAULTS["twhelmet"] = dict(copy.deepcopy(_CROSS_COMMON), minBoxFrac=0.05, includeBicycles=False,
+                            helmetMinConf=0.5, noHelmetMinConf=0.6, minMissingVotes=3, minHelmetVotes=2,
+                            judgeEvery=2, maxJudgePerFrame=2,
+                            snapshot={"mode": "crossing"},
+                            alert={"enabled": True, "labels": ["Helmet compliant", "Helmet missing"], "severity": "high",
+                                   "compliantSeverity": "low", "cooldownSec": 5})
 
 # Object Monitoring defaults = the standalone marked-object monitor's config.yaml (monitor, detector,
 # verifier sections; same key names for the monitor so its code is unchanged).
@@ -251,7 +292,7 @@ SNAPSHOT_MODES = ("new_track", "off")
 def module_config(camera, module_id):
     """Effective config = defaults deep-merged with what is stored on the camera."""
     stored = (((camera or {}).get("detection") or {}).get("modules") or {}).get(module_id) or {}
-    if module_id in ("fire", "object", "ppe"):
+    if module_id in ("fire", "object", "ppe", "twhelmet", "pcross"):
         stored = _legacy(module_id, stored)
     cfg = deep_merge(copy.deepcopy(DEFAULTS[module_id]), stored)
     if module_id == "object":
@@ -413,8 +454,57 @@ def _validate_ppe(cfg, camera_zones):
     return errs
 
 
+def _validate_cross(module_id, cfg):
+    errs = []
+    ln = cfg.get("line")
+    if ln is not None:
+        try:
+            pts = [float(ln[k]) for k in ("x1", "y1", "x2", "y2")]
+            if any(not 0.0 <= v <= 1.0 for v in pts):
+                errs.append("line coordinates must be between 0 and 1 (fractions of the picture)")
+            elif ((pts[2] - pts[0]) ** 2 + (pts[3] - pts[1]) ** 2) ** 0.5 < 0.02:
+                errs.append("the line is too short: draw it longer")
+            for k in ("refWidth", "refHeight"):
+                if ln.get(k) is not None and float(ln[k]) <= 0:
+                    errs.append(f"line.{k} must be positive")
+        except (KeyError, TypeError, ValueError):
+            errs.append("line needs numeric x1, y1, x2, y2")
+    if cfg.get("direction") not in ("both", "in", "out"):
+        errs.append("direction must be both, in or out")
+    if cfg.get("refPoint") not in ("bottom", "center"):
+        errs.append("refPoint must be bottom or center")
+    _num(errs, "confidence", cfg.get("confidence"), 0.05, 0.99)
+    _num(errs, "targetFps", cfg.get("targetFps"), 1, 30)
+    _num(errs, "minTrackFrames", cfg.get("minTrackFrames"), 1, 30, True)
+    _num(errs, "hysteresis", cfg.get("hysteresis"), 0, 0.3)
+    _num(errs, "recrossSec", cfg.get("recrossSec"), 0, 60)
+    _num(errs, "handoverSec", cfg.get("handoverSec"), 0, 5)
+    _num(errs, "dedupeSec", cfg.get("dedupeSec"), 0, 10)
+    _num(errs, "minBoxFrac", cfg.get("minBoxFrac"), 0.005, 0.5)
+    if module_id == "twhelmet":
+        _num(errs, "helmetMinConf", cfg.get("helmetMinConf"), 0.25, 0.99)
+        _num(errs, "noHelmetMinConf", cfg.get("noHelmetMinConf"), 0.25, 0.99)
+        _num(errs, "minMissingVotes", cfg.get("minMissingVotes"), 1, 8, True)
+        _num(errs, "minHelmetVotes", cfg.get("minHelmetVotes"), 1, 8, True)
+        _num(errs, "judgeEvery", cfg.get("judgeEvery"), 1, 10, True)
+        _num(errs, "maxJudgePerFrame", cfg.get("maxJudgePerFrame"), 1, 6, True)
+    alert = cfg.get("alert") or {}
+    if alert.get("severity") not in SEVERITIES:
+        errs.append("alert.severity must be one of " + ", ".join(SEVERITIES))
+    if alert.get("compliantSeverity", "low") not in SEVERITIES:
+        errs.append("alert.compliantSeverity must be one of " + ", ".join(SEVERITIES))
+    if any(lbl not in MODULES[module_id]["labels"] for lbl in alert.get("labels") or []):
+        errs.append("alert.labels contains unknown alerts")
+    _num(errs, "alert.cooldownSec", alert.get("cooldownSec", 0), 0, 3600)
+    if (cfg.get("snapshot") or {}).get("mode") not in ("crossing", "off"):
+        errs.append("snapshot.mode must be crossing or off")
+    return errs
+
+
 def validate(module_id, cfg, camera_zones):
     """Return a list of human-readable errors (empty = valid)."""
+    if module_id in ("twhelmet", "pcross"):
+        return _validate_cross(module_id, cfg)
     if module_id == "ppe":
         return _validate_ppe(cfg, camera_zones)
     if module_id == "fire":

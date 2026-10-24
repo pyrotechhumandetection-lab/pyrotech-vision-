@@ -26,7 +26,7 @@ from backend.detection.modules import MODULES, module_config
 from backend.detection.rtsp_probe import rtsp_describe
 from backend.services.counts import CountStore
 from backend.services.scheduler import ModuleSchedule
-from backend.services.util import now_iso, redact
+from backend.services.util import iso_from_ts, now_iso, redact
 
 log = logging.getLogger("aivision.sessions")
 
@@ -62,6 +62,8 @@ class CameraSession:
         self.fire_cfg = None
         self.ppe = None              # PPE Detection engine (ppe module)
         self.ppe_cfg = None
+        self.cross = None            # line-crossing engine (twhelmet + pcross modules share it)
+        self.cross_cfg = {}
         self.objmon = None           # Object Monitoring engine (object module)
         self.obj_cfg = None
         self.thread = None
@@ -113,7 +115,8 @@ class CameraSession:
                         "lastDisconnectReason": None, "framesSkippedCapture": 0, "captureFpsTarget": None,
                         "framesRecorded": None, "schedule": {}}
         self.current = {"human": {}, "vehicle": {}}             # label -> count visible in the latest frame
-        self.last_detection_at = {"human": None, "vehicle": None, "count": None, "fire": None, "object": None, "ppe": None}
+        self.last_detection_at = {"human": None, "vehicle": None, "count": None, "fire": None, "object": None, "ppe": None,
+                                  "twhelmet": None, "pcross": None}
         self._disconnect_alerted = False
 
     # ------------------------------------------------------------------ lifecycle
@@ -318,6 +321,18 @@ class CameraSession:
         log.info("camera %s: PPE engine ready (%s, helmet classifier %s)", self.camera_id, ppe_engine.DETECTOR.name,
                  "on" if ppe_engine.HELMET_CLS.is_file() else "missing")
 
+    def ensure_cross(self):
+        """Load the line-crossing engine (twhelmet / pcross): one tracked COCO pass and one worker per camera."""
+        if self.cross is not None:
+            return
+        from backend.detection.crossing import engine as cross_engine
+        try:
+            self.cross = cross_engine.CrossingEngine(self._cross_event, camera_id=self.camera_id, thread_name=f"cross:{self.camera_id}")
+        except Exception as e:
+            raise SessionError("ENGINE_FAILURE", f"Could not start the line-crossing engine: {e}", 500)
+        log.info("camera %s: line-crossing engine ready (%s, %s, imgsz %s)", self.camera_id, self.cross.model_path,
+                 config.engine_label(self.cross.engine), self.cross.imgsz)
+
     def ensure_object(self):
         """Load the Object Monitoring engine (Layer 1 matcher, Layer 2 YOLOE worker, optional Layer 3)."""
         if self.objmon is not None:
@@ -339,6 +354,10 @@ class CameraSession:
         if module_id == "ppe" and self.ppe is not None:
             self.ppe.close()
             self.ppe = None
+        if module_id in ("twhelmet", "pcross") and self.cross is not None:
+            if self.cross.remove_module(module_id) == 0:      # the engine is shared: freed with its last module
+                self.cross.close()
+                self.cross = None
         if module_id == "object" and self.objmon is not None:
             self.objmon._save_marks()
             self.objmon.close()
@@ -390,6 +409,44 @@ class CameraSession:
                                                "box": view.get("box")},
                                         original=frame.copy())
 
+    def _cross_event(self, module_id, ev, snapshot, frame):
+        """One line crossing (helmet verdict of a two-wheeler / a person IN or OUT) -> detection record + snapshot of the
+        exact frame that showed it (annotated; the clean frame is the original) + alert (existing alert system)."""
+        cam = self.mgr.registry.get(self.camera_id)
+        cfg = self.cross_cfg.get(module_id) or {}
+        mod = self.modules.get(module_id)
+        if not cam or mod is None or mod["paused"]:
+            return
+        self.last_detection_at[module_id] = now_iso()
+        acfg = cfg.get("alert") or {}
+        label, tid, fid = ev["label"], ev["tid"], ev["frameId"]
+        riders = ev.get("riders") or []
+        if module_id == "twhelmet":
+            etype = {"Helmet compliant": "twhelmet_compliant", "Helmet missing": "twhelmet_missing"}.get(label, "twhelmet_unverified")
+            sev = {"twhelmet_compliant": acfg.get("compliantSeverity", "low"), "twhelmet_missing": acfg.get("severity", "high")}.get(etype, "low")
+            key = "noHelmetConf" if etype == "twhelmet_missing" else "helmetConf"
+            conf = max([r.get(key) or 0.0 for r in riders] or [0.0]) or None
+            desc = (f"{ev['cls'].capitalize()} #{tid} crossed the line ({ev['direction'].upper()}) at frame {fid}: {ev['why']}. "
+                    f"Riders: {len(riders)}.")
+        else:
+            etype = "line_cross_in" if ev["direction"] == "in" else "line_cross_out"
+            sev, conf = acfg.get("severity", "low"), ev.get("conf")
+            c = ev.get("counts") or {}
+            desc = f"Person #{tid} crossed the line {ev['direction'].upper()} at frame {fid}. Totals: IN {c.get('in', 0)} / OUT {c.get('out', 0)}."
+        want_alert = bool(acfg.get("enabled", False)) and label in (acfg.get("labels") or [])
+        snap_on = (cfg.get("snapshot") or {}).get("mode", "crossing") != "off"
+        extra = {"trackId": tid, "frameId": fid, "direction": ev["direction"], "crossingPoint": ev["point"], "box": ev["box"],
+                 "frameCapturedAt": iso_from_ts(ev["capturedAt"]), "counts": ev.get("counts"), "line": cfg.get("line"),
+                 "frameSize": list(reversed(ev.get("frameShape") or [])), "gapSec": ev.get("gapSec"), "trackFrames": ev.get("trackFrames"),
+                 "handedOver": ev.get("handedOver")}
+        if module_id == "twhelmet":
+            extra.update(verdict=ev["verdict"], reason=ev["why"], riders=riders, judge=ev.get("judge"), vehicle=ev.get("cls"))
+        self.mgr.events.on_module_alert(cam, module_id, etype, label, snapshot if snap_on else None, captured_at=ev["capturedAt"],
+                                        confidence=round(conf, 3) if conf else None, severity=sev, description=desc, alert=want_alert,
+                                        snapshot=snap_on, extra=extra, original=frame.copy() if snap_on else None,
+                                        cooldown_key=(self.camera_id, module_id, str(tid), etype, str(ev["direction"])),
+                                        cooldown_sec=float(acfg.get("cooldownSec", 0) or 0))
+
     def _object_alert(self, view, kind, distance, image):
         cam = self.mgr.registry.get(self.camera_id)
         cfg = self.obj_cfg or {}
@@ -427,7 +484,7 @@ class CameraSession:
             self.thread.join(timeout=5)
         if self.enc_thread:
             self.enc_thread.join(timeout=2)
-        for m in ("fire", "object", "ppe"):
+        for m in ("fire", "object", "ppe", "twhelmet", "pcross"):
             self.close_engine(m)
         if self.reader:
             self.reader.release()
@@ -487,9 +544,11 @@ class CameraSession:
             count_on = "count" in active and self.counter is not None                 # Human Count engine
             fire_eng, obj_eng, ppe_eng = self.fire, self.objmon, self.ppe   # local refs: a Stop may free an engine meanwhile
             ppe_on = "ppe" in active and ppe_eng is not None                          # PPE Detection engine
+            cross_eng = self.cross
+            cross_on = cross_eng is not None and any(m in active for m in ("twhelmet", "pcross"))   # line-crossing engine
             fire_on = "fire" in active and fire_eng is not None                       # Fire & Smoke engine
             obj_on = "object" in active and obj_eng is not None                       # Object Monitoring engine
-            any_on = pv_on or count_on or fire_on or obj_on or ppe_on
+            any_on = pv_on or count_on or fire_on or obj_on or ppe_on or cross_on
             if not queue_mode and (pv_on or count_on or obj_on) and seq - last_seq > 1 and last_seq >= 0:
                 self.metrics["framesDropped"] += seq - last_seq - 1     # decoded, but the AI was still busy
             last_seq, last_seen = seq, now
@@ -652,6 +711,10 @@ class CameraSession:
                         ran = True
                     annotated = ppe_eng.draw(annotated)
                     win["st_ppe"] += (time.perf_counter() - t_p) * 1000.0
+                if cross_on:     # newest frame to the line-crossing worker at its target rate (frame id + capture time travel along)
+                    if cross_eng.submit(self.latest_raw, captured or now, seq):
+                        ran = True
+                    annotated = cross_eng.draw(annotated)
                 win["gate"] += runtime.take_wait_ms()
                 if ran:
                     win["proc"] += 1
@@ -792,6 +855,11 @@ class CameraSession:
         if self.ppe is not None:
             self.ppe_cfg = module_config(cam, "ppe")
             self.ppe.configure(self.ppe_cfg, cam.get("zones"))
+        if self.cross is not None:
+            for cm in ("twhelmet", "pcross"):
+                if cm in self.modules:
+                    self.cross_cfg[cm] = module_config(cam, cm)
+                    self.cross.set_module(cm, self.cross_cfg[cm], paused=self.modules[cm]["paused"])
         # ---- AI frame scheduling per module (interval, motion gate, capture cap, model input size)
         caps, gate_area = [], []
         for m in ("human", "vehicle", "count", "object"):
@@ -808,7 +876,7 @@ class CameraSession:
                 gate_area.append(float(sch.get("motionMinAreaPct", config.MOTION_MIN_AREA_PCT)))
             self.motion_area[m] = float(sch.get("motionMinAreaPct", config.MOTION_MIN_AREA_PCT))
             caps.append(float(sch.get("captureFps") or 0) if sc.mode != "every" else 0.0)
-        if "fire" in active or "ppe" in active:
+        if "fire" in active or "ppe" in active or "twhelmet" in active or "pcross" in active:
             caps.append(0.0)                  # Fire & Smoke keeps every frame (its own everyNFrames setting)
         # the session runs at the HIGHEST rate any running module needs; one module without a cap = no cap
         self.capture_cap = 0.0 if (not caps or 0.0 in caps) else max(caps)
@@ -973,6 +1041,25 @@ class CameraSession:
                 "viewers": self.viewers, "sharedWith": [x for x in self.modules if x != module_id],
                 "modelFile": "ppe_yolo11n.pt", "ppe": pv if m else None,
             }
+        if module_id in ("twhelmet", "pcross"):
+            cv = self.cross.view(module_id) if self.cross else None
+            live = bool(m and not m["paused"] and cv)
+            cm = (cv or {}).get("metrics") or {}
+            if module_id == "pcross":
+                cur = {"Person": len(cv["tracksNow"])} if live else {}
+                uniq = {"IN": cv["counts"]["in"], "OUT": cv["counts"]["out"]} if (m and cv) else {}
+            else:
+                cur = {"Two-wheeler": len(cv["tracksNow"])} if live else {}
+                uniq = {"Compliant": cv["counts"]["compliant"], "Missing": cv["counts"]["missing"],
+                        "Unverified": cv["counts"]["unverified"]} if (m and cv) else {}
+            return {
+                "state": st, "cameraState": self.state, "error": self.error, "currentCounts": cur, "uniqueCounts": uniq,
+                "lastDetectionAt": self.last_detection_at.get(module_id), "startedAt": m["startedAt"] if m else None,
+                "metrics": dict(self.metrics, inferenceMs=cm.get("inferenceMsAvg"), processingFps=cm.get("inferenceFps"),
+                                latencyMs=cm.get("latencyMsAvg"), framesDropped=cm.get("framesDropped", 0)) if cv else dict(self.metrics),
+                "viewers": self.viewers, "sharedWith": [x for x in self.modules if x != module_id],
+                "modelFile": (str(self.cross.model_path.name) if self.cross else None), "cross": cv if m else None,
+            }
         if module_id == "object":
             ov = self.objmon.view() if self.objmon else None
             return {
@@ -1046,6 +1133,8 @@ class SessionManager:
                     s.ensure_object()
                 elif module_id == "ppe":
                     s.ensure_ppe()
+                elif module_id in ("twhelmet", "pcross"):
+                    s.ensure_cross()
                 else:
                     s.ensure_pipeline()
             except SessionError:
@@ -1063,6 +1152,11 @@ class SessionManager:
                 if module_id == "ppe":
                     s.ppe.reset()              # people / summary start from zero
                     s.last_detection_at["ppe"] = None
+                if module_id in ("twhelmet", "pcross"):
+                    s.cross_cfg[module_id] = module_config(self.registry.get(cam_id) or {}, module_id)
+                    s.cross.set_module(module_id, s.cross_cfg[module_id])
+                    s.cross.reset(module_id)   # counts start from zero
+                    s.last_detection_at[module_id] = None
                 s.modules[module_id] = {"paused": False, "startedAt": now_iso()}
             s.modules[module_id]["paused"] = False
             s.error = None
@@ -1078,7 +1172,7 @@ class SessionManager:
             if module_id == "count":
                 s.flush_counts()
             s.modules.pop(module_id, None)
-            if module_id in ("fire", "object", "ppe"):
+            if module_id in ("fire", "object", "ppe", "twhelmet", "pcross"):
                 s.close_engine(module_id)      # frees the model and its worker thread
             s.cfg_dirty = True
             if not s.in_use():
