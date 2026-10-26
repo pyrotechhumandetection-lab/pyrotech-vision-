@@ -176,7 +176,7 @@ _CROSS_COMMON = {
     "dedupeSec": 1.0,                            # two same-direction crossings at the same spot within this time = one
     "minBoxFrac": 0.04,                          # objects lower than this fraction of the picture height are ignored
 }
-DEFAULTS["pcross"] = dict(copy.deepcopy(_CROSS_COMMON), excludeRiders=True,
+DEFAULTS["pcross"] = dict(copy.deepcopy(_CROSS_COMMON), excludeRiders=True, confidence=0.20, minTrackFrames=1,
                           snapshot={"mode": "crossing"},
                           alert={"enabled": False, "labels": ["Person IN", "Person OUT"], "severity": "low", "cooldownSec": 0})
 DEFAULTS["twhelmet"] = dict(copy.deepcopy(_CROSS_COMMON), minBoxFrac=0.05, includeBicycles=False,
