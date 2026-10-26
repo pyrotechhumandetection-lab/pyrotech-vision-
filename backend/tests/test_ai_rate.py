@@ -140,7 +140,16 @@ class NpuCoreTests(unittest.TestCase):
         m.lib, m.ctx, m.core_mask, m.home_mask, m._mask_failed = self.Lib(), None, home, home, False
         return m
 
-    def test_one_camera_uses_all_cores_two_cameras_one_each(self):
+    def test_default_is_rr_and_never_switches(self):
+        self.assertEqual(self.rr.core_mode(), "rr")
+        a = self.inst(self.rr.CORE_1)
+        self.rr.set_solo(True)
+        a._sync_mask()
+        self.assertEqual((a.core_mask, self.calls), (self.rr.CORE_1, []))
+
+    def test_one_camera_uses_all_cores_two_cameras_one_each_when_dynamic(self):
+        import os
+        os.environ["AIV_NPU_CORE"] = "dynamic"
         a = self.inst(self.rr.CORE_1)
         self.rr.set_solo(True)
         a._sync_mask()
@@ -151,6 +160,8 @@ class NpuCoreTests(unittest.TestCase):
         self.assertEqual(self.calls, [self.rr.CORE_0_1_2, self.rr.CORE_1])
 
     def test_no_driver_call_when_nothing_changes(self):
+        import os
+        os.environ["AIV_NPU_CORE"] = "dynamic"
         a = self.inst(self.rr.CORE_0)
         a._sync_mask()
         a._sync_mask()
@@ -168,6 +179,8 @@ class NpuCoreTests(unittest.TestCase):
             del os.environ["AIV_NPU_CORE"]
 
     def test_refused_mask_is_kept_and_not_retried(self):
+        import os
+        os.environ["AIV_NPU_CORE"] = "dynamic"
         a = self.inst(self.rr.CORE_1)
         a.lib = type("L", (), {"rknn_set_core_mask": lambda s, c, m: -1})()
         self.rr.set_solo(True)

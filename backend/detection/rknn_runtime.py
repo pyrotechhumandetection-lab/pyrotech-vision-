@@ -11,14 +11,12 @@ Where librknnrt.so is looked for (first found):
 The real rknn-toolkit-lite2 package is used instead when it is importable (Python <= 3.12).
 
 NPU cores (RK3588 has 3):
-    AIV_NPU_CORE=dynamic (default)  ONE camera running -> every model instance uses all three cores (0+1+2);
-                                    two or more cameras -> each instance goes back to its own core (round robin), so
-                                    the cameras run in parallel. The switch follows the number of cameras that run
-                                    a module (SessionManager._rebalance -> set_solo) and happens between two frames.
-    AIV_NPU_CORE=rr                 every new model instance gets the next core in turn (the old default)
+    AIV_NPU_CORE=rr (default)       every new model instance gets the next core in turn
+    AIV_NPU_CORE=dynamic            ONE camera running -> every model instance uses all three cores (0+1+2); two or more
+                                    cameras -> each goes back to its own core. OFF by default: `npu bench` on the RK3588
+                                    EVB7 (INT8 yolov8n) measured cores 0+1+2 at 34.6 ms against 26.2 / 26.5 ms on core 1 / 2 alone.
     auto = the driver picks, 0 / 1 / 2 / 0_1_2 = fixed mask for every instance.
-Whether three cores make one stream faster than one core depends on the model: measure it on the box
-(./aivision.sh npu status shows the core in use and the inference time); AIV_NPU_CORE=rr turns the switch off.
+Measure before switching it on: ./aivision.sh npu bench lists every core and 0+1+2.
 """
 import ctypes
 import hashlib
@@ -200,7 +198,7 @@ _SOLO = {"on": False}           # exactly one camera runs a module (set by the s
 
 
 def core_mode():
-    return os.environ.get("AIV_NPU_CORE", "dynamic").strip().lower()
+    return os.environ.get("AIV_NPU_CORE", "rr").strip().lower()
 
 
 def set_solo(flag):
@@ -407,6 +405,8 @@ class RKNNLite:
         x = _test_image(shape)             # a real photo: random noise drives the FP16 model into inf / NaN
         table, ref = [], None
         for io in self.IO_VARIANTS:
+            if io[0].startswith("fp16") and self.inputs[0]["type"] in ("INT8", "UINT8"):
+                continue                   # an INT8 model takes 1 byte per value: an FP16 input is rejected (RKNN log noise)
             try:
                 y = self.inference([x], io=io)[0]
                 ts = []

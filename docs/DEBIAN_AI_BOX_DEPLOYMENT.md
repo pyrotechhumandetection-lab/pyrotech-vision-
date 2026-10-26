@@ -620,7 +620,7 @@ sudo ./aivision.sh npu check         # + NPU load and every program that uses th
   runtime measures 4 variants (uint8 or FP16 input, converted output or raw output converted with numpy) and uses
   the fastest one whose output equals the default; `npu check` shows the table. `AIV_RKNN_IO=uint8/float` forces
   the original path.
-* NPU cores (`AIV_NPU_CORE`, default `dynamic`): with ONE camera running a module every model uses all three cores; with two cameras each model instance goes back to its own core (0, 1, 2, 0, ...). `rr` = always its own core (previous behaviour). Whether three cores speed up one stream is not measured here: compare the inference time in the detection status with `dynamic` and with `rr`.
+* NPU cores (`AIV_NPU_CORE`, default `rr`): each model instance (camera / module) gets the next core (0, 1, 2, 0, ...). `dynamic` = one running camera uses all three cores, two cameras one core each; it is off because `npu bench` measured 0+1+2 slower than a single core for the INT8 model (34.6 ms vs 26.2 ms).
 * The RKNN model has a fixed 640x640 input; the per-module "image size" setting is ignored on the NPU.
 * If the NPU cannot be used (no runtime, no device access, driver error), the backend logs a warning and uses
   OpenVINO / PyTorch as before - detection never stops because of the NPU.

@@ -1321,7 +1321,9 @@ class RknnNpuTests(unittest.TestCase):
         r.init_runtime()
         table = {t["io"]: t for t in r.autotune(runs=2)}
         self.assertTrue(table["uint8/float"]["same"])
-        self.assertFalse(table["fp16n/raw"]["same"])        # the stand-in does not normalise: must be rejected
+        self.assertFalse(table.get("fp16n/raw", {}).get("same", False))   # never accepted (the stand-in does not normalise)
+        if r.inputs[0]["type"] in ("INT8", "UINT8"):                       # an INT8 model is never fed FP16 input
+            self.assertFalse([k for k in table if k.startswith("fp16")])
         self.assertTrue(table["/".join(r.io)]["same"])
 
     def test_engine_selected_and_pipeline_boxes(self):
