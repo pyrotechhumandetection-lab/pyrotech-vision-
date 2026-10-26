@@ -44,6 +44,35 @@
 
   function prefKey() { return 'detCamera_' + mod.id; }
 
+  // ---- resizable side panel: drag the bar on its left edge; the width is remembered in this browser ----
+  const SPLIT_KEY = 'aiv.sidePanelWidth', SPLIT_MIN = 300, SPLIT_DEF = 400;
+  function initSplit(grid) {
+    const bar = grid && grid.querySelector('#dl-split');
+    if (!bar) return;
+    const max = function () { return Math.max(SPLIT_MIN + 40, Math.min(1000, grid.clientWidth - 360)); };
+    const clamp = function (w) { return Math.round(Math.max(SPLIT_MIN, Math.min(max(), w))); };
+    const apply = function (w) { grid.style.setProperty('--side-w', w + 'px'); bar.setAttribute('aria-valuenow', String(w)); };
+    const save = function (w) { try { localStorage.setItem(SPLIT_KEY, String(w)); } catch (e) { /* private mode */ } };
+    let w = SPLIT_DEF;
+    try { const v = parseInt(localStorage.getItem(SPLIT_KEY), 10); if (v) w = v; } catch (e) { /* ignore */ }
+    w = clamp(w); apply(w);
+    bar.setAttribute('aria-valuemin', String(SPLIT_MIN));
+    bar.addEventListener('pointerdown', function (ev) {
+      ev.preventDefault();
+      const x0 = ev.clientX, w0 = w;
+      bar.setPointerCapture(ev.pointerId); grid.classList.add('is-resizing');
+      const mv = function (e) { w = clamp(w0 + (x0 - e.clientX)); apply(w); };   // dragging left widens the panel
+      const up = function () { bar.removeEventListener('pointermove', mv); bar.removeEventListener('pointerup', up); bar.removeEventListener('pointercancel', up); grid.classList.remove('is-resizing'); save(w); };
+      bar.addEventListener('pointermove', mv); bar.addEventListener('pointerup', up); bar.addEventListener('pointercancel', up);
+    });
+    bar.addEventListener('keydown', function (e) {
+      const step = e.shiftKey ? 80 : 20;
+      if (e.key === 'ArrowLeft') w = clamp(w + step); else if (e.key === 'ArrowRight') w = clamp(w - step); else return;
+      e.preventDefault(); apply(w); save(w);
+    });
+    bar.addEventListener('dblclick', function () { w = clamp(SPLIT_DEF); apply(w); save(w); });
+  }
+
   function render(container, params) {
     root = container;
     mod = MOD[params.module];
@@ -57,11 +86,12 @@
       '<div id="dl-notice"></div>' +
       '<div class="dl-grid">' +
       '<section class="card dl-live" aria-labelledby="dl-live-h"></section>' +
-      '<div class="dl-side"><section class="card" id="dl-status" aria-labelledby="dl-status-h"></section><section class="card" id="dl-settings" aria-labelledby="dl-set-h"></section></div>' +
+      '<div class="dl-side"><div class="dl-split" id="dl-split" role="separator" aria-orientation="vertical" tabindex="0" aria-label="Resize status panel (drag, or use the left and right arrow keys; double-click to reset)" title="Drag to resize · double-click to reset"></div><section class="card" id="dl-status" aria-labelledby="dl-status-h"></section><section class="card" id="dl-settings" aria-labelledby="dl-set-h"></section></div>' +
       (mod.id === 'ppe' ? '<section class="card dl-ppe" id="dl-ppe" aria-labelledby="dl-ppe-h"></section>' : '') +
       (mod.cross ? '<section class="card dl-ppe" id="dl-cross" aria-labelledby="dl-cross-h"></section>' : '') +
       '<section class="card dl-events" id="dl-events" aria-labelledby="dl-ev-h"></section></div>';
     if (mod.id === 'ppe' || mod.cross) container.querySelector('.dl-grid').classList.add('is-ppe');
+    initSplit(container.querySelector('.dl-grid'));
     evAll = [];
     renderLive();
     renderStatus();

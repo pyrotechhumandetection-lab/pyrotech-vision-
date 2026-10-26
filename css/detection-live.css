@@ -1,5 +1,5 @@
 /* Vehicle / Human Detection live pages */
-.dl-grid { display: grid; gap: var(--gap); grid-template-columns: minmax(0, 1fr) minmax(320px, 400px); grid-template-areas: "live side" "events side"; align-items: start; }
+.dl-grid { display: grid; gap: var(--gap); grid-template-columns: minmax(0, 1fr) var(--side-w, 400px); grid-template-areas: "live side" "events side"; align-items: start; }
 .dl-live { grid-area: live; } .dl-side { grid-area: side; display: flex; flex-direction: column; gap: var(--gap); min-width: 0; } .dl-events { grid-area: events; }
 .dl-controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
 .dl-stage { position: relative; aspect-ratio: 16 / 9; background: #03070d; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
@@ -126,3 +126,16 @@
 .lc-p { fill: #FFD23F; stroke: #000; stroke-width: 1.5; }
 .lc-t { fill: #FFD23F; font-weight: 700; font-size: 13px; paint-order: stroke; stroke: #000; stroke-width: 3px; }
 #lc-draw[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--primary-soft); }
+
+/* resizable side panel: the handle sits in the gap to the left of the status card; text reflows with the card width */
+.dl-side { position: relative; }
+.dl-split { position: absolute; top: 0; bottom: 0; left: calc(var(--gap) / -2 - 5px); width: 10px; cursor: col-resize; touch-action: none; z-index: 2; border-radius: 4px; }
+.dl-split::after { content: ""; position: absolute; top: 50%; left: 3px; width: 4px; height: 44px; margin-top: -22px; border-radius: 2px; background: var(--border); transition: background .15s; }
+.dl-split:hover::after, .dl-split:focus-visible::after, .is-resizing .dl-split::after { background: var(--primary, #2563eb); }
+.dl-split:focus-visible { outline: 2px solid var(--primary, #2563eb); outline-offset: 1px; }
+.is-resizing { user-select: none; cursor: col-resize; }
+#dl-status, #dl-settings { container-type: inline-size; }
+@container (max-width: 440px) { .dl-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } .dl-kv { grid-template-columns: 110px minmax(0, 1fr); } }
+@container (max-width: 330px) { .dl-kv { grid-template-columns: minmax(0, 1fr); gap: 2px 0; } .dl-kv dd { margin-bottom: 6px; } }
+@container (min-width: 620px) { .dl-kv { grid-template-columns: 170px minmax(0, 1fr); font-size: 13.5px; } }
+@media (max-width: 1240px) { .dl-split { display: none; } }
