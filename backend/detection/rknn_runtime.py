@@ -213,10 +213,39 @@ def wanted_mask(home):
     return home
 
 
+_TL = threading.local()
+_ENGINES = itertools.count()
+
+
+def new_engine_base():
+    """Number of a new frame-pipeline engine (camera): its models take consecutive cores starting at base % 3."""
+    return next(_ENGINES)
+
+
+def core_for(base, j):
+    return (CORE_0, CORE_1, CORE_2)[(base + j) % 3]
+
+
+class pinned_core:
+    """`with pinned_core(mask):` the model loaded inside the block goes on that core (round-robin mode, RK3588 only)."""
+    def __init__(self, mask):
+        self.mask = mask
+
+    def __enter__(self):
+        self.old = getattr(_TL, "mask", None)
+        _TL.mask = self.mask
+
+    def __exit__(self, *_):
+        _TL.mask = self.old
+
+
 def next_core_mask():
     want = core_mode()
     if want in CORE_MASKS:
         return CORE_MASKS[want]
+    pinned = getattr(_TL, "mask", None)
+    if pinned is not None and soc() == "rk3588":
+        return pinned
     if soc() != "rk3588":            # only RK3588 has 3 cores; other chips: the driver decides
         return CORE_AUTO
     with _CORE_LOCK:

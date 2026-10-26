@@ -1134,6 +1134,8 @@ class SessionManager:
             s.rate.set_goal(goal, immediate=s.rate_fresh)
             s.rate_fresh = False
             s.metrics["aiCameras"] = len(run)
+            if s.cross is not None:           # frames in flight: NPU cores shared out between the running cameras
+                s.cross.set_depth(max(1, config.NPU_CORES // len(run)))
         log.info("AI rate: %d camera(s) running -> %.1f fps each", len(run), goal)
         try:                                  # NPU cores: one camera may use all three, two cameras one each
             from backend.detection import rknn_runtime

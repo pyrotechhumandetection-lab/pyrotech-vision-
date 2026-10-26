@@ -28,3 +28,14 @@ Newest frame wins (one slot): at most the camera's dynamic AI rate (see *Cameras
 * The rate is a ceiling on the frames the camera session accepts (it also drives the line-crossing interval gate), on top of any per-module capture cap (the lower value wins). A saved `targetFps` in a line-crossing module's settings no longer pins the rate.
 * `AIV_AI_FPS_BUDGET` is a tuning value, not a measurement: set it from the analysed fps one camera really reaches on the box (`./aivision.sh npu status`).
 * Live values: `metrics.aiFpsTarget` (current rate), `aiFpsGoal`, `aiCameras`; the crossing status `targetFps` follows the same rate. Tests: `python3 -m unittest backend.tests.test_ai_rate`.
+
+## Frame pipeline (one camera on several NPU cores)
+
+The line-crossing engine splits one camera's work so that frames are analysed in parallel:
+
+* `depth` **detection workers**, each with its own model (on the RKNN engine each model is on a different NPU core), take the newest waiting frames and run the network at the same time (resize, NPU model, NMS).
+* **One tracking thread** takes the finished detections strictly in frame order (ByteTrack needs the order) and runs the crossing rules, events and snapshots. A frame that fails never blocks the ones after it; a missing frame is skipped after 2 s (`pipeline.orderSkipped`).
+* Depth follows the camera count: one camera uses `AIV_NPU_CORES` (3) workers, two cameras one worker each. `AIV_PIPELINE_DEPTH` = `auto` (3 on RKNN, 1 on every other engine) or a number (`1` = off).
+* Checked: with the real detector the split network / tracker path gives the same track ids and boxes as `model.track` (24 frames), and 3 workers count the same as 1 (`RealModelPipelineTests`); ordering, overlap and a failing frame are tested with scripted detections (`PipelineTests`).
+* Measured on a 2-CPU PyTorch container (forced depth 3, not the RK3588): one camera analysed 14.9 fps of a 15 fps stream where one worker gave about 7.5 fps; two cameras (depth 1 each) stay at about 7.5 fps each. The RK3588 gain is **not measured yet**: compare `inferenceFps` in the detection status with `AIV_PIPELINE_DEPTH=1`.
+* Live values: `metrics.pipeline` (`depth`, `workers`, `inFlight`, `orderSkipped`) in the crossing status.

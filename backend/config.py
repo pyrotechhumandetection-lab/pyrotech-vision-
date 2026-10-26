@@ -262,6 +262,18 @@ AI_FPS_BUDGET = max(1.0, float(_env("AIV_AI_FPS_BUDGET", "60")))
 AI_FPS_MIN = max(1.0, float(_env("AIV_AI_FPS_MIN", "2")))
 AI_FPS_RAMP = max(0.5, float(_env("AIV_AI_FPS_RAMP", "6")))
 
+# Frame pipeline of the line-crossing engine: detection workers (one model each) that analyse different frames at the same
+# time. auto = one per RK3588 NPU core (3) on the RKNN engine, 1 on every other engine. AIV_PIPELINE_DEPTH=1 turns it off.
+# With 2 cameras each gets NPU_CORES // 2 workers (1), with one camera all of them.
+NPU_CORES = max(1, int(_env("AIV_NPU_CORES", "3")))
+
+
+def pipeline_depth(engine):
+    v = str(_env("AIV_PIPELINE_DEPTH", "auto")).strip().lower()
+    if v not in ("", "auto"):
+        return max(1, int(v))
+    return NPU_CORES if engine == "rknn" else 1
+
 # --- AI frame sampling (defaults for every camera; each camera's module settings can override them,
 #     camera["detection"]["modules"][<module>]["schedule"]) ---
 #   *_INTERVAL   seconds between two AI analyses of a camera (0 = every frame, the previous behaviour).

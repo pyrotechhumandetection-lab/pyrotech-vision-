@@ -47,6 +47,14 @@ class RateEasingTests(unittest.TestCase):
         self.assertEqual(r.value, 15)
 
 
+class _Eng:
+    """Stand-in for the line-crossing engine: remembers the pipeline depth it was given."""
+    depth = None
+
+    def set_depth(self, n):
+        self.depth = n
+
+
 class _Sess:
     """Stand-in for a CameraSession: only what the manager's rate / limit code touches."""
 
@@ -56,6 +64,7 @@ class _Sess:
         self.rate = ai_rate.Rate(config.AI_FPS_MAX)
         self.rate_fresh = True
         self.metrics = {}
+        self.cross = _Eng()
 
 
 class ManagerLimitTests(unittest.TestCase):
@@ -73,6 +82,15 @@ class ManagerLimitTests(unittest.TestCase):
         self.assertEqual(a.rate.goal, ai_rate.target(2))
         self.assertEqual(b.rate.value, ai_rate.target(2))                              # new cameras start at their share
         self.assertEqual(a.metrics["aiCameras"], 2)
+
+    def test_pipeline_depth_one_camera_all_cores_two_cameras_one_each(self):
+        a, b = _Sess(["ppe"]), _Sess(["pcross"])
+        m = self.mgr(A=a)
+        m._rebalance()
+        self.assertEqual(a.cross.depth, config.NPU_CORES)                              # one camera: every core
+        m.sessions["B"] = b
+        m._rebalance()
+        self.assertEqual((a.cross.depth, b.cross.depth), (config.NPU_CORES // 2,) * 2)  # two cameras: one core each (3 // 2 = 1)
 
     def test_leaving_camera_raises_the_other_back_to_the_maximum(self):
         a, b = _Sess(["ppe"]), _Sess(["pcross"])

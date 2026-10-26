@@ -33,18 +33,25 @@ def cfg(mod, **kw):
 class ScriptedEngine(ce.CrossingEngine):
     """Engine without a model: `script(frame_id)` returns the detections of that frame."""
 
-    def __init__(self, on_event, script, delay=0.0):
-        self._script, self._delay = script, delay
+    def __init__(self, on_event, script, delay=0.0, depth_max=1, delays=None):
+        self._script, self._delay, self._delays = script, delay, delays
         ce.load_model, self._orig = (lambda: (object(), "pytorch", 640, Path("scripted.pt"))), ce.load_model
         try:
-            super().__init__(on_event, camera_id="t")
+            super().__init__(on_event, camera_id="t", depth_max=depth_max)
         finally:
             ce.load_model = self._orig
+        self.assoc_order = []
 
-    def _detect(self, frame, mods):
-        if self._delay:
-            time.sleep(self._delay)
-        return self._script(int(frame[0, 0, 0])), 1.0        # frame id is stored in pixel [0,0,0] by `frame(i)`
+    def _infer(self, frame, mods, model=None):
+        i = int(frame[0, 0, 0])                                # frame id is stored in pixel [0,0,0] by `frame(i)`
+        d = self._delays(i) if self._delays else self._delay
+        if d:
+            time.sleep(d)
+        return (i, self._script(i)), 1.0
+
+    def _assoc(self, raw, frame):
+        self.assoc_order.append(raw[0])
+        return raw[1]
 
 
 def frame(i):
@@ -360,6 +367,83 @@ class AlertWiringTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["severity"], "low")
 
 
+class PipelineTests(unittest.TestCase):
+    """Frame pipeline plumbing with SCRIPTED detections and a sleep standing in for the network (no model, no speed claim):
+    workers analyse different frames at the same time, the tracker still sees them in frame order."""
+
+    def _feed(self, eng, n):
+        for i in range(n):
+            while True:                                         # never drop: wait until a worker has taken the waiting frame
+                eng._last_submit = 0.0
+                if eng.job is None and eng.submit(frame(i), time.time(), i):
+                    break
+                time.sleep(0.002)
+        end = time.time() + 10
+        while time.time() < end and eng.metrics()["framesProcessed"] < n:
+            time.sleep(0.02)
+
+    def test_results_reach_the_tracker_in_frame_order_even_when_later_frames_finish_first(self):
+        eng = ScriptedEngine(Collect(), lambda i: [], depth_max=3, delays=lambda i: 0.16 if i % 3 == 0 else 0.02)
+        try:
+            eng.set_module("pcross", cfg("pcross"))
+            eng.set_depth(3)
+            self._feed(eng, 30)
+            self.assertEqual(eng.assoc_order, sorted(eng.assoc_order))
+            self.assertEqual(eng.assoc_order, list(range(30)))
+        finally:
+            eng.close()
+
+    def test_three_workers_overlap_frames(self):
+        out = {}
+        for depth in (1, 3):
+            eng = ScriptedEngine(Collect(), lambda i: [], depth_max=3, delay=0.05)
+            try:
+                eng.set_module("pcross", cfg("pcross"))
+                eng.set_depth(depth)
+                t0 = time.time()
+                self._feed(eng, 30)
+                out[depth] = time.time() - t0
+                self.assertEqual(eng.metrics()["pipeline"]["depth"], depth)
+            finally:
+                eng.close()
+        self.assertLess(out[3], out[1] * 0.6, out)                                # simulated 50 ms "network": 30 frames, 1 vs 3 workers
+
+    def test_depth_one_uses_only_the_first_worker(self):
+        eng = ScriptedEngine(Collect(), lambda i: [], depth_max=3, delay=0.02)
+        try:
+            eng.set_module("pcross", cfg("pcross"))
+            seen = set()
+            orig = eng._infer
+
+            def spy(frame_, mods, model=None):
+                seen.add(threading.current_thread().name)
+                return orig(frame_, mods, model)
+            eng._infer = spy
+            self._feed(eng, 10)
+            self.assertEqual(len(seen), 1)
+        finally:
+            eng.close()
+
+    def test_a_failed_frame_does_not_stall_the_frames_after_it(self):
+        eng = ScriptedEngine(Collect(), lambda i: [], depth_max=3, delay=0.01)
+        try:
+            eng.set_module("pcross", cfg("pcross"))
+            eng.set_depth(3)
+
+            def script(i):
+                if i == 4:
+                    raise RuntimeError("scripted network failure")
+                return []
+            eng._script = script
+            self._feed(eng, 12)
+            time.sleep(0.3)
+            m = eng.metrics()
+            self.assertEqual((m["framesProcessed"], m["errors"]), (11, 1))
+            self.assertEqual(eng.assoc_order, [i for i in range(12) if i != 4])
+        finally:
+            eng.close()
+
+
 SRC = Path(os.environ.get("AIV_PPE_TEST_IMAGE_DIR", "/mnt/user-data/uploads/ppe detection/Realtime-Edge-PPE-Detection"))
 
 
@@ -404,6 +488,67 @@ class RealModelSimulatedMotionTests(unittest.TestCase):
         self.assertNotEqual(e["verdict"], jd.MISSING)
         ev, v = self._slide("road.jpg", "pcross")
         self.assertEqual(v["counts"], {"in": 0, "out": 0})
+
+
+
+@unittest.skipUnless((SRC / "cons1.jpg").is_file() and Path(ce.config.MODEL_PATH).is_file(), "staged photos / model not available")
+class RealModelPipelineTests(unittest.TestCase):
+    """REAL detector + tracker. The split network / tracker path must give what model.track gave, and 3 workers the same counts."""
+
+    def _frames(self, n=30):
+        import cv2
+        img = cv2.imread(str(SRC / "cons1.jpg"))
+        sprite = cv2.resize(img, None, fx=420 / img.shape[0], fy=420 / img.shape[0])
+        sh, sw = sprite.shape[:2]
+        out = []
+        for i in range(n):
+            canvas = np.full((H, W, 3), 110, np.uint8)
+            y0 = int(20 + i * (H - sh - 40) / (n - 1))
+            canvas[y0:y0 + sh, (W - sw) // 2:(W - sw) // 2 + sw] = sprite
+            out.append(canvas)
+        return out
+
+    def test_split_path_matches_model_track(self):
+        eng = ce.CrossingEngine(Collect(), camera_id="eq", depth_max=1)
+        try:
+            eng.set_module("pcross", cfg("pcross", confidence=0.3))
+            mods = list(eng.mods.values())
+            ref_model = ce.load_model()[0]                                      # a second, untouched model: model.track as before
+            for f in self._frames(24):
+                dets, _ms = eng._detect(f, mods)
+                r = ref_model.track(f, persist=True, tracker=str(ce.config.TRACKER_CONFIG), imgsz=eng.imgsz, conf=0.3,
+                                    classes=[0, 1, 3], verbose=False)[0]
+                ref = [(int(b.id), [round(float(v), 1) for v in b.xyxy[0].tolist()]) for b in r.boxes if b.id is not None]
+                got = [(d["tid"], [round(v, 1) for v in d["box"]]) for d in dets]
+                self.assertEqual(sorted(got), sorted(ref))
+        finally:
+            eng.close()
+
+    def test_three_workers_count_like_one(self):
+        res = {}
+        for depth in (1, 3):
+            got = Collect()
+            eng = ce.CrossingEngine(got, camera_id="pl", depth_max=3)
+            try:
+                c = cfg("pcross", confidence=0.3)
+                c["line"]["y1"] = c["line"]["y2"] = 0.8
+                eng.set_module("pcross", c)
+                eng.set_depth(depth)
+                for i, f in enumerate(self._frames(40)):
+                    while True:
+                        eng._last_submit = 0.0
+                        if eng.job is None and eng.submit(f, time.time(), i):
+                            break
+                        time.sleep(0.002)
+                end = time.time() + 60
+                while time.time() < end and eng.metrics()["framesProcessed"] < 40:
+                    time.sleep(0.05)
+                time.sleep(0.5)
+                res[depth] = (eng.view("pcross")["counts"], eng.metrics()["framesProcessed"], eng.metrics()["pipeline"]["orderSkipped"])
+            finally:
+                eng.close()
+        self.assertEqual(res[1][0], res[3][0], res)
+        self.assertEqual((res[1][1], res[3][1], res[3][2]), (40, 40, 0), res)
 
 
 if __name__ == "__main__":

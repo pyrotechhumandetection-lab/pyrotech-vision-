@@ -177,10 +177,43 @@ class _Module:
         return out
 
 
+def _pinned(core):
+    """Load the next model on this NPU core (RKNN only; ignored by every other engine)."""
+    try:
+        from backend.detection import rknn_runtime
+        return rknn_runtime.pinned_core(core)
+    except Exception:
+        import contextlib
+        return contextlib.nullcontext()
+
+
 class CrossingEngine:
-    def __init__(self, on_event, camera_id="", thread_name=None, target_fps=30.0):
+    """Frame pipeline: `depth` detection workers (each its own model = its own NPU core) take the newest frames and run the
+    network in parallel; ONE tracking thread takes their results in frame order (ByteTrack needs the order) and runs the
+    crossing rules. One camera therefore keeps all three RK3588 NPU cores busy instead of one."""
+
+    def __init__(self, on_event, camera_id="", thread_name=None, target_fps=30.0, depth_max=None):
         self.on_event, self.camera_id, self.thread_name = on_event, camera_id, thread_name
-        self.model, self.engine, self.imgsz, self.model_path = load_model()
+        try:
+            from backend.detection import rknn_runtime
+            base = rknn_runtime.new_engine_base()
+            core = lambda j: rknn_runtime.core_for(base, j)
+        except Exception:
+            core = lambda j: None
+        with _pinned(core(0)):
+            first = load_model()
+        self.model, self.engine, self.imgsz, self.model_path = first
+        self.models = [self.model]
+        want = depth_max if depth_max is not None else config.pipeline_depth(self.engine)
+        for j in range(1, max(1, int(want))):
+            try:
+                with _pinned(core(j)):
+                    self.models.append(load_model()[0])
+            except Exception as exc:                  # fewer workers, same results
+                log.warning("camera %s: detection worker %d not started (%s)", camera_id, j + 1, exc)
+                break
+        self.depth = 1                                # workers allowed to run now (set_depth, follows the camera count)
+        self._tracker = None
         self.names = {v: k for k, v in COCO.items()}
         self.mods = {}                              # module id -> _Module
         self.target_fps = float(target_fps)
@@ -188,20 +221,32 @@ class CrossingEngine:
         self._rate_cap = None
         self.lock = threading.Condition()
         self.job, self.busy = None, False
+        self._seq, self._next, self.inflight = 0, 0, 0   # frame order: numbers are given when a worker takes a frame
+        self.ready, self._gap_since = {}, None            # finished detections waiting for their turn in the tracker
         self._stop = threading.Event()
         self._last_submit = 0.0
         self.frame_shape = None
         self.result = None                          # drawing data of the last analysed frame
         self.m = {"submitted": 0, "processed": 0, "droppedReplaced": 0, "droppedStale": 0, "skippedInterval": 0, "errors": 0,
-                  "lastError": None, "lastFrameId": None, "lastCapturedAt": None}
+                  "lastError": None, "lastFrameId": None, "lastCapturedAt": None, "orderSkipped": 0}
         self.done_times = deque(maxlen=200)         # wall-clock end of each analysis (inference fps)
         self.infer_ms = deque(maxlen=200)           # model time per frame
         self.latency_ms = deque(maxlen=200)         # capture -> result (what the user waits)
         self.stage_ms = {}
         self.started = time.time()
         self.judger = _JudgeWorker(thread_name)
-        self.worker = threading.Thread(target=self._run, name=thread_name or "cross-worker", daemon=True)
-        self.worker.start()
+        self.workers = [threading.Thread(target=self._run, args=(j,), name=(thread_name or "cross") + f"-det{j}", daemon=True)
+                        for j in range(len(self.models))]
+        for w in self.workers:
+            w.start()
+        self.tracker_thread = threading.Thread(target=self._track_loop, name=(thread_name or "cross") + "-track", daemon=True)
+        self.tracker_thread.start()
+
+    def set_depth(self, n):
+        """How many detection workers may run (1 .. models loaded). More workers = more frames in flight at once."""
+        with self.lock:
+            self.depth = max(1, min(len(self.models), int(n)))
+            self.lock.notify_all()
 
     # ------------------------------------------------------------ config
     def set_module(self, mid, cfg, paused=False):
@@ -256,31 +301,74 @@ class CrossingEngine:
             self.lock.notify()
         return True
 
-    def _run(self):
+    def _run(self, idx=0):
+        """Detection worker `idx`: newest frame in, raw detections out (parallel with the other workers)."""
         if self.thread_name:
             name_thread(self.thread_name)
+        model = self.models[idx]
         while not self._stop.is_set():
             with self.lock:
-                while self.job is None and not self._stop.is_set():
+                while not self._stop.is_set() and (self.job is None or idx >= self.depth):
                     self.lock.wait(0.5)
                 if self._stop.is_set():
                     return
                 (frame, captured_at, fid), self.job = self.job, None
-                self.busy = True
-            try:
                 if time.time() - captured_at > MAX_AGE_SEC:
                     self.m["droppedStale"] += 1
                     continue
-                self.process(frame, captured_at, fid)
+                seq, self._seq = self._seq, self._seq + 1
+                self.inflight += 1
+                mods = [m for m in self.mods.values() if not m.paused]
+            item = None
+            try:
+                if mods:
+                    raw, ms = self._infer(frame, mods, model)
+                    item = (frame, captured_at, fid, raw, ms)
+            except Exception as exc:
+                self.m["errors"] += 1
+                self.m["lastError"] = repr(exc)
+                log.exception("line crossing detection failed")
+            with self.lock:
+                self.ready[seq] = item                   # None = nothing to track, but the number is used up
+                self.inflight -= 1
+                self.lock.notify_all()
+
+    def _track_loop(self):
+        """Tracking + rules, strictly in frame order."""
+        if self.thread_name:
+            name_thread(self.thread_name)
+        while not self._stop.is_set():
+            with self.lock:
+                item = None
+                while not self._stop.is_set():
+                    if self._next in self.ready:
+                        item = self.ready.pop(self._next)
+                        self._next += 1
+                        self._gap_since = None
+                        break
+                    if self.ready:                       # a later frame is done but this one is not: wait a little, then go on
+                        now = time.time()
+                        self._gap_since = self._gap_since or now
+                        if now - self._gap_since > 2.0:
+                            self._next = min(self.ready)
+                            self.m["orderSkipped"] += 1
+                            self._gap_since = None
+                            continue
+                    self.lock.wait(0.1)
+                self.busy = self.inflight > 0 or bool(self.ready)
+            if item is None:
+                continue
+            frame, captured_at, fid, raw, ms = item
+            try:
+                self._finish(frame, captured_at, fid, self._assoc(raw, frame), ms, time.perf_counter() - ms / 1000.0)
             except Exception as exc:
                 self.m["errors"] += 1
                 self.m["lastError"] = repr(exc)
                 log.exception("line crossing analysis failed")
-            finally:
-                self.busy = False
 
     # ------------------------------------------------------------ analysis
-    def _detect(self, frame, mods):
+    def _infer(self, frame, mods, model=None):
+        """Network only (no tracking): returns (detections of this frame, model ms). Safe to run in parallel on different models."""
         classes, conf = set(), 1.0
         for m in mods:
             conf = min(conf, float(m.cfg.get("confidence", 0.35)))
@@ -297,14 +385,32 @@ class CrossingEngine:
             kw["iou"] = config.NMS_IOU
         t0 = time.perf_counter()
         with gated():
-            r = self.model.track(frame, persist=True, tracker=str(config.TRACKER_CONFIG), **kw)[0]
+            r = (model or self.model).predict(frame, **kw)[0]
         ms = (time.perf_counter() - t0) * 1000.0
+        return r.boxes.cpu().numpy(), ms
+
+    def _assoc(self, raw, frame):
+        """ByteTrack association of one frame's detections (call in frame order only) -> detections with track ids."""
+        if self._tracker is None:
+            from backend.detection.tracker import install
+            from ultralytics.trackers import track as ul_track
+            from ultralytics.utils import YAML, IterableSimpleNamespace
+            from ultralytics.utils.checks import check_yaml
+            install()
+            cfg = IterableSimpleNamespace(**YAML.load(check_yaml(str(config.TRACKER_CONFIG))))
+            cfg.device = "cpu"
+            self._tracker = ul_track.TRACKER_MAP[cfg.tracker_type](args=cfg)
+        tracks = self._tracker.update(raw, frame)
         dets = []
-        if r.boxes is not None:
-            for b in r.boxes:
-                dets.append({"tid": int(b.id) if b.id is not None else None, "cls": self.names.get(int(b.cls), "?"),
-                             "box": [float(v) for v in b.xyxy[0].tolist()], "conf": float(b.conf)})
-        return dets, ms
+        for row in tracks:                                   # x1 y1 x2 y2 track_id score class index
+            dets.append({"tid": int(row[4]), "cls": self.names.get(int(row[6]), "?"),
+                         "box": [float(v) for v in row[:4]], "conf": float(row[5])})
+        return dets
+
+    def _detect(self, frame, mods):
+        """Network + tracking in one call (used by process(); the pipeline runs the two halves on different threads)."""
+        raw, ms = self._infer(frame, mods)
+        return self._assoc(raw, frame), ms
 
     def _tracker_for(self, mod, w, h):
         c = mod.cfg
@@ -333,6 +439,15 @@ class CrossingEngine:
         if not mods:
             return
         dets, infer = self._detect(frame, mods)
+        self._finish(frame, captured_at, fid, dets, infer, t_start)
+
+    def _finish(self, frame, captured_at, fid, dets, infer, t_start):
+        h, w = frame.shape[:2]
+        self.frame_shape = (h, w)
+        with self.lock:
+            mods = [m for m in self.mods.values() if not m.paused]
+        if not mods:
+            return
         persons = [d for d in dets if d["cls"] == "person"]
         bikes = [d for d in dets if d["cls"] in ("motorcycle", "bicycle")]
         riders = associate_riders(persons, bikes)
@@ -581,6 +696,7 @@ class CrossingEngine:
                           "evidenceSkippedBusy": self.judger.stats["skippedBusy"], "crossingsFinalised": self.judger.stats["finalised"],
                           "msAvg": round(sum(self.judger.stats["ms"]) / len(self.judger.stats["ms"]), 1) if self.judger.stats["ms"] else None,
                           "errors": self.judger.stats["errors"]},
+                "pipeline": {"depth": self.depth, "workers": len(self.models), "inFlight": self.inflight, "orderSkipped": m["orderSkipped"]},
                 "model": self.model_path.name if hasattr(self.model_path, "name") else str(self.model_path), "engine": self.engine,
                 "uptimeSec": round(now - self.started, 1)}
 
