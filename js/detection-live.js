@@ -164,15 +164,6 @@
   }
 
   /** Frames received from the camera / analysed by the AI / skipped while the AI was busy (all measured). */
-  function framesLine(m) {
-    if (!m.framesReceived) return '<span class="dim">Unavailable</span>';
-    const queue = m.framePolicy === 'queue';
-    const total = (m.framesProcessed || 0) + (m.framesDropped || 0);
-    const pct = total ? Math.round(m.framesDropped / total * 100) : 0;
-    return esc(m.framesReceived) + ' received since connect · ' + esc(m.framesProcessed || 0) + ' analysed · ' + esc(m.framesDropped || 0) +
-      (queue ? ' dropped (queue full)' : ' skipped') + (total ? ' <span class="dim">(' + pct + '%)</span>' : '') +
-      (m.cameraGaps ? ' <span class="dim">· ' + esc(m.cameraGaps) + ' missing in the camera stream</span>' : '');
-  }
   /** Which stream the AI analyses (substream for detection, main for viewing / HD snapshots). */
   function aiStreamLine(m) {
     const a = m.aiStream || {};
@@ -195,40 +186,93 @@
       (m.cameraFps ? Math.round(1000 / m.cameraFps) : '?') + ' ms</span>';
   }
 
+  /** The numbers of the frame flow camera -> AI, from the module's own counters when it has them (line crossing), else the session's. */
+  function flowData(s, m, mod) {
+    const c = mod.cross && s.cross && s.cross.metrics ? s.cross.metrics : null;
+    const aiFps = c ? c.inferenceFps : (mod.id === 'fire' ? m.fireAnalysedFps : m.processingFps);
+    const limit = c ? c.targetFps : (m.aiFpsTarget != null ? m.aiFpsTarget : m.captureFpsTarget);
+    const analysed = c ? c.framesProcessed : m.framesProcessed;
+    const dropped = c ? c.framesDropped : m.framesDropped;
+    const seen = (analysed || 0) + (dropped || 0);
+    return { c: c, aiFps: aiFps, limit: limit, analysed: analysed, dropped: dropped, pct: seen ? Math.round(dropped / seen * 100) : 0,
+             queue: m.framePolicy === 'queue' ? { len: m.queueLen || 0, cap: m.queueCapacity, peak: m.queuePeak || 0 } : null };
+  }
+  function flowTile(label, value, sub, tone) {
+    return '<div class="ppe-tile' + (tone ? ' ' + tone : '') + '"><span>' + esc(label) + '</span><b>' + value + '</b><span class="dim">' + sub + '</span></div>';
+  }
+  /** Four tiles: what the camera sends, what the AI processes, what waits in the queue, what was dropped. */
+  function flowTiles(s, m, mod, k) {
+    const f = flowData(s, m, mod);
+    const num = function (v, d) { return v === null || v === undefined ? '—' : (typeof v === 'number' ? v.toFixed(d) : esc(v)); };
+    const behind = typeof f.aiFps === 'number' && typeof m.cameraFps === 'number' && f.aiFps < m.cameraFps * 0.9;
+    const q = f.queue;
+    return '<div class="ppe-tiles dl-tiles">' +
+      flowTile('Camera sends', num(m.cameraFps, 1) + '<small> fps</small>', m.streamFps ? 'camera set to ' + esc(m.streamFps) + ' fps' : 'set fps not reported') +
+      flowTile('AI processes', num(f.aiFps, 1) + '<small> fps</small>', f.limit ? 'limit ' + esc(Math.round(f.limit * 10) / 10) + ' fps' : '&nbsp;', k === 'processing' && behind ? 'warn' : 'ok') +
+      flowTile('In queue', q ? esc(q.len) + '<small> / ' + esc(q.cap != null ? q.cap : '?') + '</small>' : '—', q ? 'peak ' + esc(q.peak) : 'newest frame only') +
+      flowTile('Dropped', f.dropped == null ? '—' : esc(f.dropped), f.dropped == null ? '&nbsp;' : f.pct + ' % of frames', f.pct > 10 ? 'warn' : '') +
+      '</div>';
+  }
+  function sec(title) { return '<dt class="dl-sec">' + esc(title) + '</dt>'; }
+
   function renderStatus() {
     const el = root.querySelector('#dl-status');
     const s = status || {}, k = stateKey(), su = STATE_UI[k] || STATE_UI.stopped, m = s.metrics || {};
     const cam = selectedCam();
+    const f = flowData(s, m, mod), c = f.c, queue = m.framePolicy === 'queue';
+    const stream = esc({ processing: 'Receiving frames', connected: 'Receiving frames', disconnected: 'Disconnected — reconnecting', error: 'Error', not_connected: 'Not connected', connecting: 'Connecting' }[s.cameraState] || (s.cameraState ? s.cameraState : '—'));
+    const dropParts = [];
+    if (c) {
+      dropParts.push(esc(c.droppedReplaced || 0) + ' replaced by a newer frame', esc(c.droppedStale || 0) + ' too old');
+    } else if (queue) dropParts.push('queue full');
+    if (m.cameraGaps) dropParts.push(esc(m.cameraGaps) + ' missing in the camera stream');
+    if (c && c.skippedInterval) dropParts.push('not counted: ' + esc(c.skippedInterval) + ' skipped to keep the ' + esc(Math.round(c.targetFps * 10) / 10) + ' fps limit');
     el.innerHTML = '<div class="card-head"><h2 id="dl-status-h">Detection Status</h2><span class="spacer"></span><span class="badge ' + su[0] + '">' + (k === 'processing' ? '<span class="dot pulse"></span>' : '') + su[1] + '</span></div>' +
+      flowTiles(s, m, mod, k) +
       '<dl class="kv dl-kv">' +
+      sec('Camera and engine') +
       '<dt>Backend</dt><dd>' + (api.status.connected ? '<span class="badge badge-success">Connected</span>' : '<span class="badge badge-muted">Not connected</span>') + '</dd>' +
-      '<dt>Camera</dt><dd>' + (cam ? esc(cam.name) + ' <span class="mono dim">' + esc(cam.id) + '</span>' : '<span class="dim">None selected</span>') + '</dd>' +
-      '<dt>Camera IP</dt><dd>' + (cam ? ui.ipHtml(cam) : '<span class="dim">No camera selected</span>') + '</dd>' +
-      '<dt>Camera stream</dt><dd>' + esc({ processing: 'Receiving frames', connected: 'Receiving frames', disconnected: 'Disconnected — reconnecting', error: 'Error', not_connected: 'Not connected', connecting: 'Connecting' }[s.cameraState] || (s.cameraState ? s.cameraState : '—')) + '</dd>' +
+      '<dt>Camera</dt><dd>' + (cam ? esc(cam.name) + ' <span class="mono dim">' + esc(cam.id) + '</span> · ' + ui.ipHtml(cam) : '<span class="dim">None selected</span>') + '</dd>' +
+      '<dt>Camera stream</dt><dd>' + stream + (m.resolution ? ' <span class="dim">· ' + esc(m.resolution) + '</span>' : '') + '</dd>' +
+      '<dt>AI stream</dt><dd>' + aiStreamLine(m) + '</dd>' +
       '<dt>Detection engine</dt><dd>' + esc(su[1]) + (s.modelAvailable === false ? ' <span class="badge badge-danger">Model file missing</span>' : (s.modelFile ? ' <span class="dim">' + esc(s.modelFile) + '</span>' : '')) +
       (s.sharedWith && s.sharedWith.length ? '<div class="dim" style="font-size:12px">' + (mod.id === 'fire' ? 'Sharing the camera connection with: ' : 'Sharing the camera\'s inference pass with: ') + esc(s.sharedWith.map(modTitle).join(', ')) + '</div>' : '') + '</dd>' +
+
+      sec('Frames') +
+      '<dt>Received</dt><dd>' + (m.framesReceived ? esc(m.framesReceived) + ' <span class="dim">since connect</span>' : '<span class="dim">Unavailable</span>') + '</dd>' +
+      '<dt>Analysed by AI</dt><dd>' + fmt(f.analysed) + '</dd>' +
+      '<dt>Dropped</dt><dd>' + fmt(f.dropped) + (f.dropped != null ? ' <span class="dim">(' + f.pct + ' %)</span>' : '') + (dropParts.length ? '<div class="dim" style="font-size:11.5px">' + dropParts.join(' · ') + '</div>' : '') + '</dd>' +
+      (queue ? '<dt>Queue</dt><dd>' + esc(m.queueLen || 0) + ' of ' + fmt(m.queueCapacity, ' frames') + ' waiting <span class="dim">(peak ' + esc(m.queuePeak || 0) + ')</span></dd>' : '') +
+      (c && c.pipeline ? '<dt>In flight</dt><dd>' + esc(c.pipeline.inFlight) + ' <span class="dim">frame(s) on ' + esc(c.pipeline.depth) + ' of ' + esc(c.pipeline.workers) + ' detection worker(s)</span></dd>' : '') +
+      '<dt>Live view</dt><dd>' + fmt(m.displayFps, ' fps sent') + (m.displayEncodeMs != null ? ' <span class="dim">· ' + esc(m.displayEncodeMs) + ' ms JPEG encode</span>' : '') + '</dd>' +
+      (m.lastDisconnectReason ? '<dt>Last disconnect</dt><dd class="dim">' + esc(m.lastDisconnectReason) + '</dd>' : '') +
+      (m.disconnections ? '<dt>Disconnections</dt><dd>' + esc(m.disconnections) + '</dd>' : '') +
+
+      sec('Timing') +
+      '<dt>Inference</dt><dd>' + (c ? fmt(c.inferenceMsAvg, ' ms') + (c.inferenceMsP95 != null ? ' <span class="dim">· p95 ' + esc(c.inferenceMsP95) + ' ms</span>' : '')
+          : fmt(m.inferenceMs, ' ms') + (m.inferenceMsRecent != null ? ' <span class="dim">· latest ' + esc(m.inferenceMsRecent) + ' ms</span>' : '')) +
+        (c ? ' <span class="dim">· ' + esc(c.model || '') + ' (' + esc(c.engine || '') + ')</span>'
+          : (m.engine ? ' <span class="dim">· ' + esc(m.engine) + ' (' + esc(m.device || 'CPU') + (m.precision ? ', ' + esc(m.precision) : '') + (m.imgSize ? ', ' + esc(m.imgSize) + ' px' : '') + ')</span>' : '')) + '</dd>' +
+      '<dt>Latency</dt><dd>' + (c ? fmt(c.latencyMsAvg, ' ms') + (c.latencyMsP95 != null ? ' <span class="dim">· p95 ' + esc(c.latencyMsP95) + ' ms</span>' : '') + ' <span class="dim">capture → result</span>'
+          : (queue ? fmt(m.latencyMs, ' ms') + ' <span class="dim">receive → analysed' + (m.latencyMsMax != null ? ' (max ' + esc(m.latencyMsMax) + ' ms)' : '') + '</span>'
+            : fmt(m.frameAgeMs, ' ms') + ' <span class="dim">frame age at analysis</span>')) + '</dd>' +
+      (!c && m.loopMs != null ? '<dt>Per frame</dt><dd>' + esc(m.loopMs) + ' ms <span class="dim">incl. tracking / drawing</span></dd>' : '') +
+      schedRow(m, mod.id) +
+
+      sec(mod.cross ? 'Line and tracking' : 'Result') +
       '<dt>In view now</dt><dd>' + (k === 'processing' ? counts(s.currentCounts) : '<span class="dim">—</span>') + '</dd>' +
       (mod.id === 'fire' ? fireRows(s) : mod.id === 'ppe' ? ppeRows(s) : mod.cross ? window.AV.cross.rows(s, mod.id) :
       '<dt>Confirmed tracks</dt><dd>' + (s.uniqueCounts && Object.keys(s.uniqueCounts).length ? counts(s.uniqueCounts) + '<div class="dim" style="font-size:11.5px">Since start. ByteTrack can re-assign an ID after occlusion.</div>' : '<span class="dim">—</span>') + '</dd>') +
-      '<dt>Camera FPS (received)</dt><dd>' + fmt(m.cameraFps, ' fps') + (m.streamFps ? ' <span class="dim">· stream reports ' + esc(m.streamFps) + ' fps</span>' : '') + (m.resolution ? ' <span class="dim">· ' + esc(m.resolution) + '</span>' : '') + '</dd>' +
-      '<dt>AI stream</dt><dd>' + aiStreamLine(m) + '</dd>' +
       (mod.id === 'fire'
-        ? '<dt>Fire model FPS</dt><dd>' + fmt(m.fireAnalysedFps, ' fps analysed') + (s.fire && s.fire.engine ? ' <span class="dim">· ' + esc(s.fire.engine) + ', ' + esc(s.fire.inferenceMs) + ' ms</span>' : '') +
+        ? '<dt>Fire model</dt><dd>' + fmt(m.fireAnalysedFps, ' fps analysed') + (s.fire && s.fire.engine ? ' <span class="dim">· ' + esc(s.fire.engine) + ', ' + esc(s.fire.inferenceMs) + ' ms</span>' : '') +
           (m.fireSkipped ? ' <span class="dim">· ' + esc(m.fireSkipped) + ' frames skipped while the model was busy</span>' : '') + '</dd>'
         : mod.id === 'ppe'
         ? '<dt>PPE assessments</dt><dd>' + (s.ppe ? esc(s.ppe.runs) + ' done · one every ' + esc(s.ppe.intervalSec) + ' s' + (s.ppe.inferenceMs != null ? ' <span class="dim">· ' + esc(s.ppe.inferenceMs) + ' ms each</span>' : '') + (s.ppe.skipped ? ' <span class="dim">· ' + esc(s.ppe.skipped) + ' skipped while busy</span>' : '') : '<span class="dim">—</span>') + '</dd>'
-        : mod.cross ? ''
-        : '<dt>AI processing FPS</dt><dd>' + fmt(m.processingFps, ' fps') + '</dd>') +
-      schedRow(m, mod.id) +
-      '<dt>Live view FPS</dt><dd>' + fmt(m.displayFps, ' fps sent') + (m.displayEncodeMs != null ? ' <span class="dim">· ' + esc(m.displayEncodeMs) + ' ms JPEG encode (own thread)</span>' : '') + '</dd>' +
-      (m.lastDisconnectReason ? '<dt>Last disconnect</dt><dd class="dim">' + esc(m.lastDisconnectReason) + '</dd>' : '') +
-      '<dt>Frames</dt><dd>' + framesLine(m) + '</dd>' +
-      '<dt>AI inference time</dt><dd>' + fmt(m.inferenceMs, ' ms') + (m.inferenceMsRecent != null ? ' <span class="dim">· latest ' + esc(m.inferenceMsRecent) + ' ms</span>' : '') + (m.engine ? ' <span class="dim">· ' + esc(m.engine) + ' (' + esc(m.device || 'CPU') + (m.precision ? ', ' + esc(m.precision) : '') + (m.imgSize ? ', ' + esc(m.imgSize) + ' px' : '') + ')</span>' : '') + (m.loopMs != null ? ' <span class="dim">· ' + esc(m.loopMs) + ' ms per frame incl. tracking/drawing</span>' : '') + '</dd>' +
-      (m.framePolicy === 'queue'
-        ? '<dt>Queue / latency</dt><dd>' + esc(m.queueLen || 0) + ' of ' + fmt(m.queueCapacity, ' frames') + ' waiting <span class="dim">(peak ' + esc(m.queuePeak || 0) + ')</span> · ' + fmt(m.latencyMs, ' ms') + ' receive → analysed' + (m.latencyMsMax != null ? ' <span class="dim">(max ' + esc(m.latencyMsMax) + ' ms)</span>' : '') + (m.disconnections ? ' <span class="dim">· ' + m.disconnections + ' disconnection(s)</span>' : '') + '</dd>'
-        : '<dt>Frame age at analysis</dt><dd>' + fmt(m.frameAgeMs, ' ms') + (m.disconnections ? ' <span class="dim">· ' + m.disconnections + ' disconnection(s)</span>' : '') + '</dd>') +
-      '<dt>Bottleneck</dt><dd>' + bottleneck(m, k) + '</dd>' +
+        : '') +
       '<dt>Last ' + mod.noun + ' detected</dt><dd>' + (s.lastDetectionAt ? esc(ui.fmtTime(s.lastDetectionAt)) + ' <span class="dim">(' + esc(ui.relTime(s.lastDetectionAt)) + ')</span>' : '<span class="dim">None yet</span>') + '</dd>' +
+
+      sec('Bottleneck') +
+      '<dt>Limiting stage</dt><dd>' + bottleneck(m, k) + '</dd>' +
       '</dl>' + (s.error && s.error.message ? '<div class="notice notice-danger mt-12">' + icon('alertCircle', 16) + '<div><b>' + esc(s.error.code || 'Error') + '</b> ' + esc(s.error.message) + '</div></div>' : '');
   }
 

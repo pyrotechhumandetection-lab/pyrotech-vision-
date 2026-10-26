@@ -34,10 +34,6 @@
         : '<span class="badge badge-warning">Not drawn</span> <span class="dim">use “Draw line” above the picture</span>') +
       (c.warnings || []).map(function (w) { return '<div class="dim" style="font-size:12px;color:var(--warning)">' + esc(w) + '</div>'; }).join('') + '</dd>' +
       '<dt>Direction counted</dt><dd>' + esc({ both: 'Both (IN and OUT)', in: 'IN only', out: 'OUT only' }[c.direction] || c.direction) + '</dd>' +
-      '<dt>Inference rate</dt><dd>' + n(m.inferenceFps, 1) + ' fps <span class="dim">· target ' + esc(m.targetFps) + ' fps · measured over the last 5 s</span></dd>' +
-      '<dt>Inference time</dt><dd>' + n(m.inferenceMsAvg, 0) + ' ms <span class="dim">· p95 ' + (m.inferenceMsP95 == null ? '—' : esc(m.inferenceMsP95)) + ' ms · ' + esc(m.model || '') + ' (' + esc(m.engine || '') + ')</span></dd>' +
-      '<dt>Latency (capture → result)</dt><dd>' + n(m.latencyMsAvg, 0) + ' ms <span class="dim">· p95 ' + (m.latencyMsP95 == null ? '—' : esc(m.latencyMsP95)) + ' ms</span></dd>' +
-      '<dt>Frames (this module)</dt><dd>' + esc(m.framesProcessed || 0) + ' analysed · ' + esc(m.framesDropped || 0) + ' dropped <span class="dim">(' + esc(m.droppedReplaced || 0) + ' replaced by a newer frame, ' + esc(m.droppedStale || 0) + ' stale; ' + esc(m.droppedPct || 0) + ' %)</span> · ' + esc(m.skippedInterval || 0) + ' <span class="dim">held back by the ' + esc(m.targetFps) + ' fps interval</span></dd>' +
       '<dt>Tracking</dt><dd>' + esc(t.tracksStarted || 0) + ' tracks started · ' + esc(t.tracksLost || 0) + ' ended · ' + esc(t.tracksShort || 0) + ' too short to count · ' + esc(t.handovers || 0) + ' id hand-overs · ' + esc((t.suppressed || {}).duplicate || 0) + ' duplicates suppressed' +
         (t.meanTrackFrames != null ? ' <span class="dim">· mean track ' + esc(t.meanTrackFrames) + ' frames</span>' : '') + '<div class="dim" style="font-size:11.5px">Measured while running; these are tracker statistics, not an accuracy figure.</div></dd>' +
       (m.lastError ? '<dt>Last error</dt><dd><span class="badge badge-danger">' + esc(m.errors) + '</span> <span class="dim">' + esc(m.lastError) + '</span></dd>' : '');

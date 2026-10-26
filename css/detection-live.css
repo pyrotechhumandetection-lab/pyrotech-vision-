@@ -17,6 +17,14 @@
 .ppe-tile { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--card-2); }
 .ppe-tile b { font-size: 22px; line-height: 1.1; font-variant-numeric: tabular-nums; }
 .ppe-tile span { font-size: 12px; color: var(--text-2); }
+.dl-tiles { margin: 4px 0 14px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.dl-tiles .ppe-tile { padding: 9px 10px; }
+.dl-tiles .ppe-tile > span:first-child { font-size: 11.5px; text-transform: uppercase; letter-spacing: .03em; }
+.dl-tiles .ppe-tile b small { font-size: 12px; font-weight: 500; color: var(--text-2); }
+.dl-tiles .ppe-tile .dim { font-size: 11.5px; }
+.dl-kv dt.dl-sec { grid-column: 1 / -1; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); font-size: 11.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--text-2); }
+.dl-kv dt.dl-sec:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+@media (max-width: 560px) { .dl-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .ppe-tile.ok b { color: var(--success); } .ppe-tile.bad b { color: var(--danger); } .ppe-tile.warn b { color: var(--warning); }
 .ppe-table td, .ppe-table th { font-size: 12.5px; vertical-align: top; }
 @media (max-width: 1240px) { .dl-grid, .dl-grid.is-ppe { grid-template-columns: minmax(0, 1fr); grid-template-areas: "live" "side" "events"; } .dl-grid.is-ppe { grid-template-areas: "live" "ppe" "side" "events"; } }
