@@ -34,7 +34,7 @@
         : '<span class="badge badge-warning">Not drawn</span> <span class="dim">use “Draw line” above the picture</span>') +
       (c.warnings || []).map(function (w) { return '<div class="dim" style="font-size:12px;color:var(--warning)">' + esc(w) + '</div>'; }).join('') + '</dd>' +
       '<dt>Direction counted</dt><dd>' + esc({ both: 'Both (IN and OUT)', in: 'IN only', out: 'OUT only' }[c.direction] || c.direction) + '</dd>' +
-      '<dt>Tracking</dt><dd>' + esc(t.tracksStarted || 0) + ' tracks started · ' + esc(t.tracksLost || 0) + ' ended · ' + esc(t.tracksShort || 0) + ' too short to count · ' + esc(t.handovers || 0) + ' id hand-overs · ' + esc((t.suppressed || {}).duplicate || 0) + ' duplicates suppressed' +
+      '<dt>Tracking</dt><dd>' + esc(t.tracksStarted || 0) + ' tracks started · ' + esc(t.tracksLost || 0) + ' ended · ' + esc(t.tracksShort || 0) + ' too short to count · ' + esc(t.handovers || 0) + ' id hand-overs · ' + esc((t.suppressed || {}).duplicate || 0) + ' duplicates suppressed' + ((t.suppressed || {}).pathAroundLineEnd ? ' · <b>' + esc(t.suppressed.pathAroundLineEnd) + ' passed beyond a line end (not counted)</b>' : '') +
         (t.meanTrackFrames != null ? ' <span class="dim">· mean track ' + esc(t.meanTrackFrames) + ' frames</span>' : '') + '<div class="dim" style="font-size:11.5px">Measured while running; these are tracker statistics, not an accuracy figure.</div></dd>' +
       (m.lastError ? '<dt>Last error</dt><dd><span class="badge badge-danger">' + esc(m.errors) + '</span> <span class="dim">' + esc(m.lastError) + '</span></dd>' : '');
   }
@@ -208,6 +208,7 @@
       fld('Reference point', 'refPoint', sel('refPoint', [['bottom', 'Bottom centre (feet / wheels)'], ['center', 'Box centre']], c.refPoint), 'Which point of the box must pass the line.') +
       fld('Frames before a track counts', 'minTrackFrames', num('minTrackFrames', c.minTrackFrames, 1, 30, 1), 'A track seen in fewer frames never counts (ghost detections).') +
       fld('Dead band around the line', 'hysteresis', num('hysteresis', c.hysteresis, 0, 0.3, 0.01), 'Fraction of the object\'s height. Jitter inside it cannot flip the side.') +
+      fld('Line ends: count this far beyond A / B', 'endExtend', num('endExtend', c.endExtend, 0, 3, 0.1), 'Fraction of the person\'s width. People passing right at A or B are still counted; 0 = exact segment only.') +
       fld('Same track cannot re-cross within (s)', 'recrossSec', num('recrossSec', c.recrossSec, 0, 60, 0.5), '') +
       fld('Id hand-over window (s)', 'handoverSec', num('handoverSec', c.handoverSec, 0, 5, 0.1), 'A lost id replaced by a new one nearby within this time is the same object (occlusion).') +
       fld('Duplicate window (s)', 'dedupeSec', num('dedupeSec', c.dedupeSec, 0, 10, 0.1), 'Two crossings in one direction at the same spot within this time count once.') +
@@ -240,7 +241,7 @@
     const f = function (nm) { return parseFloat(q(nm).value); };
     const out = {
       direction: q('direction').value, confidence: f('confidence'), targetFps: f('targetFps'), refPoint: q('refPoint').value,
-      minTrackFrames: parseInt(q('minTrackFrames').value, 10), hysteresis: f('hysteresis'), recrossSec: f('recrossSec'), handoverSec: f('handoverSec'),
+      minTrackFrames: parseInt(q('minTrackFrames').value, 10), hysteresis: f('hysteresis'), endExtend: f('endExtend'), recrossSec: f('recrossSec'), handoverSec: f('handoverSec'),
       dedupeSec: f('dedupeSec'), minBoxFrac: f('minBoxFrac'), snapshot: { mode: q('snapmode').value },
       alert: { severity: q('severity').value, cooldownSec: f('alertCool'), labels: Array.prototype.map.call(form.querySelectorAll('[name="alertl"]:checked'), function (c) { return c.value; }) }
     };
@@ -251,7 +252,7 @@
       out.minMissingVotes = parseInt(q('minMissingVotes').value, 10); out.minHelmetVotes = parseInt(q('minHelmetVotes').value, 10);
       out.alert.compliantSeverity = q('compliantSeverity').value;
     }
-    const nums = [out.confidence, out.targetFps, out.minTrackFrames, out.hysteresis, out.recrossSec, out.handoverSec, out.dedupeSec, out.minBoxFrac, out.alert.cooldownSec];
+    const nums = [out.confidence, out.targetFps, out.minTrackFrames, out.hysteresis, out.endExtend, out.recrossSec, out.handoverSec, out.dedupeSec, out.minBoxFrac, out.alert.cooldownSec];
     if (nums.some(function (x) { return !isFinite(x); })) { errEl.textContent = 'Fill in every number.'; return null; }
     return out;
   }

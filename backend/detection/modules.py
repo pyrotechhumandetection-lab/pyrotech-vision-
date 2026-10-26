@@ -170,6 +170,7 @@ _CROSS_COMMON = {
     "refPoint": "bottom",                        # bottom = where the object touches the ground, center = box centre
     "minTrackFrames": 3,                         # a track must be seen in this many frames before it can count
     "hysteresis": 0.05,                          # dead band around the line, fraction of the object's box height
+    "endExtend": 0.5,                            # line ends count this far beyond A / B, as a fraction of the object's box width
     "recrossSec": 2.0,                           # the same track id cannot cross again within this time
     "handoverSec": 1.0,                          # a lost id replaced by a new one nearby within this time = same object
     "dedupeSec": 1.0,                            # two same-direction crossings at the same spot within this time = one
@@ -477,6 +478,7 @@ def _validate_cross(module_id, cfg):
     _num(errs, "targetFps", cfg.get("targetFps"), 1, 30)
     _num(errs, "minTrackFrames", cfg.get("minTrackFrames"), 1, 30, True)
     _num(errs, "hysteresis", cfg.get("hysteresis"), 0, 0.3)
+    _num(errs, "endExtend", cfg.get("endExtend"), 0, 3)
     _num(errs, "recrossSec", cfg.get("recrossSec"), 0, 60)
     _num(errs, "handoverSec", cfg.get("handoverSec"), 0, 5)
     _num(errs, "dedupeSec", cfg.get("dedupeSec"), 0, 10)

@@ -84,6 +84,17 @@ class CrossingRuleTests(unittest.TestCase):
         ev = walk(tracker(), 1, [100] * 10, [300, 330, 360, 390, 420, 450, 480, 520, 560, 600])
         self.assertEqual(ev, [])
 
+    def test_crossing_right_at_a_line_end_counts(self):
+        ys = [300, 330, 360, 390, 420, 450, 480, 520, 560, 600]
+        for x in (240, 1050):                                   # 16 px outside A / 26 px outside B, person 80 px wide
+            ev = walk(tracker(), 1, [x] * 10, ys)
+            self.assertEqual([e["direction"] for e in ev], [IN], x)
+        self.assertEqual(walk(tracker(end_extend=0), 1, [240] * 10, ys), [])      # exact segment only
+        self.assertEqual(walk(tracker(), 1, [1100] * 10, ys), [])                 # 76 px outside B: clearly around the end
+        t = tracker(end_extend=0)
+        walk(t, 1, [240] * 10, ys)
+        self.assertEqual(t.stats["aroundEnd"], 1)
+
     def test_cross_back_inside_cooldown_is_suppressed_then_counts_after(self):
         down = [300, 340, 380, 420, 460, 500]
         tr = tracker(recross_sec=2.0)

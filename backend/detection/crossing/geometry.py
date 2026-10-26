@@ -9,8 +9,9 @@ Sides: s(P) = cross(B-A, P-A) / |B-A| in pixels, positive on the side the arrow 
 
 A crossing is counted once when ALL of these hold:
   * the track was seen firmly (outside the hysteresis band) on one side and later firmly on the other side;
-  * the straight path between those two observations cuts the FINITE line segment (walking around its end
-    does not count);
+  * the straight path between those two observations cuts the FINITE line segment, which is extended at both ends by
+    `end_extend` x the object's box width (a person passing right at A or B still counts; walking clearly around an end
+    does not);
   * the track has been observed in at least `min_frames` frames (a one-frame ghost never counts);
   * the same track has not crossed within `recross_sec` (cooldown);
   * no other crossing in the same direction happened a moment ago at the same spot (`dedupe_sec`): this catches
@@ -106,10 +107,11 @@ class CrossingTracker:
     """Crossing decisions for the tracked objects of ONE line (one module, one camera)."""
 
     def __init__(self, line, width, height, *, ref="bottom", min_frames=3, hysteresis=0.05, recross_sec=2.0,
-                 handover_sec=1.0, dedupe_sec=1.0, forget_sec=3.0):
+                 handover_sec=1.0, dedupe_sec=1.0, forget_sec=3.0, end_extend=0.5):
         self.line, self.w, self.h, self.ref = line, int(width), int(height), ref
         self.min_frames, self.hyst, self.recross = int(min_frames), float(hysteresis), float(recross_sec)
         self.handover_sec, self.dedupe_sec, self.forget_sec = float(handover_sec), float(dedupe_sec), float(forget_sec)
+        self.end_extend = float(end_extend)
         self.tracks = {}
         self.recent = []                      # (t, direction, x, y, width) of accepted crossings
         self.stats = {"tracksStarted": 0, "tracksLost": 0, "tracksShort": 0, "handovers": 0, "untracked": 0,
@@ -153,7 +155,7 @@ class CrossingTracker:
                 tr.anchor = pt                             # still on its side: the anchor follows
             elif firm:
                 new_side = 1 if s > 0 else -1
-                hit = cuts_segment(self.line, tr.anchor, pt, self.w, self.h, tol_px=dead)
+                hit = cuts_segment(self.line, tr.anchor, pt, self.w, self.h, tol_px=max(dead, self.end_extend * tr.width))
                 if hit:
                     ev = self._accept(tr, d, pt, new_side, t, fid, gap)
                     if ev:

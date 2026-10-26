@@ -416,12 +416,13 @@ class CrossingEngine:
         c = mod.cfg
         line = Line.from_cfg(c)
         key = (w, h, None if line is None else (line.x1, line.y1, line.x2, line.y2), c.get("refPoint", "bottom"),
-               c.get("minTrackFrames", 3), c.get("hysteresis", 0.05), c.get("recrossSec", 2.0), c.get("handoverSec", 1.0), c.get("dedupeSec", 1.0))
+               c.get("minTrackFrames", 3), c.get("hysteresis", 0.05), c.get("recrossSec", 2.0), c.get("handoverSec", 1.0), c.get("dedupeSec", 1.0), c.get("endExtend", 0.5))
         if mod.tracker_key != key:
             keep = mod.tracker.stats if mod.tracker is not None and mod.tracker_key and mod.tracker_key[0:2] == key[0:2] else None
             mod.tracker = CrossingTracker(line, w, h, ref=c.get("refPoint", "bottom"), min_frames=c.get("minTrackFrames", 3),
                                           hysteresis=c.get("hysteresis", 0.05), recross_sec=c.get("recrossSec", 2.0),
-                                          handover_sec=c.get("handoverSec", 1.0), dedupe_sec=c.get("dedupeSec", 1.0)) if line else None
+                                          handover_sec=c.get("handoverSec", 1.0), dedupe_sec=c.get("dedupeSec", 1.0),
+                                          end_extend=float(c.get("endExtend", 0.5))) if line else None
             if keep is not None and mod.tracker is not None:
                 mod.tracker.stats.update(keep)       # a line edit keeps the reliability numbers of the session
             mod.tracker_key = key

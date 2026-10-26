@@ -39,3 +39,11 @@ The line-crossing engine splits one camera's work so that frames are analysed in
 * Checked: with the real detector the split network / tracker path gives the same track ids and boxes as `model.track` (24 frames), and 3 workers count the same as 1 (`RealModelPipelineTests`); ordering, overlap and a failing frame are tested with scripted detections (`PipelineTests`).
 * Measured on a 2-CPU PyTorch container (forced depth 3, not the RK3588): one camera analysed 14.9 fps of a 15 fps stream where one worker gave about 7.5 fps; two cameras (depth 1 each) stay at about 7.5 fps each. The RK3588 gain is **not measured yet**: compare `inferenceFps` in the detection status with `AIV_PIPELINE_DEPTH=1`.
 * Live values: `metrics.pipeline` (`depth`, `workers`, `inFlight`, `orderSkipped`) in the crossing status.
+
+
+## Line ends (A / B)
+
+The line is a finite segment. A person whose foot point passes right at A or B used to be missed when the path fell a few
+pixels outside the segment. The segment now counts `endExtend` (default 0.5) x the person's box width beyond A and B
+(setting "Line ends: count this far beyond A / B"; 0 = exact segment). A path clearly around an end is still not counted;
+the Tracking row shows how many such passes happened ("passed beyond a line end"), so a line that is too short is visible.
