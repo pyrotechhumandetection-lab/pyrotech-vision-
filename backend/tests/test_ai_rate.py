@@ -110,3 +110,68 @@ class ManagerLimitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NpuCoreTests(unittest.TestCase):
+    """Dynamic NPU cores with a recording stand-in for librknnrt (no NPU here: this checks the policy, not the speed)."""
+
+    def setUp(self):
+        import os
+        from backend.detection import rknn_runtime as rr
+        self.rr, self.env = rr, os.environ.pop("AIV_NPU_CORE", None)
+        self.soc, rr.soc = rr.soc, lambda: "rk3588"
+        self.calls = []
+
+        class Lib:
+            def rknn_set_core_mask(_s, ctx, mask):
+                self.calls.append(mask)
+                return 0
+        self.Lib = Lib
+
+    def tearDown(self):
+        import os
+        self.rr.soc = self.soc
+        self.rr.set_solo(False)
+        if self.env is not None:
+            os.environ["AIV_NPU_CORE"] = self.env
+
+    def inst(self, home):
+        m = self.rr.RKNNLite.__new__(self.rr.RKNNLite)
+        m.lib, m.ctx, m.core_mask, m.home_mask, m._mask_failed = self.Lib(), None, home, home, False
+        return m
+
+    def test_one_camera_uses_all_cores_two_cameras_one_each(self):
+        a = self.inst(self.rr.CORE_1)
+        self.rr.set_solo(True)
+        a._sync_mask()
+        self.assertEqual(a.core_mask, self.rr.CORE_0_1_2)
+        self.rr.set_solo(False)
+        a._sync_mask()
+        self.assertEqual(a.core_mask, self.rr.CORE_1)                  # back on its own core
+        self.assertEqual(self.calls, [self.rr.CORE_0_1_2, self.rr.CORE_1])
+
+    def test_no_driver_call_when_nothing_changes(self):
+        a = self.inst(self.rr.CORE_0)
+        a._sync_mask()
+        a._sync_mask()
+        self.assertEqual(self.calls, [])
+
+    def test_rr_mode_never_switches(self):
+        import os
+        os.environ["AIV_NPU_CORE"] = "rr"
+        try:
+            a = self.inst(self.rr.CORE_2)
+            self.rr.set_solo(True)
+            a._sync_mask()
+            self.assertEqual((a.core_mask, self.calls), (self.rr.CORE_2, []))
+        finally:
+            del os.environ["AIV_NPU_CORE"]
+
+    def test_refused_mask_is_kept_and_not_retried(self):
+        a = self.inst(self.rr.CORE_1)
+        a.lib = type("L", (), {"rknn_set_core_mask": lambda s, c, m: -1})()
+        self.rr.set_solo(True)
+        a._sync_mask()
+        a._sync_mask()
+        self.assertEqual(a.core_mask, self.rr.CORE_1)
+        self.assertTrue(a._mask_failed)

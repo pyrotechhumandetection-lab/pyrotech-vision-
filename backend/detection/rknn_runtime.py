@@ -10,9 +10,15 @@ Where librknnrt.so is looked for (first found):
     /usr/lib/aarch64-linux-gnu/librknnrt.so, /usr/local/lib/librknnrt.so
 The real rknn-toolkit-lite2 package is used instead when it is importable (Python <= 3.12).
 
-NPU cores (RK3588 has 3): every new model instance (= camera session / module) gets the next core in turn
-(AIV_NPU_CORE=rr, default), so 3 cameras run in parallel on 3 cores. auto = the driver picks, 0 / 1 / 2 / 0_1_2
-= fixed mask for every instance.
+NPU cores (RK3588 has 3):
+    AIV_NPU_CORE=dynamic (default)  ONE camera running -> every model instance uses all three cores (0+1+2);
+                                    two or more cameras -> each instance goes back to its own core (round robin), so
+                                    the cameras run in parallel. The switch follows the number of cameras that run
+                                    a module (SessionManager._rebalance -> set_solo) and happens between two frames.
+    AIV_NPU_CORE=rr                 every new model instance gets the next core in turn (the old default)
+    auto = the driver picks, 0 / 1 / 2 / 0_1_2 = fixed mask for every instance.
+Whether three cores make one stream faster than one core depends on the model: measure it on the box
+(./aivision.sh npu status shows the core in use and the inference time); AIV_NPU_CORE=rr turns the switch off.
 """
 import ctypes
 import hashlib
@@ -190,8 +196,27 @@ _CORE_LOCK = threading.Lock()
 CORE_MASKS = {"auto": CORE_AUTO, "0": CORE_0, "1": CORE_1, "2": CORE_2, "0_1_2": CORE_0_1_2, "all": CORE_0_1_2}
 
 
+_SOLO = {"on": False}           # exactly one camera runs a module (set by the session manager)
+
+
+def core_mode():
+    return os.environ.get("AIV_NPU_CORE", "dynamic").strip().lower()
+
+
+def set_solo(flag):
+    """One camera running -> instances may use all cores (dynamic mode only); they follow at their next frame."""
+    _SOLO["on"] = bool(flag)
+
+
+def wanted_mask(home):
+    """Core mask an instance should use now: all cores while one camera runs (dynamic mode, RK3588), else its own."""
+    if core_mode() == "dynamic" and _SOLO["on"] and home != CORE_AUTO and soc() == "rk3588":
+        return CORE_0_1_2
+    return home
+
+
 def next_core_mask():
-    want = os.environ.get("AIV_NPU_CORE", "rr").strip().lower()
+    want = core_mode()
     if want in CORE_MASKS:
         return CORE_MASKS[want]
     if soc() != "rk3588":            # only RK3588 has 3 cores; other chips: the driver decides
@@ -264,7 +289,8 @@ class RKNNLite:
             if ret != RKNN_SUCC:          # single-core chips refuse a mask: keep auto
                 log.warning("NPU core mask %s refused (%s) - driver chooses", core_name(mask), ret)
                 mask = CORE_AUTO
-        self.core_mask = mask
+        self.core_mask = self.home_mask = mask
+        self._mask_failed = False
         self._choose_io()
         return 0
 
@@ -309,10 +335,27 @@ class RKNNLite:
         x = np.ascontiguousarray(x)
         return x, T_UINT8 if x.dtype == np.uint8 else T_FLOAT32
 
+    def _sync_mask(self):
+        """Dynamic NPU cores: follow the camera count between two frames (caller holds self._lock)."""
+        home = getattr(self, "home_mask", None)
+        if home is None or getattr(self, "_mask_failed", False):
+            return
+        want = wanted_mask(home)
+        if want == self.core_mask:
+            return
+        ret = self.lib.rknn_set_core_mask(self.ctx, want)
+        if ret != RKNN_SUCC:           # keep what works; do not retry on every frame
+            log.warning("NPU core mask %s refused (%s) - keeping %s", core_name(want), ret, core_name(self.core_mask))
+            self._mask_failed = True
+            return
+        log.info("NPU: model now on %s", core_name(want))
+        self.core_mask = want
+
     def inference(self, inputs, data_format=None, io=None, **_kw):
         """inputs: list of uint8 NHWC arrays (one per model input). Returns float32 arrays in the model's shapes."""
         in_mode, out_mode = io or getattr(self, "io", None) or ("uint8", "float")
         with self._lock:
+            self._sync_mask()
             n_in = len(inputs)
             ins = (Input * n_in)()
             keep = []

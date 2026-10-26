@@ -1135,6 +1135,11 @@ class SessionManager:
             s.rate_fresh = False
             s.metrics["aiCameras"] = len(run)
         log.info("AI rate: %d camera(s) running -> %.1f fps each", len(run), goal)
+        try:                                  # NPU cores: one camera may use all three, two cameras one each
+            from backend.detection import rknn_runtime
+            rknn_runtime.set_solo(len(run) <= 1)
+        except Exception as e:             # no NPU runtime on this machine
+            log.debug("NPU core policy not applied: %s", e)
 
     def _get_or_open(self, cam_id):
         s = self.sessions.get(cam_id)
