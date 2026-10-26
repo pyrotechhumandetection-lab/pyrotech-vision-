@@ -248,6 +248,19 @@ STREAM_MAX_FPS = float(_env("AIV_STREAM_MAX_FPS", "15"))
 STREAM_ENCODER_THREAD = _env("AIV_STREAM_ENCODER_THREAD", "1").strip() not in ("0", "false", "no", "off")
 PREVIEW_IDLE_RELEASE_SEC = float(_env("AIV_PREVIEW_IDLE_RELEASE", "10"))
 
+# ---- cameras running AI at the same time, and the dynamic AI frame rate (backend/services/ai_rate.py)
+#   MAX_AI_CAMERAS   at most this many cameras may have a module running; a Start on a further camera is refused
+#   AI_FPS_MAX       highest analysed rate of one camera (a single camera gets this, or its own frame rate if lower)
+#   AI_FPS_BUDGET    analysed frames per second shared by all running cameras: each gets BUDGET / cameras,
+#                    never more than AI_FPS_MAX and never less than AI_FPS_MIN
+#   AI_FPS_RAMP      the rate moves towards its new value by at most this many fps per second (gradual change)
+# The budget is a tuning value of the hardware (measure with ./aivision.sh npu status), not a measurement.
+MAX_AI_CAMERAS = max(1, int(_env("AIV_MAX_AI_CAMERAS", "2")))
+AI_FPS_MAX = max(1.0, float(_env("AIV_AI_FPS_MAX", "30")))
+AI_FPS_BUDGET = max(1.0, float(_env("AIV_AI_FPS_BUDGET", "30")))
+AI_FPS_MIN = max(1.0, float(_env("AIV_AI_FPS_MIN", "2")))
+AI_FPS_RAMP = max(0.5, float(_env("AIV_AI_FPS_RAMP", "6")))
+
 # --- AI frame sampling (defaults for every camera; each camera's module settings can override them,
 #     camera["detection"]["modules"][<module>]["schedule"]) ---
 #   *_INTERVAL   seconds between two AI analyses of a camera (0 = every frame, the previous behaviour).

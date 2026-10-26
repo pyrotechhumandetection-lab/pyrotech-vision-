@@ -4,7 +4,7 @@
 
 Frame flow (bounded, never accumulates):
     session loop --submit(frame, captured_at, frame_id)--> ONE slot holding the newest frame
-    * at most one submit per 1/targetFps (default 10 fps); frames in between are counted as `skippedInterval`
+    * at most one submit per 1/target fps (the camera's dynamic rate, see services/ai_rate.py); frames in between are counted as `skippedInterval`
     * a frame still waiting when a newer one arrives is replaced (`droppedReplaced`)
     * a frame older than `maxAgeSec` when the worker picks it up is not analysed (`droppedStale`)
 Every crossing event carries the id and capture time of the frame that showed the object past the line, and its
@@ -178,12 +178,14 @@ class _Module:
 
 
 class CrossingEngine:
-    def __init__(self, on_event, camera_id="", thread_name=None, target_fps=10.0):
+    def __init__(self, on_event, camera_id="", thread_name=None, target_fps=30.0):
         self.on_event, self.camera_id, self.thread_name = on_event, camera_id, thread_name
         self.model, self.engine, self.imgsz, self.model_path = load_model()
         self.names = {v: k for k, v in COCO.items()}
         self.mods = {}                              # module id -> _Module
         self.target_fps = float(target_fps)
+        self._cfg_fps = float(config.AI_FPS_MAX)       # highest rate; the live rate comes from set_rate_cap()
+        self._rate_cap = None
         self.lock = threading.Condition()
         self.job, self.busy = None, False
         self._stop = threading.Event()
@@ -208,7 +210,16 @@ class CrossingEngine:
             if mod is None:
                 mod = self.mods[mid] = _Module(mid, cfg)
             mod.cfg, mod.paused = cfg, bool(paused)
-            self.target_fps = max(1.0, min(30.0, float(max(m.cfg.get("targetFps", 10.0) for m in self.mods.values()))))
+            self._apply_fps()          # the rate is dynamic (services/ai_rate.py); a saved "targetFps" no longer pins it
+
+    def set_rate_cap(self, fps):
+        """Dynamic AI rate of this camera (backend/services/ai_rate.py): the interval gate follows it."""
+        self._rate_cap = float(fps) if fps else None
+        self._apply_fps()
+
+    def _apply_fps(self):
+        cap = self._rate_cap if self._rate_cap else self._cfg_fps
+        self.target_fps = max(1.0, min(self._cfg_fps, cap))
 
     def remove_module(self, mid):
         with self.lock:
@@ -558,7 +569,7 @@ class CrossingEngine:
         pick = lambda a, q: round(a[min(len(a) - 1, int(q * len(a)))], 1) if a else None
         m = self.m
         seen = m["processed"] + m["droppedReplaced"] + m["droppedStale"]
-        return {"targetFps": self.target_fps, "inferenceFps": None if fps is None else round(fps, 2),
+        return {"targetFps": round(self.target_fps, 1), "inferenceFps": None if fps is None else round(fps, 2),
                 "inferenceMsAvg": round(sum(inf) / len(inf), 1) if inf else None, "inferenceMsP95": pick(inf, 0.95),
                 "latencyMsAvg": round(sum(lat) / len(lat), 1) if lat else None, "latencyMsP95": pick(lat, 0.95),
                 "stageMs": dict(self.stage_ms), "queueSize": 1, "queueDepthNow": 0 if self.job is None else 1,

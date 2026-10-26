@@ -24,6 +24,7 @@ from backend.detection.frame_reader import LatestFrameReader
 from backend.detection.motion import MotionGate
 from backend.detection.modules import MODULES, module_config
 from backend.detection.rtsp_probe import rtsp_describe
+from backend.services import ai_rate
 from backend.services.counts import CountStore
 from backend.services.scheduler import ModuleSchedule
 from backend.services.util import iso_from_ts, now_iso, redact
@@ -88,6 +89,8 @@ class CameraSession:
         self.gate_on = False                # a motion-gated module is running
         self.motion_min_area = 0.5
         self.capture_cap = 0.0              # frames per second processed by this session (0 = every frame)
+        self.rate = ai_rate.Rate(config.AI_FPS_MAX)   # dynamic AI rate shared with the other running cameras
+        self.rate_fresh = True              # first rebalance sets the rate at once (no ramp for a new camera)
         self.pv_sampled = {}                # human / vehicle modules confirmed per sample (pipeline.process)
         self.pv_imgsz = None
         self.held_pv = None                 # (detections, time) of the last Person/Vehicle analysis
@@ -330,6 +333,7 @@ class CameraSession:
             self.cross = cross_engine.CrossingEngine(self._cross_event, camera_id=self.camera_id, thread_name=f"cross:{self.camera_id}")
         except Exception as e:
             raise SessionError("ENGINE_FAILURE", f"Could not start the line-crossing engine: {e}", 500)
+        self.cross.set_rate_cap(self.rate.value)
         log.info("camera %s: line-crossing engine ready (%s, %s, imgsz %s)", self.camera_id, self.cross.model_path,
                  config.engine_label(self.cross.engine), self.cross.imgsz)
 
@@ -563,6 +567,8 @@ class CameraSession:
             # capture-rate cap of the running modules (e.g. 16 fps vehicle, 6 fps human): frames above it are
             # skipped right after decoding - no copy, no AI, no live-view encoding (counted, never silent)
             cap = self.capture_cap if any_on else 0.0
+            if any_on:                              # dynamic share of the AI budget (1 camera = the maximum)
+                cap = min(cap, self.rate.value) if cap else self.rate.value
             if cap:
                 # frame-rate decimation with a running schedule: 20 fps in, 16 fps target -> 16 of 20 frames
                 # (a plain "time since last frame" test would keep only every 2nd frame = 10 fps)
@@ -777,6 +783,7 @@ class CameraSession:
         m = self.metrics
         active = any(not v["paused"] for v in self.modules.values())
         n = w["n"]
+        self._ease_rate()
         m["cameraFps"] = m["receivedFps"] = round((self.reader.frames_read - read0) / el, 1)
         m["streamFps"] = self.reader.nominal_fps
         m["processingFps"] = m["processedFps"] = round(w["proc"] / el, 1) if active else None
@@ -836,6 +843,15 @@ class CameraSession:
         else:
             m["fireAnalysedFps"] = m["fireSkipped"] = None
             self._fire_runs0 = None
+
+    def _ease_rate(self):
+        """Once a second: move the dynamic AI rate one step towards its goal and hand it to the crossing engine."""
+        v = self.rate.step(time.time())
+        self.metrics["aiFpsTarget"] = round(v, 1)
+        self.metrics["aiFpsGoal"] = round(self.rate.goal, 1)
+        eng = self.cross
+        if eng is not None:
+            eng.set_rate_cap(v)
 
     def _rebuild_plan(self, active):
         cam = self.mgr.registry.get(self.camera_id) or {}
@@ -1106,6 +1122,20 @@ class SessionManager:
             raise SessionError("CAMERA_INCOMPATIBLE", "The existing pipeline needs an RTSP URL, webcam or video file (ONVIF is not supported)", 409)
         return cam
 
+    def _running(self):
+        """Sessions that hold an AI slot: a module is running (a paused one keeps its slot)."""
+        return {c: s for c, s in self.sessions.items() if s.modules and s.state not in ("stopped", "error")}
+
+    def _rebalance(self):
+        """Give every camera that runs a module its share of the AI frame budget (call with the lock held)."""
+        run = self._running()
+        goal = ai_rate.target(len(run))
+        for s in run.values():
+            s.rate.set_goal(goal, immediate=s.rate_fresh)
+            s.rate_fresh = False
+            s.metrics["aiCameras"] = len(run)
+        log.info("AI rate: %d camera(s) running -> %.1f fps each", len(run), goal)
+
     def _get_or_open(self, cam_id):
         s = self.sessions.get(cam_id)
         if s and s.state not in ("stopped", "error"):
@@ -1121,6 +1151,10 @@ class SessionManager:
     def start_module(self, cam_id, module_id):
         with self.lock:   # serialises concurrent Start clicks for the same/different cameras
             self._check_camera(cam_id)
+            held = self._running()
+            if cam_id not in held and len(held) >= config.MAX_AI_CAMERAS:
+                raise SessionError("CAMERA_LIMIT", f"At most {config.MAX_AI_CAMERAS} cameras can run detection at the same time "
+                                   f"({', '.join(held)} already running). Stop the modules on one of them first.", 409)
             if not config.MODEL_PATH.is_file():   # fail before touching the camera
                 raise SessionError("MODEL_NOT_FOUND", f"Model file not found: {config.MODEL_PATH.name}", 500)
             s = self._get_or_open(cam_id)
@@ -1162,6 +1196,7 @@ class SessionManager:
             s.error = None
             s.cfg_dirty = True
             s.idle_since = None
+            self._rebalance()
             return s
 
     def stop_module(self, cam_id, module_id):
@@ -1180,6 +1215,7 @@ class SessionManager:
                 self.sessions.pop(cam_id, None)
             elif not s.modules and s.pipeline is not None:
                 s.pipeline.reset_tracking()
+            self._rebalance()
             return True
 
     def pause_module(self, cam_id, module_id, paused):

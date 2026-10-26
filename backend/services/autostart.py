@@ -23,7 +23,7 @@ FIRST_DELAY_S = 3          # let the HTTP server come up first
 RETRY_MIN_S = 10           # unreachable camera: retry after 10 s, doubling up to 2 min
 RETRY_MAX_S = 120
 # errors that a retry cannot fix -> give up for this module until the user starts it again
-PERMANENT = {"CAMERA_NOT_FOUND", "CAMERA_DISABLED", "UNKNOWN_MODULE", "MODEL_NOT_FOUND", "INVALID_CONFIG"}
+PERMANENT = {"CAMERA_NOT_FOUND", "CAMERA_DISABLED", "UNKNOWN_MODULE", "MODEL_NOT_FOUND", "INVALID_CONFIG", "CAMERA_LIMIT"}
 
 
 def enabled():

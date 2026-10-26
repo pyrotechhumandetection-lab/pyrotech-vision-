@@ -166,7 +166,7 @@ _CROSS_COMMON = {
     "line": None,                                # {"x1","y1","x2","y2" (0-1), "refWidth", "refHeight"}
     "direction": "both",                         # which crossings count: "in" = towards the arrow side, "out" = against it
     "confidence": 0.35,                          # minimum detector confidence of a tracked object
-    "targetFps": 10,                             # analysed frames per second per camera (newest frame only)
+    "targetFps": 30,                             # ceiling of the analysed frames per second; the real rate is dynamic (services/ai_rate.py)
     "refPoint": "bottom",                        # bottom = where the object touches the ground, center = box centre
     "minTrackFrames": 3,                         # a track must be seen in this many frames before it can count
     "hysteresis": 0.05,                          # dead band around the line, fraction of the object's box height

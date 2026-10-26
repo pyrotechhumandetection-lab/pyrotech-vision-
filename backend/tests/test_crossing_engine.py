@@ -14,6 +14,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import backend  # noqa: E402,F401
+from backend import config  # noqa: E402
 from backend.detection.crossing import engine as ce  # noqa: E402
 from backend.detection.crossing import judge as jd  # noqa: E402
 from backend.detection.modules import DEFAULTS, validate  # noqa: E402
@@ -179,7 +180,9 @@ class QueueTests(unittest.TestCase):
     def test_target_fps_interval(self):
         eng = ScriptedEngine(Collect(), lambda i: [])
         try:
-            eng.set_module("pcross", cfg("pcross", targetFps=10))
+            eng.set_module("pcross", cfg("pcross", targetFps=3))     # a saved value must NOT pin the dynamic rate
+            eng.set_rate_cap(10)                                      # what the session hands over with 10 fps for this camera
+            self.assertEqual(eng.target_fps, 10)
             taken = 0
             t_end = time.time() + 1.0
             i = 0
@@ -189,6 +192,18 @@ class QueueTests(unittest.TestCase):
                 time.sleep(0.01)                                                   # a 100 fps camera
             self.assertTrue(8 <= taken <= 11, taken)
             self.assertGreater(eng.metrics()["skippedInterval"], 50)
+        finally:
+            eng.close()
+
+
+    def test_dynamic_rate_follows_the_session(self):
+        eng = ScriptedEngine(Collect(), lambda i: [])
+        try:
+            eng.set_module("pcross", cfg("pcross"))
+            eng.set_rate_cap(15)
+            self.assertEqual(eng.target_fps, 15)                                   # two cameras share the budget
+            eng.set_rate_cap(config.AI_FPS_MAX)
+            self.assertEqual(eng.target_fps, config.AI_FPS_MAX)                    # one camera: the maximum
         finally:
             eng.close()
 
