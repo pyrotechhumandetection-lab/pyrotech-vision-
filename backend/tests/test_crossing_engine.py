@@ -145,6 +145,10 @@ class JudgeRuleTests(unittest.TestCase):
         self.assertEqual(jd.decide([jd.HELMET, jd.MISSING, jd.MISSING]), jd.UNCERTAIN)
 
     def test_two_views_needed_for_missing(self):
+        # the stock PPE detector rules; a rider_helmet.pt in backend/models/twhelmet must not change this test
+        saved = jd._STATE["custom"]
+        jd._STATE["custom"] = False
+        self.addCleanup(lambda: jd._STATE.__setitem__("custom", saved))
         top = np.zeros((200, 120, 3), np.uint8)
         no_helm = lambda crop: (0.0, 0.8)
         two_views = lambda crop: [[10, 10, 90, 100, 0.9]]
@@ -154,6 +158,41 @@ class JudgeRuleTests(unittest.TestCase):
         self.assertEqual(jd.judge_crop(top, classify=lambda c: (0.3, 0.3), heads=two_views)["verdict"], jd.UNCERTAIN)
         mixed = iter([(0.0, 0.8), (0.7, 0.0)])
         self.assertEqual(jd.judge_crop(top, classify=lambda c: next(mixed), heads=two_views)["verdict"], jd.UNCERTAIN)  # views disagree
+
+    def test_custom_model_one_clear_view_is_enough(self):
+        saved = jd._STATE["custom"]
+        jd._STATE["custom"] = True
+        self.addCleanup(lambda: jd._STATE.__setitem__("custom", saved))
+        top = np.zeros((200, 120, 3), np.uint8)
+        self.assertEqual(jd.judge_crop(top, classify=lambda c: (0.0, 0.8), heads=lambda c: [])["verdict"], jd.MISSING)
+        self.assertEqual(jd.judge_crop(top, classify=lambda c: (0.8, 0.0), heads=lambda c: [])["verdict"], jd.HELMET)
+
+    def test_plate_only_reported_when_the_model_can_see_plates(self):
+        frame = np.zeros((300, 400, 3), np.uint8)
+        st = dict(jd._STATE)
+        self.addCleanup(lambda: (jd._STATE.clear(), jd._STATE.update(st)))
+        jd._STATE.update(tried=True, model=None, custom=False, names={})
+        self.assertIsNone(jd.find_plate(frame, [50, 50, 200, 250]))            # stock detector: unknown, not "no plate"
+
+        class Box:
+            def __init__(s, c, conf, xyxy): s.cls, s.conf, s.xyxy = c, conf, [np.array(xyxy)]
+
+        class Res:
+            def __init__(s, boxes): s.boxes = boxes
+
+        class Model:
+            names = {0: "bike", 1: "helmet", 2: "no-helmet", 3: "number-plate"}
+            out = []
+            def predict(s, crop, **kw): return [Res(s.out)]
+
+        m = Model()
+        jd._STATE.update(model=m, custom=True, names=dict(m.names))
+        r = jd.find_plate(frame, [50, 50, 200, 250])
+        self.assertEqual(r, {"detected": False, "conf": None, "box": None})
+        m.out = [Box(3, 0.6, [10, 20, 40, 35]), Box(1, 0.9, [0, 0, 5, 5])]
+        r = jd.find_plate(frame, [50, 50, 200, 250])
+        self.assertTrue(r["detected"])
+        self.assertEqual(r["box"], [round(35 + 10, 1), round(30 + 20, 1), round(35 + 40, 1), round(30 + 35, 1)])
 
     def test_stock_judge_is_declared_unvalidated(self):
         st = jd.status()

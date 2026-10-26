@@ -597,12 +597,22 @@ class CrossingEngine:
                 verdict, why = helmet_judge.HELMET, "helmet on every rider"
             else:
                 verdict, why = helmet_judge.UNCERTAIN, "helmet could not be verified"
+        plate = None
+        if c.get("detectPlate", True):
+            bike_box = next((b[0] for b in boxes if b[3] is not None and b[3] == ev["tid"]), None)
+            if bike_box is not None:
+                try:
+                    plate = helmet_judge.find_plate(frame, bike_box, float(c.get("plateMinConf", 0.35)))
+                except Exception as exc:                      # the plate is extra information; never lose the helmet verdict
+                    log.warning("number-plate check failed: %s", exc)
+                if plate and plate["detected"]:
+                    boxes = list(boxes) + [(plate["box"], f"plate {plate['conf']:.2f}", (0, 255, 255), None)]
         key = {helmet_judge.HELMET: "compliant", helmet_judge.MISSING: "missing"}.get(verdict, "unverified")
         label = {"compliant": "Helmet compliant", "missing": "Helmet missing", "unverified": "Helmet unverified"}[key]
         with mod.lock:
             mod.counts[key] += 1
             mod.crossings += 1
-            ev.update(label=label, verdict=verdict, why=why, riders=rl, counts=dict(mod.counts), judge=helmet_judge.status())
+            ev.update(label=label, verdict=verdict, why=why, riders=rl, plate=plate, counts=dict(mod.counts), judge=helmet_judge.status())
             self._record(mod, ev, ev["capturedAt"], flash=False)
         snap = self._snapshot(frame, mod, boxes, ev, shape, f"{label.upper()}  {ev['cls']} {ev['tid']}  {ev['direction'].upper()}",
                               color=VERDICT_BGR[verdict])

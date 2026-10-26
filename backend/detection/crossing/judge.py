@@ -73,18 +73,52 @@ def _head_boxes(crop):
 
 
 def _classify(model, names, crop, imgsz, custom):
-    """(best helmet conf, best no_helmet conf) in one crop."""
+    """(best helmet conf, best no_helmet conf) in one crop. With the rider model the crop is a whole rider: only a head
+    in its upper part counts (a helmet in the hand or on the bike's mirror does not)."""
     with _LOCK, gated():
-        r = model.predict(crop, imgsz=imgsz, conf=0.25, verbose=False)[0]
+        r = model.predict(crop, imgsz=640 if custom else imgsz, conf=0.25, verbose=False)[0]
     pos = neg = 0.0
+    ch = crop.shape[0]
     for b in (r.boxes if r.boxes is not None else []):
         n = names.get(int(b.cls), "")
         c = float(b.conf)
+        if custom and (float(b.xyxy[0][1]) + float(b.xyxy[0][3])) / 2 > 0.6 * ch:
+            continue
         if n in POSITIVE or (not custom and n == "helmet"):
             pos = max(pos, c)
         elif n in NEGATIVE or (not custom and n == "no_helmet"):
             neg = max(neg, c)
     return pos, neg
+
+
+PLATE_NAMES = {"number-plate", "number_plate", "numberplate", "license-plate", "license_plate", "licence-plate", "plate"}
+
+
+def find_plate(frame, bbox, min_conf=0.35):
+    """Number plate on one two-wheeler, from the rider model's own number-plate class. Returns
+    {"detected": bool, "conf": float|None, "box": [x1,y1,x2,y2]|None} in frame pixels, or None when the loaded model
+    has no plate class (stock PPE detector) - so "no plate" is never reported without a model able to see one."""
+    model = _load()
+    if not model or not _STATE["custom"] or not any(n in PLATE_NAMES for n in (_STATE["names"] or {}).values()):
+        return None
+    fh, fw = frame.shape[:2]
+    x1, y1, x2, y2 = bbox
+    bw, bh = x2 - x1, y2 - y1
+    cx1, cy1 = max(0, int(x1 - 0.1 * bw)), max(0, int(y1 - 0.1 * bh))
+    cx2, cy2 = min(fw, int(x2 + 0.1 * bw)), min(fh, int(y2 + 0.1 * bh))
+    if cx2 - cx1 < 24 or cy2 - cy1 < 24:
+        return {"detected": False, "conf": None, "box": None}
+    crop = frame[cy1:cy2, cx1:cx2]
+    with _LOCK, gated():
+        r = model.predict(crop, imgsz=640, conf=min_conf, verbose=False)[0]
+    best = None
+    for b in (r.boxes if r.boxes is not None else []):
+        if _STATE["names"].get(int(b.cls), "") in PLATE_NAMES and (best is None or float(b.conf) > best[1]):
+            best = (b.xyxy[0].tolist(), float(b.conf))
+    if best is None:
+        return {"detected": False, "conf": None, "box": None}
+    bx = best[0]
+    return {"detected": True, "conf": round(best[1], 3), "box": [round(cx1 + bx[0], 1), round(cy1 + bx[1], 1), round(cx1 + bx[2], 1), round(cy1 + bx[3], 1)]}
 
 
 def view_verdict(pos, neg, hmin, nmin):
@@ -95,12 +129,24 @@ def view_verdict(pos, neg, hmin, nmin):
     return UNCERTAIN
 
 
+def _custom_expected():
+    from pathlib import Path
+    return _STATE["custom"] if _STATE["tried"] else Path(CUSTOM).is_file()
+
+
 def head_crop(frame, pbox):
-    """Copy of the part of the frame that can hold the rider's head (top of the person box), or None when too small.
-    Cut out at once so a queued job does not keep the whole frame alive."""
+    """Copy of the part of the frame to judge, or None when too small. Stock PPE detector: only the band that can hold the
+    head (top of the person box). Rider helmet model (trained on whole riders on their bike): the whole rider with a small
+    margin, which is the scale it was trained at. Cut out at once so a queued job does not keep the whole frame alive."""
     fh, fw = frame.shape[:2]
     x1, y1, x2, y2 = pbox
     bw, bh = x2 - x1, y2 - y1
+    if _custom_expected():
+        cx1, cx2 = max(0, int(x1 - 0.10 * bw)), min(fw, int(x2 + 0.10 * bw))
+        cy1, cy2 = max(0, int(y1 - 0.10 * bh)), min(fh, int(y2 + 0.05 * bh))
+        if cx2 - cx1 < 24 or cy2 - cy1 < 24:
+            return None
+        return frame[cy1:cy2, cx1:cx2].copy()
     cx1, cx2 = max(0, int(x1 - 0.15 * bw)), min(fw, int(x2 + 0.15 * bw))
     cy1, cy2 = max(0, int(y1 + HEAD_BAND[0] * bh)), min(fh, int(y1 + HEAD_BAND[1] * bh))
     if cx2 - cx1 < 12 or cy2 - cy1 < 12:
@@ -127,7 +173,7 @@ def judge_crop(top, hmin=0.5, nmin=0.6, classify=None, heads=None):
     cx1 = cy1 = 0
     views = [("body-top",) + tuple(classify(top))]
     head_box = None
-    hs = heads(top)
+    hs = [] if custom else heads(top)        # the rider model judges the whole rider in one pass; the stock model needs a second, tight view
     if hs:
         hx1, hy1, hx2, hy2, _c = max(hs, key=lambda h: h[4] - 0.001 * h[1])
         pw, ph = 0.35 * (hx2 - hx1), 0.35 * (hy2 - hy1)

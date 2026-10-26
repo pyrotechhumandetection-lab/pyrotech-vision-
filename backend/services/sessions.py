@@ -431,7 +431,8 @@ class CameraSession:
             key = "noHelmetConf" if etype == "twhelmet_missing" else "helmetConf"
             conf = max([r.get(key) or 0.0 for r in riders] or [0.0]) or None
             desc = (f"{ev['cls'].capitalize()} #{tid} crossed the line ({ev['direction'].upper()}) at frame {fid}: {ev['why']}. "
-                    f"Riders: {len(riders)}.")
+                    f"Riders: {len(riders)}."
+                    + ("" if ev.get("plate") is None else (" Number plate visible." if ev["plate"]["detected"] else " Number plate not visible.")))
         else:
             etype = "line_cross_in" if ev["direction"] == "in" else "line_cross_out"
             sev, conf = acfg.get("severity", "low"), ev.get("conf")
@@ -444,7 +445,7 @@ class CameraSession:
                  "frameSize": list(reversed(ev.get("frameShape") or [])), "gapSec": ev.get("gapSec"), "trackFrames": ev.get("trackFrames"),
                  "handedOver": ev.get("handedOver")}
         if module_id == "twhelmet":
-            extra.update(verdict=ev["verdict"], reason=ev["why"], riders=riders, judge=ev.get("judge"), vehicle=ev.get("cls"))
+            extra.update(verdict=ev["verdict"], reason=ev["why"], riders=riders, judge=ev.get("judge"), vehicle=ev.get("cls"), plate=ev.get("plate"))
         self.mgr.events.on_module_alert(cam, module_id, etype, label, snapshot if snap_on else None, captured_at=ev["capturedAt"],
                                         confidence=round(conf, 3) if conf else None, severity=sev, description=desc, alert=want_alert,
                                         snapshot=snap_on, extra=extra, original=frame.copy() if snap_on else None,

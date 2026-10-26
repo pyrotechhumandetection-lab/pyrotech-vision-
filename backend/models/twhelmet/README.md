@@ -1,6 +1,20 @@
 # Two-Wheeler Helmet (line crossing) - models
 
-No model is shipped in this folder. The module uses:
+## Installed: `rider_helmet.pt`
+
+Third-party YOLOv8 weights from <https://github.com/Jingjing468/motorcycle-helmet-violation-detection> (`model/helmet_best.pt`,
+sha256 `45320ba938559d04bf76cd0ea15f94d99df7fadd2998280652f04ccb4b795657`). Classes: `bike`, `helmet`, `no-helmet`, `number-plate`.
+Trained by its author on the Roboflow Universe set "Helmet and Number Plate Detection for Motorbike Safety" (CC BY 4.0, attribution required).
+**Licence of the weights: not stated by the author - confirm before commercial use.** The author's mAP50 0.94 comes from their own test
+split; it has not been measured on this system's cameras (`validated: false`).
+
+How it is used: the COCO detector still finds and tracks the two-wheelers (NPU). At the line, each rider (person box + small margin)
+goes through this model in one pass; a `helmet` / `no-helmet` box in the upper 60 % of that crop gives the verdict (one clear view is
+enough, the 3-vote rule still applies). `number-plate` is searched on the two-wheeler's box at the crossing and recorded as
+`plate` in the event and alert (`detectPlate`, `plateMinConf` in the module settings; "not visible" is reported only because
+this model can see plates). Remove the file to fall back to the stock PPE detector below. The PPE module is not touched.
+
+Previously (stock detector only) the module used:
 
 | Purpose | Model | Note |
 |---|---|---|
