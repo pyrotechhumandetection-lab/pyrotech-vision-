@@ -91,6 +91,41 @@
     document.getElementById('menu-toggle').setAttribute('aria-expanded', open);
   }
 
+  // ---------- navigation: drag to resize, hide / show (desktop); both remembered in this browser ----------
+  const NAV_W_KEY = 'aiv.navWidth', NAV_HIDE_KEY = 'aiv.navHidden', NAV_MIN = 200, NAV_MAX = 420, NAV_DEF = 248;
+  function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* private mode */ } }
+  function toggleNavHidden(force) {
+    const app = document.getElementById('app');
+    const hide = typeof force === 'boolean' ? force : !app.classList.contains('nav-hidden');
+    app.classList.toggle('nav-hidden', hide);
+    const b = document.getElementById('menu-toggle');
+    b.setAttribute('aria-expanded', String(!hide)); b.title = hide ? 'Show navigation (Ctrl+B)' : 'Hide navigation (Ctrl+B)';
+    lsSet(NAV_HIDE_KEY, hide ? '1' : '0');
+  }
+  function initNavResize() {
+    const app = document.getElementById('app'), bar = document.getElementById('sidebar-split');
+    const clamp = function (w) { return Math.round(Math.max(NAV_MIN, Math.min(NAV_MAX, w))); };
+    let w = clamp(parseInt(lsGet(NAV_W_KEY), 10) || NAV_DEF);
+    const apply = function () { app.style.setProperty('--sidebar-w', w + 'px'); bar.setAttribute('aria-valuenow', String(w)); };
+    bar.setAttribute('aria-valuemin', String(NAV_MIN)); bar.setAttribute('aria-valuemax', String(NAV_MAX)); apply();
+    if (lsGet(NAV_HIDE_KEY) === '1' && window.innerWidth > 1024) toggleNavHidden(true); else toggleNavHidden(false);
+    bar.addEventListener('pointerdown', function (ev) {
+      ev.preventDefault();
+      const x0 = ev.clientX, w0 = w;
+      bar.setPointerCapture(ev.pointerId); app.classList.add('is-resizing');
+      const mv = function (e) { w = clamp(w0 + e.clientX - x0); apply(); };
+      const up = function () { bar.removeEventListener('pointermove', mv); bar.removeEventListener('pointerup', up); bar.removeEventListener('pointercancel', up); app.classList.remove('is-resizing'); lsSet(NAV_W_KEY, String(w)); };
+      bar.addEventListener('pointermove', mv); bar.addEventListener('pointerup', up); bar.addEventListener('pointercancel', up);
+    });
+    bar.addEventListener('keydown', function (e) {
+      const step = e.shiftKey ? 40 : 10;
+      if (e.key === 'ArrowRight') w = clamp(w + step); else if (e.key === 'ArrowLeft') w = clamp(w - step); else return;
+      e.preventDefault(); apply(); lsSet(NAV_W_KEY, String(w));
+    });
+    bar.addEventListener('dblclick', function () { w = NAV_DEF; apply(); lsSet(NAV_W_KEY, String(w)); });
+  }
+
   // ---------- popovers ----------
   function closePopovers(except) {
     ['notif-panel', 'profile-menu'].forEach(function (id) {
@@ -190,7 +225,11 @@
       const g = document.getElementById('nav-detections'); const open = !g.classList.contains('open');
       g.classList.toggle('open', open); this.setAttribute('aria-expanded', open); state.setPref('navDetectionsOpen', open);
     });
-    document.getElementById('menu-toggle').addEventListener('click', function () { setSidebar(!document.getElementById('app').classList.contains('nav-open')); });
+    initNavResize();
+    document.getElementById('menu-toggle').addEventListener('click', function () {
+      if (window.innerWidth > 1024) toggleNavHidden(); else setSidebar(!document.getElementById('app').classList.contains('nav-open'));
+    });
+    document.addEventListener('keydown', function (e) { if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'b' && window.innerWidth > 1024) { e.preventDefault(); toggleNavHidden(); } });
     document.getElementById('sidebar-backdrop').addEventListener('click', function () { setSidebar(false); });
     document.getElementById('sidebar').addEventListener('click', function (e) { if (e.target.closest('a.nav-item')) setSidebar(false); });
     document.getElementById('system-status-card').addEventListener('click', openSystemStatus);
