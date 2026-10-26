@@ -23,7 +23,7 @@ Newest frame wins (one slot): at most the camera's dynamic AI rate (see *Cameras
 ## Cameras and frame rate (all modules)
 
 * At most `AIV_MAX_AI_CAMERAS` (default **2**) cameras can have a module running at the same time. A Start on a third camera is refused with `CAMERA_LIMIT` (HTTP 409) and a message naming the cameras that are running; a second module on a running camera is always allowed. A camera that only has its live view open does not hold a slot; a paused module does.
-* The analysed rate is dynamic: **one camera gets the maximum** (`AIV_AI_FPS_MAX`, default 30, or its own frame rate if lower); with `n` cameras each gets `AIV_AI_FPS_BUDGET / n` (default budget 30: 2 cameras -> 15 each), never below `AIV_AI_FPS_MIN` (2).
+* The analysed rate is dynamic: **one camera gets the maximum** (`AIV_AI_FPS_MAX`, default 30, or its own frame rate if lower); with `n` cameras each gets `AIV_AI_FPS_BUDGET / n` (default budget 60: 2 cameras -> 30 each, i.e. not limiting; a budget of 30 would give 15 each), never below `AIV_AI_FPS_MIN` (2).
 * The change is gradual: a camera that is already running moves by at most `AIV_AI_FPS_RAMP` (6) fps per second; a camera that has just started begins at its share. Stopping a camera lifts the other one back up the same way.
 * The rate is a ceiling on the frames the camera session accepts (it also drives the line-crossing interval gate), on top of any per-module capture cap (the lower value wins). A saved `targetFps` in a line-crossing module's settings no longer pins the rate.
 * `AIV_AI_FPS_BUDGET` is a tuning value, not a measurement: set it from the analysed fps one camera really reaches on the box (`./aivision.sh npu status`).

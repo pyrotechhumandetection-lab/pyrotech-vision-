@@ -254,10 +254,11 @@ PREVIEW_IDLE_RELEASE_SEC = float(_env("AIV_PREVIEW_IDLE_RELEASE", "10"))
 #   AI_FPS_BUDGET    analysed frames per second shared by all running cameras: each gets BUDGET / cameras,
 #                    never more than AI_FPS_MAX and never less than AI_FPS_MIN
 #   AI_FPS_RAMP      the rate moves towards its new value by at most this many fps per second (gradual change)
-# The budget is a tuning value of the hardware (measure with ./aivision.sh npu status), not a measurement.
+# The budget is a tuning value of the hardware, not a measurement: 60 = two cameras can each reach AI_FPS_MAX (30), so the
+# real limits are the camera's frame rate and the cost per frame (RK3588 INT8 pipeline: about 49 ms = 20 fps per stream).
 MAX_AI_CAMERAS = max(1, int(_env("AIV_MAX_AI_CAMERAS", "2")))
 AI_FPS_MAX = max(1.0, float(_env("AIV_AI_FPS_MAX", "30")))
-AI_FPS_BUDGET = max(1.0, float(_env("AIV_AI_FPS_BUDGET", "30")))
+AI_FPS_BUDGET = max(1.0, float(_env("AIV_AI_FPS_BUDGET", "60")))
 AI_FPS_MIN = max(1.0, float(_env("AIV_AI_FPS_MIN", "2")))
 AI_FPS_RAMP = max(0.5, float(_env("AIV_AI_FPS_RAMP", "6")))
 
