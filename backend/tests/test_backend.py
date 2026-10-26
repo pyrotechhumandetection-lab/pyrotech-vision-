@@ -65,6 +65,29 @@ class RegistryTests(unittest.TestCase):
         reg.save({**reg.get("T1"), "name": "Renamed"}, existing_id="T1")
         self.assertEqual(reg.resolve_source(reg.get("T1")), "rtsp://u:secret@10.0.0.9/s")
 
+    def test_credentials_in_the_url_path(self):
+        """Cameras that take the login inside the path: .../user=admin_password=secret_channel=1_stream=0.sdp?real_stream"""
+        reg = CameraRegistry()
+        raw = "rtsp://10.0.0.9:554/user=admin_password=secret_channel=1_stream=0.sdp?real_stream"
+        body = {"id": "P1", "name": "Path login", "type": "rtsp", "sourceUrl": raw, "password": None}
+        self.assertEqual(reg.validate(body), [])
+        pub = reg.save(body)
+        self.assertNotIn("secret", str(pub))
+        self.assertNotIn("secret", (Path(_tmp) / "cameras.json").read_text())
+        self.assertEqual(pub["sourceUrl"], "rtsp://10.0.0.9:554/user={user}_password={password}_channel=1_stream=0.sdp?real_stream")
+        self.assertEqual(pub["username"], "admin")
+        self.assertTrue(pub["hasCredentials"])
+        self.assertEqual(reg.resolve_source(reg.get("P1")), raw)                      # the camera gets the real URL
+        # editing from the public copy (placeholders, no secret) keeps the stored login
+        reg.save({**pub, "name": "Renamed"}, existing_id="P1")
+        self.assertEqual(reg.resolve_source(reg.get("P1")), raw)
+        # a masked copy ("***") must never overwrite the stored login
+        reg.save({**reg.get("P1"), "sourceUrl": "rtsp://10.0.0.9:554/user=***_password=***_channel=1_stream=0.sdp?real_stream"}, existing_id="P1")
+        self.assertEqual(reg.resolve_source(reg.get("P1")).count("secret"), 1)
+        from backend.services.util import redact
+        self.assertNotIn("secret", redact("failed " + raw))
+        self.assertEqual(redact(pub["sourceUrl"]), pub["sourceUrl"])                  # placeholders are not secrets
+
     def test_validation(self):
         reg = CameraRegistry()
         self.assertTrue(reg.validate({"id": "x", "name": "", "type": "rtsp", "sourceUrl": "http://a"}))

@@ -13,11 +13,13 @@
     if (!mm) return null;
     return { scheme: mm[1].toLowerCase(), user: mm[2], pass: mm[3], host: mm[4], port: mm[5], path: mm[6] || '' };
   }
-  /** True when an RTSP URL already carries "user:password@" (the backend moves it into its credential store). */
+  /** Login written in the URL path, e.g. /user=admin_password=secret_channel=1_stream=0.sdp (also the stored {user}/{password} form). */
+  const PATH_LOGIN = /user(?:name)?=[^_&\/?\s]*[_&]pass(?:word|wd)?=[^_&\/?\s]*/i;
+  /** True when an RTSP URL already carries the login, as "user:password@" or inside the path (the backend moves it into its credential store). */
   function urlHasCreds() {
     if (m.type !== 'rtsp') return false;
     const p = parseRtsp((m.sourceUrl || '').trim());
-    return !!(p && p.user);
+    return !!(p && (p.user || PATH_LOGIN.test(p.path || '')));
   }
   function validHost(h) {
     if (/^\[.*\]$/.test(h)) return true; // IPv6 literal
@@ -42,6 +44,7 @@
       if (p.port !== undefined && p.port !== '' && !(+p.port >= 1 && +p.port <= 65535)) return { error: 'Port must be between 1 and 65535.' };
       if (p.port === '') return { error: 'Port is empty — remove the ":" or enter a port (default 554).' };
       if (p.user !== undefined) return { warning: 'This URL contains the username and password. That is accepted: the backend moves them into its protected credential store and removes them from the saved URL, so they are never shown or logged.' };
+      if (PATH_LOGIN.test(p.path || '')) return { warning: 'The login is written in the URL path. That is accepted: the backend stores the username and password in its protected credential store and keeps only a placeholder in the saved URL.' };
       if (!p.path || p.path === '/') return { warning: 'No stream path given. Most cameras need one (e.g. /Streaming/Channels/101).' };
       return {};
     }

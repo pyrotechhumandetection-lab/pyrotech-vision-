@@ -10,9 +10,18 @@ from datetime import datetime, timezone
 _URL_CRED = re.compile(r"([a-z][a-z0-9+.-]*://)[^/\s]*@", re.I)
 
 
+# credentials written into the path of some cameras' RTSP URLs: .../user=admin_password=secret_channel=1_stream=0.sdp
+_PATH_CRED = re.compile(r"(?i)\b(user(?:name)?=)([^_&/?\s]*)([_&])(pass(?:word|wd)?=)([^_&/?\s]*)")
+
+
 def redact(text):
-    """Mask user:password@ in any URL inside a string (for logs, errors, API responses)."""
-    return _URL_CRED.sub(r"\1***:***@", str(text or ""))
+    """Mask user:password@ and user=..._password=... in any URL inside a string (for logs, errors, API responses)."""
+    t = _URL_CRED.sub(r"\1***:***@", str(text or ""))
+    def mask(m):
+        if m.group(2) == "{user}" and m.group(5) == "{password}":      # the stored form: placeholders, no secret
+            return m.group(0)
+        return m.group(1) + "***" + m.group(3) + m.group(4) + "***"
+    return _PATH_CRED.sub(mask, t)
 
 
 def camera_host(camera):

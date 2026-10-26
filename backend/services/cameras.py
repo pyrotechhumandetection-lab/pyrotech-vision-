@@ -83,6 +83,20 @@ def split_rtsp(url):
     return scheme, user, pw, hostport, path
 
 
+PATH_USER, PATH_PASS = "{user}", "{password}"
+_PATH_CRED = re.compile(r"(?i)\b(user(?:name)?=)([^_&/?\s]*)([_&])(pass(?:word|wd)?=)([^_&/?\s]*)")
+
+
+def take_path_credentials(path):
+    """Some cameras want the login inside the path: /user=admin_password=secret_channel=1_stream=0.sdp?real_stream.
+    Returns (path with {user}/{password} placeholders, user, password); (path, None, None) when the path has none."""
+    m = _PATH_CRED.search(path or "")
+    if not m or PATH_USER in m.group(2) or PATH_PASS in m.group(5) or m.group(2) == "***" or m.group(5) == "***":
+        return path, None, None                        # already placeholders, or a masked copy from the API
+    user, pw = m.group(2), m.group(5)
+    return path[:m.start()] + m.group(1) + PATH_USER + m.group(3) + m.group(4) + PATH_PASS + path[m.end():], user, pw
+
+
 def host_port(hostport, default_port=554):
     if hostport.startswith("["):
         host, _, rest = hostport[1:].partition("]")
@@ -242,6 +256,11 @@ class CameraRegistry:
                     username = username or user
                     if password is None and pw:
                         password = pw
+                path, pu, pp = take_path_credentials(path)      # user=..._password=... written in the path
+                if pu is not None:
+                    username = username or pu
+                    if password is None and pp:
+                        password = pp
                 src = f"{scheme}://{hp}{path}"
             body["sourceUrl"] = src
             body["username"] = username
@@ -340,6 +359,9 @@ class CameraRegistry:
         password = password_override if password_override else self.password(cam.get("id")) or (url_pw or "")
         if cam.get("requiresAuth") is False:
             username, password = "", ""
+        if PATH_USER in path or PATH_PASS in path:         # credentials live in the path of this camera's URL
+            path = path.replace(PATH_USER, username).replace(PATH_PASS, password)
+            return f"{scheme}://{hp}{path}"
         auth = f"{username}:{password}@" if username else ""
         return f"{scheme}://{auth}{hp}{path}"
 
