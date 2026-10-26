@@ -13,6 +13,12 @@
     if (!mm) return null;
     return { scheme: mm[1].toLowerCase(), user: mm[2], pass: mm[3], host: mm[4], port: mm[5], path: mm[6] || '' };
   }
+  /** True when an RTSP URL already carries "user:password@" (the backend moves it into its credential store). */
+  function urlHasCreds() {
+    if (m.type !== 'rtsp') return false;
+    const p = parseRtsp((m.sourceUrl || '').trim());
+    return !!(p && p.user);
+  }
   function validHost(h) {
     if (/^\[.*\]$/.test(h)) return true; // IPv6 literal
     if (/^\d{1,3}(\.\d{1,3}){3}$/.test(h)) return h.split('.').every(function (o) { return +o <= 255; });
@@ -35,7 +41,7 @@
       if (!validHost(p.host)) return { error: 'Host "' + p.host + '" is not a valid IP address or hostname.' };
       if (p.port !== undefined && p.port !== '' && !(+p.port >= 1 && +p.port <= 65535)) return { error: 'Port must be between 1 and 65535.' };
       if (p.port === '') return { error: 'Port is empty — remove the ":" or enter a port (default 554).' };
-      if (p.user !== undefined) return { warning: 'This URL contains embedded credentials. They will never be shown in logs and are stripped before local storage — prefer the Username / Password fields.' };
+      if (p.user !== undefined) return { warning: 'This URL contains the username and password. That is accepted: the backend moves them into its protected credential store and removes them from the saved URL, so they are never shown or logged.' };
       if (!p.path || p.path === '/') return { warning: 'No stream path given. Most cameras need one (e.g. /Streaming/Channels/101).' };
       return {};
     }
@@ -62,7 +68,7 @@
     if (!cat.CAMERA_TYPES.some(function (t) { return t.id === m.type; })) errs.type = 'Select a supported camera type.';
     const src = validateSource(m.type, m.sourceUrl);
     if (src.error) errs.sourceUrl = src.error;
-    if (m.requiresAuth && (m.type === 'rtsp' || m.type === 'onvif')) {
+    if (m.requiresAuth && (m.type === 'rtsp' || m.type === 'onvif') && !urlHasCreds()) {
       if (!m.username.trim()) errs.username = 'Username is required when the camera requires authentication.';
     }
     if (!(m.timeoutSec >= 1 && m.timeoutSec <= 120)) errs.timeoutSec = 'Timeout must be 1 – 120 seconds.';
@@ -601,7 +607,7 @@
   async function onTest() {
     const btn = root.querySelector('#cf-test');
     const errs = validateConnection({});
-    if (m.requiresAuth && (m.type === 'rtsp' || m.type === 'onvif') && !password && api.status.connected && (isNew || m.source !== 'backend')) errs.password = 'Enter the password to test the connection.';
+    if (m.requiresAuth && (m.type === 'rtsp' || m.type === 'onvif') && !password && !urlHasCreds() && api.status.connected && (isNew || m.source !== 'backend')) errs.password = 'Enter the password to test the connection.';
     showErrors(errs);
     if (Object.keys(errs).length) { focusFirstError(errs); ui.toast('warning', 'Check the connection fields', 'Fix the highlighted fields before testing.'); return; }
     ui.setBusy(btn, true, 'Testing…');
@@ -631,7 +637,7 @@
       ui.toast('error', 'Camera not saved', Object.keys(errs).length + ' field(s) need attention.');
       return;
     }
-    if (api.status.connected && isNew && m.requiresAuth && (m.type === 'rtsp' || m.type === 'onvif') && !password) {
+    if (api.status.connected && isNew && m.requiresAuth && (m.type === 'rtsp' || m.type === 'onvif') && !password && !urlHasCreds()) {
       showErrors({ password: 'Enter the password so the backend can store it securely.' }); focusFirstError({ password: 1 }); return;
     }
     const btn = root.querySelector('#cf-save');
