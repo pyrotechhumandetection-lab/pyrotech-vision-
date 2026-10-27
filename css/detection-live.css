@@ -139,3 +139,8 @@
 @container (max-width: 330px) { .dl-kv { grid-template-columns: minmax(0, 1fr); gap: 2px 0; } .dl-kv dd { margin-bottom: 6px; } }
 @container (min-width: 620px) { .dl-kv { grid-template-columns: 170px minmax(0, 1fr); font-size: 13.5px; } }
 @media (max-width: 1240px) { .dl-split { display: none; } }
+
+/* the side column spans every row; without this the extra height is shared out between the left cards and leaves a blank band */
+.dl-grid { grid-template-rows: auto 1fr; }
+.dl-grid.is-ppe { grid-template-rows: auto auto 1fr; }
+@media (max-width: 1240px) { .dl-grid, .dl-grid.is-ppe { grid-template-rows: none; } }
