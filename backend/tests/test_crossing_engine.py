@@ -250,6 +250,29 @@ class ZoneTests(unittest.TestCase):
             eng.close()
 
 
+class BikeAreaFallbackTests(unittest.TestCase):
+    def test_box_stretches_upward_and_stays_in_frame(self):
+        b = jd.bike_rider_box((100, 50, 200, 150), 1080, 1920)
+        self.assertEqual((b[0], b[2], b[3]), (100, 200, 150))
+        self.assertEqual(b[1], 0.0)                                   # 50 - 0.7*100 clipped at the frame top
+        self.assertEqual(jd.bike_rider_box((100, 400, 200, 500), 1080, 1920)[1], 330.0)
+
+    def test_unlinked_bike_is_judged_by_its_own_area_with_the_rider_model(self):
+        bike = {"box": [100, 400, 200, 500], "tid": 1}
+        old = dict(jd._STATE)
+        try:
+            jd._STATE.update(custom=True, tried=True)
+            items = ce.CrossingEngine._rider_items([], [], bike, 1080, 1920)
+            self.assertEqual([(k, t) for k, t, _b in items], [("bike-area", "bike-area")])
+            jd._STATE.update(custom=False)
+            Path_ok = jd._custom_expected()
+            self.assertFalse(Path_ok)
+            self.assertEqual(ce.CrossingEngine._rider_items([], [], bike, 1080, 1920), [])
+        finally:
+            jd._STATE.clear()
+            jd._STATE.update(old)
+
+
 class QueueTests(unittest.TestCase):
     def test_newest_frame_wins_and_stale_dropped(self):
         got = Collect()

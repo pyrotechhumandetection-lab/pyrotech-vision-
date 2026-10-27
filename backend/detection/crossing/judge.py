@@ -134,7 +134,7 @@ def _custom_expected():
     return _STATE["custom"] if _STATE["tried"] else Path(CUSTOM).is_file()
 
 
-def head_crop(frame, pbox):
+def head_crop(frame, pbox, mx=0.5):
     """Copy of the part of the frame to judge, or None when too small. Stock PPE detector: only the band that can hold the
     head (top of the person box). Rider helmet model (trained on whole riders on their bike): the whole rider with a small
     margin, which is the scale it was trained at. Cut out at once so a queued job does not keep the whole frame alive."""
@@ -142,7 +142,7 @@ def head_crop(frame, pbox):
     x1, y1, x2, y2 = pbox
     bw, bh = x2 - x1, y2 - y1
     if _custom_expected():
-        cx1, cx2 = max(0, int(x1 - 0.10 * bw)), min(fw, int(x2 + 0.10 * bw))
+        cx1, cx2 = max(0, int(x1 - mx * bw)), min(fw, int(x2 + mx * bw))      # side margin = scene context the model was trained with
         cy1, cy2 = max(0, int(y1 - 0.10 * bh)), min(fh, int(y2 + 0.05 * bh))
         if cx2 - cx1 < 24 or cy2 - cy1 < 24:
             return None
@@ -152,6 +152,14 @@ def head_crop(frame, pbox):
     if cx2 - cx1 < 12 or cy2 - cy1 < 12:
         return None
     return frame[cy1:cy2, cx1:cx2].copy()
+
+
+def bike_rider_box(vbox, fh, fw, up=0.7):
+    """Stand-in rider box when no person was linked to a two-wheeler: the bike box stretched upward over where the
+    rider's head and body are. Only used with the rider model, which was trained on a whole rider on a bike and finds
+    the head itself - so a rider the person detector missed (small, seen from behind) is still judged."""
+    x1, y1, x2, y2 = vbox
+    return [max(0.0, x1), max(0.0, y1 - up * (y2 - y1)), min(float(fw), x2), min(float(fh), y2)]
 
 
 def judge_rider(frame, pbox, hmin=0.5, nmin=0.6, classify=None, heads=None):

@@ -183,6 +183,7 @@ These are engineering rules of thumb **[expected]**, to be confirmed by the site
 | Lower the detection confidence for two-wheelers (0.35 to 0.25); judge every frame near the line; 2 frames to start a track; smaller minimum size | in the software as the new defaults (existing saved settings keep their old values until changed) |
 | Detect only around the line (zoom onto the road near the line) | in the software, **off by default** (switch in the module settings; a dashed box shows the area). Helps small, far bikes; can cut a large, close bike |
 | Margin at the line ends | in the software |
+| Rider not found by the person detector: judge the bike's own area (stretched upward, wide margin) with the rider model | in the software (2026-10-27, after a field check: most crossings had no linked rider). On 11 field snapshots it gives a helmet answer on 4; it found no bare head from behind and can call a cap a helmet (snapshot 2598) |
 | Number-plate visible / not visible at the crossing | in the software |
 | Training toolkit: harvest from the client's cameras, merge Indian datasets, fine-tune | in the repository (`backend/tools/twhelmet_train/`) |
 | Fine-tune on Indian road data (public sets and the client's own labelled images) | planned: needs data and a GPU session (about 1-3 hours per run) |

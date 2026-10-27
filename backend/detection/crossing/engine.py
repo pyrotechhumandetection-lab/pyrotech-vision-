@@ -575,11 +575,10 @@ class CrossingEngine:
                 continue
             near = abs(line.signed(((v["box"][0] + v["box"][2]) / 2, v["box"][3]), w, h)) <= max(2.0 * (v["box"][3] - v["box"][1]), 0.25 * h)
             hist = mod.riders.setdefault(v["tid"], {})
-            for pi in riders.get(vi, []):
-                p = persons[pi]
-                rh = hist.setdefault(p["tid"] if p["tid"] is not None else f"slot{pi}", helmet_judge.RiderHistory())
+            for key, _ptid, rbox in self._rider_items(riders.get(vi, []), persons, v, h, w):
+                rh = hist.setdefault(key, helmet_judge.RiderHistory())
                 if near and budget > 0 and (fid or 0) % every == 0:
-                    top = helmet_judge.head_crop(frame, p["box"])
+                    top = helmet_judge.head_crop(frame, rbox, 1.0 if key == "bike-area" else 0.5)
                     if top is not None:
                         self.judger.submit_evidence(lambda top=top, rh=rh: rh.add(helmet_judge.judge_crop(top, hmin, nmin)))
                         budget -= 1
@@ -599,10 +598,9 @@ class CrossingEngine:
             vi = next((i for i in use_idx if bikes[i]["tid"] == ev["tid"]), None)
             hist = mod.riders.setdefault(ev["tid"], {})
             jobs = []
-            for pi in (riders.get(vi, []) if vi is not None else [])[:3]:
-                p = persons[pi]
-                key = p["tid"] if p["tid"] is not None else f"slot{pi}"
-                jobs.append((hist.setdefault(key, helmet_judge.RiderHistory()), p["tid"], list(p["box"]), helmet_judge.head_crop(frame, p["box"])))
+            if vi is not None:
+                for key, ptid, rbox in self._rider_items(riders.get(vi, []), persons, bikes[vi], h, w)[:3]:
+                    jobs.append((hist.setdefault(key, helmet_judge.RiderHistory()), ptid, list(rbox), helmet_judge.head_crop(frame, rbox, 1.0 if key == "bike-area" else 0.5)))
             mod.flash.append((captured_at, ev["tid"], ev["direction"]))        # the box turns red at once; the verdict follows
             mod.flash = mod.flash[-8:]
             ev.update(module="twhelmet", capturedAt=captured_at, frameShape=(h, w))
@@ -611,6 +609,18 @@ class CrossingEngine:
         for tid in [t for t in mod.riders if t not in {b["tid"] for b in bikes} and tr.tracks.get(t) is None]:
             mod.riders.pop(tid, None)               # forget histories of two-wheelers the tracker has dropped
         return {"boxes": boxes, "tracker": tr}
+
+    @staticmethod
+    def _rider_items(rider_idx, persons, bike, h, w):
+        """[(history key, person id, box)] for one two-wheeler. With the rider model and no person linked to the bike, the
+        bike's own area (stretched upward) is judged instead, so a rider the person detector missed is not left unchecked."""
+        out = []
+        for pi in rider_idx:
+            p = persons[pi]
+            out.append((p["tid"] if p["tid"] is not None else f"slot{pi}", p["tid"], list(p["box"])))
+        if not out and helmet_judge._custom_expected():
+            out.append(("bike-area", "bike-area", helmet_judge.bike_rider_box(bike["box"], h, w)))
+        return out
 
     def _finalise_twhelmet(self, mod, ev, jobs, boxes, frame, shape, hmin, nmin):
         """Judge thread: the crossing frame's own evidence + the votes of the approach -> verdict -> event."""
