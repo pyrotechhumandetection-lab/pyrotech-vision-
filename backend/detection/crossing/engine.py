@@ -226,6 +226,7 @@ class CrossingEngine:
         self._stop = threading.Event()
         self._last_submit = 0.0
         self.frame_shape = None
+        self.zone = None                            # pixel rectangle the detector looks at (None = whole picture), see _zone()
         self.result = None                          # drawing data of the last analysed frame
         self.m = {"submitted": 0, "processed": 0, "droppedReplaced": 0, "droppedStale": 0, "skippedInterval": 0, "errors": 0,
                   "lastError": None, "lastFrameId": None, "lastCapturedAt": None, "orderSkipped": 0}
@@ -367,6 +368,31 @@ class CrossingEngine:
                 log.exception("line crossing analysis failed")
 
     # ------------------------------------------------------------ analysis
+    def _zone(self, mods, w, h):
+        """Pixel rectangle (x1, y1, x2, y2) the detector looks at, or None = the whole frame. A module with `zoneAroundLine`
+        asks for the bounding box of its line widened by `zoneMargin` (fraction of the picture); the union of all modules'
+        zones is used, and any module without a zone makes it the whole frame. Why: the network input is fixed (640 px on the
+        NPU), so a 1920 px wide picture is shrunk 3x and a rider 40 px tall shrinks to 13 px; looking only around the line
+        keeps small, far riders large enough to be found."""
+        rects = []
+        for m in mods:
+            c = m.cfg
+            line = Line.from_cfg(c)
+            if not c.get("zoneAroundLine") or line is None:
+                return None
+            mg = float(c.get("zoneMargin", 0.25))
+            ax, ay, bx, by = line.px(w, h)
+            rects.append((min(ax, bx) - mg * w, min(ay, by) - mg * h, max(ax, bx) + mg * w, max(ay, by) + mg * h))
+        if not rects:
+            return None
+        x1 = max(0, int(min(r[0] for r in rects)))
+        y1 = max(0, int(min(r[1] for r in rects)))
+        x2 = min(w, int(max(r[2] for r in rects)))
+        y2 = min(h, int(max(r[3] for r in rects)))
+        if x2 - x1 < 160 or y2 - y1 < 160 or (x2 - x1) * (y2 - y1) > 0.85 * w * h:
+            return None                                        # too small to be useful / nearly the whole picture anyway
+        return x1, y1, x2, y2
+
     def _infer(self, frame, mods, model=None):
         """Network only (no tracking): returns (detections of this frame, model ms). Safe to run in parallel on different models."""
         classes, conf = set(), 1.0
@@ -383,11 +409,21 @@ class CrossingEngine:
         kw = dict(imgsz=self.imgsz, conf=conf, classes=sorted(classes), verbose=False)
         if config.NMS_IOU is not None:
             kw["iou"] = config.NMS_IOU
+        fh, fw = frame.shape[:2]
+        zone = self._zone(mods, fw, fh)
+        self.zone = zone
         t0 = time.perf_counter()
         with gated():
-            r = (model or self.model).predict(frame, **kw)[0]
+            r = (model or self.model).predict(frame if zone is None else frame[zone[1]:zone[3], zone[0]:zone[2]], **kw)[0]
         ms = (time.perf_counter() - t0) * 1000.0
-        return r.boxes.cpu().numpy(), ms
+        boxes = r.boxes.cpu().numpy()
+        if zone is not None and len(boxes):
+            from ultralytics.engine.results import Boxes
+            data = np.array(boxes.data, dtype=np.float32).copy()
+            data[:, [0, 2]] += zone[0]
+            data[:, [1, 3]] += zone[1]
+            boxes = Boxes(data, (fh, fw))                       # back in full-picture pixels, same shape of object the tracker expects
+        return boxes, ms
 
     def _assoc(self, raw, frame):
         """ByteTrack association of one frame's detections (call in frame order only) -> detections with track ids."""
@@ -668,6 +704,16 @@ class CrossingEngine:
         ah, aw = annotated.shape[:2]
         for mid, mod in list(self.mods.items()):
             self._draw_line(annotated, mod, aw, ah, thick=2)
+        zn = self.zone
+        if zn is not None and res is not None:
+            sx_, sy_ = aw / res["shape"][1], ah / res["shape"][0]
+            x1, y1, x2, y2 = int(zn[0] * sx_), int(zn[1] * sy_), int(zn[2] * sx_), int(zn[3] * sy_)
+            for k in range(x1, x2, 16):                          # dashed outline: where the detector is looking
+                cv2.line(annotated, (k, y1), (min(k + 8, x2), y1), (160, 160, 160), 1)
+                cv2.line(annotated, (k, y2 - 1), (min(k + 8, x2), y2 - 1), (160, 160, 160), 1)
+            for k in range(y1, y2, 16):
+                cv2.line(annotated, (x1, k), (x1, min(k + 8, y2)), (160, 160, 160), 1)
+                cv2.line(annotated, (x2 - 1, k), (x2 - 1, min(k + 8, y2)), (160, 160, 160), 1)
         if res is None:
             return annotated
         h, w = res["shape"]
@@ -707,6 +753,7 @@ class CrossingEngine:
                           "evidenceSkippedBusy": self.judger.stats["skippedBusy"], "crossingsFinalised": self.judger.stats["finalised"],
                           "msAvg": round(sum(self.judger.stats["ms"]) / len(self.judger.stats["ms"]), 1) if self.judger.stats["ms"] else None,
                           "errors": self.judger.stats["errors"]},
+                "zone": None if self.zone is None else list(self.zone),
                 "pipeline": {"depth": self.depth, "workers": len(self.models), "inFlight": self.inflight, "orderSkipped": m["orderSkipped"]},
                 "model": self.model_path.name if hasattr(self.model_path, "name") else str(self.model_path), "engine": self.engine,
                 "uptimeSec": round(now - self.started, 1)}

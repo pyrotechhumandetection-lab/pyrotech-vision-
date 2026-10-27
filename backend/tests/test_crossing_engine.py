@@ -199,6 +199,57 @@ class JudgeRuleTests(unittest.TestCase):
         self.assertFalse(st["validated"])
 
 
+class ZoneTests(unittest.TestCase):
+    """Detect only around the line: the crop must be the right rectangle and the boxes must come back in full-picture pixels."""
+
+    def _engine(self, **kw):
+        eng = ScriptedEngine(Collect(), lambda i: [])
+        eng.set_module("pcross", cfg("pcross", **kw))
+        return eng
+
+    def test_zone_rectangle(self):
+        eng = self._engine()
+        mods = list(eng.mods.values())
+        try:
+            self.assertIsNone(eng._zone(mods, W, H))                          # off by default
+            mods[0].cfg.update(zoneAroundLine=True, zoneMargin=0.2)
+            ln = mods[0].cfg["line"]
+            x1, y1, x2, y2 = eng._zone(mods, W, H)
+            self.assertLessEqual(x1, min(ln["x1"], ln["x2"]) * W)
+            self.assertGreaterEqual(x2, max(ln["x1"], ln["x2"]) * W)
+            self.assertTrue(0 <= x1 < x2 <= W and 0 <= y1 < y2 <= H)
+            mods[0].cfg.update(zoneMargin=1.0)
+            self.assertIsNone(eng._zone(mods, W, H))                          # (nearly) the whole picture anyway
+            mods[0].cfg.update(zoneMargin=0.2, line=None)
+            self.assertIsNone(eng._zone(mods, W, H))
+        finally:
+            eng.close()
+
+    def test_boxes_come_back_in_full_picture_pixels(self):
+        from ultralytics.engine.results import Boxes
+        seen = {}
+
+        class Res:
+            def __init__(s, boxes): s.boxes = boxes
+
+        class Model:
+            names = {0: "person", 3: "motorcycle"}
+            def predict(s, img, **kw):
+                seen["shape"] = img.shape[:2]
+                return [Res(Boxes(np.array([[10, 20, 50, 80, 0.9, 3]], np.float32), img.shape[:2]))]
+
+        eng = self._engine(zoneAroundLine=True, zoneMargin=0.2)
+        try:
+            mods = list(eng.mods.values())
+            zone = eng._zone(mods, W, H)
+            raw, _ms = ce.CrossingEngine._infer(eng, np.zeros((H, W, 3), np.uint8), mods, model=Model())
+            self.assertEqual(seen["shape"], (zone[3] - zone[1], zone[2] - zone[0]))     # the detector got the crop only
+            self.assertEqual([round(float(v)) for v in raw.xyxy[0]], [10 + zone[0], 20 + zone[1], 50 + zone[0], 80 + zone[1]])
+            self.assertEqual(int(raw.cls[0]), 3)
+        finally:
+            eng.close()
+
+
 class QueueTests(unittest.TestCase):
     def test_newest_frame_wins_and_stale_dropped(self):
         got = Collect()

@@ -212,7 +212,9 @@
       fld('Same track cannot re-cross within (s)', 'recrossSec', num('recrossSec', c.recrossSec, 0, 60, 0.5), '') +
       fld('Id hand-over window (s)', 'handoverSec', num('handoverSec', c.handoverSec, 0, 5, 0.1), 'A lost id replaced by a new one nearby within this time is the same object (occlusion).') +
       fld('Duplicate window (s)', 'dedupeSec', num('dedupeSec', c.dedupeSec, 0, 10, 0.1), 'Two crossings in one direction at the same spot within this time count once.') +
-      fld('Minimum object size', 'minBoxFrac', num('minBoxFrac', c.minBoxFrac, 0.005, 0.5, 0.005), 'Fraction of the picture height; smaller objects are ignored.') + '</div>';
+      fld('Minimum object size', 'minBoxFrac', num('minBoxFrac', c.minBoxFrac, 0.005, 0.5, 0.005), 'Fraction of the picture height; smaller objects are ignored.') + '</div>' +
+      chk('zoneAroundLine', !!c.zoneAroundLine, 'Detect only in the area around the line', 'finds small, far objects (the detector looks at a zoomed-in part of the picture; objects outside that dashed area are not seen)') +
+      fld('Area reaches beyond the line by', 'zoneMargin', num('zoneMargin', c.zoneMargin, 0.05, 1, 0.05), 'Fraction of the picture. Larger = objects are seen earlier, but smaller on the detector.');
     if (modId === 'pcross') h += chk('excludeRiders', c.excludeRiders !== false, 'Do not count riders of motorcycles / bicycles as people', 'they belong to the vehicle');
     if (modId === 'twhelmet') {
       h += chk('includeBicycles', !!c.includeBicycles, 'Also check bicycles', 'off = motorcycles / scooters only') +
@@ -242,7 +244,7 @@
     const out = {
       direction: q('direction').value, confidence: f('confidence'), targetFps: f('targetFps'), refPoint: q('refPoint').value,
       minTrackFrames: parseInt(q('minTrackFrames').value, 10), hysteresis: f('hysteresis'), endExtend: f('endExtend'), recrossSec: f('recrossSec'), handoverSec: f('handoverSec'),
-      dedupeSec: f('dedupeSec'), minBoxFrac: f('minBoxFrac'), snapshot: { mode: q('snapmode').value },
+      dedupeSec: f('dedupeSec'), minBoxFrac: f('minBoxFrac'), zoneAroundLine: q('zoneAroundLine').checked, zoneMargin: f('zoneMargin'), snapshot: { mode: q('snapmode').value },
       alert: { severity: q('severity').value, cooldownSec: f('alertCool'), labels: Array.prototype.map.call(form.querySelectorAll('[name="alertl"]:checked'), function (c) { return c.value; }) }
     };
     if (modId === 'pcross') out.excludeRiders = q('excludeRiders').checked;
@@ -252,7 +254,7 @@
       out.minMissingVotes = parseInt(q('minMissingVotes').value, 10); out.minHelmetVotes = parseInt(q('minHelmetVotes').value, 10);
       out.alert.compliantSeverity = q('compliantSeverity').value;
     }
-    const nums = [out.confidence, out.targetFps, out.minTrackFrames, out.hysteresis, out.endExtend, out.recrossSec, out.handoverSec, out.dedupeSec, out.minBoxFrac, out.alert.cooldownSec];
+    const nums = [out.confidence, out.targetFps, out.minTrackFrames, out.hysteresis, out.endExtend, out.recrossSec, out.handoverSec, out.dedupeSec, out.minBoxFrac, out.zoneMargin, out.alert.cooldownSec];
     if (nums.some(function (x) { return !isFinite(x); })) { errEl.textContent = 'Fill in every number.'; return null; }
     return out;
   }

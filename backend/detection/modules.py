@@ -174,6 +174,8 @@ _CROSS_COMMON = {
     "recrossSec": 2.0,                           # the same track id cannot cross again within this time
     "handoverSec": 1.0,                          # a lost id replaced by a new one nearby within this time = same object
     "dedupeSec": 1.0,                            # two same-direction crossings at the same spot within this time = one
+    "zoneAroundLine": False,                     # detect only in the area around the line (small / far objects stay large enough to find)
+    "zoneMargin": 0.25,                          # how far that area reaches beyond the line, as a fraction of the picture
     "minBoxFrac": 0.04,                          # objects lower than this fraction of the picture height are ignored
 }
 DEFAULTS["pcross"] = dict(copy.deepcopy(_CROSS_COMMON), excludeRiders=True, confidence=0.20, minTrackFrames=1,
@@ -483,6 +485,7 @@ def _validate_cross(module_id, cfg):
     _num(errs, "handoverSec", cfg.get("handoverSec"), 0, 5)
     _num(errs, "dedupeSec", cfg.get("dedupeSec"), 0, 10)
     _num(errs, "minBoxFrac", cfg.get("minBoxFrac"), 0.005, 0.5)
+    _num(errs, "zoneMargin", cfg.get("zoneMargin"), 0.05, 1.0)
     if module_id == "twhelmet":
         _num(errs, "helmetMinConf", cfg.get("helmetMinConf"), 0.25, 0.99)
         _num(errs, "noHelmetMinConf", cfg.get("noHelmetMinConf"), 0.25, 0.99)
