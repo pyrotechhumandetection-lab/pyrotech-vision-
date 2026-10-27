@@ -36,7 +36,7 @@ These are engineering rules of thumb **[expected]**, to be confirmed by the site
 
 | Condition | Good | Degraded | Poor / do not rely |
 |---|---|---|---|
-| Rider's head height in the picture (pixels, at the analysis resolution) | 40 px or more | 20-40 px | under 20 px |
+| Rider's head height in the picture (pixels, at the native stream resolution) | 45 px or more | 22-45 px | under 22 px (see Appendix A, table 2) |
 | Two-wheeler height in the picture | 150 px or more | 80-150 px | under 80 px |
 | Camera view of the rider | front view, slightly from above | side view | rear view only (no face; helmet vs no-helmet is harder; plate may be the only cue) |
 | Camera height / angle | 3-6 m, looking down 15-35 degrees at approaching traffic | higher, steeper (head seen from above: a helmet and a bare head both look like "a round dark top") | very high, straight down |
@@ -149,7 +149,7 @@ These are engineering rules of thumb **[expected]**, to be confirmed by the site
 | F6 | Alerts flood or are rate-limited | Missing alerts | A cooldown stops the same alert repeating | Set the cooldown to the site's needs |
 | F7 | Storage full | No snapshots | Snapshots need disk | Retention policy |
 | F8 | Judging happens off the main thread | Delay of a few hundred milliseconds | Helmet checks run on the CPU and are queued; under heavy load some intermediate frames are skipped | Use the main CPU headroom; limit other modules |
-| F9 | Zoomed detection area (when switched on) | Objects outside the dashed area are not seen | The detector looks only at the area around the line | Set the area margin |
+| F9 | Zoomed detection area (optional setting) | Objects outside the dashed area are not seen; a large, close bike is cut at the edge of the area and its rider may not be linked | The detector looks only at the area around the line | Use it when bikes at the line are small (far camera); widen the margin; leave it off for close cameras |
 
 ### G. Legal and operational boundaries
 
@@ -180,8 +180,8 @@ These are engineering rules of thumb **[expected]**, to be confirmed by the site
 
 | Item | Status |
 |---|---|
-| Lower the detection confidence for two-wheelers; check every frame near the line; 2 frames to start a track | in the software (see Appendix A for the measured effect) |
-| Detect only around the line (zoom onto the road near the line) | in the software, switch in the module settings, with a dashed box on the picture |
+| Lower the detection confidence for two-wheelers (0.35 to 0.25); judge every frame near the line; 2 frames to start a track; smaller minimum size | in the software as the new defaults (existing saved settings keep their old values until changed) |
+| Detect only around the line (zoom onto the road near the line) | in the software, **off by default** (switch in the module settings; a dashed box shows the area). Helps small, far bikes; can cut a large, close bike |
 | Margin at the line ends | in the software |
 | Number-plate visible / not visible at the crossing | in the software |
 | Training toolkit: harvest from the client's cameras, merge Indian datasets, fine-tune | in the repository (`backend/tools/twhelmet_train/`) |
@@ -191,6 +191,53 @@ These are engineering rules of thumb **[expected]**, to be confirmed by the site
 | Masks for areas to ignore (parking, hoardings) | planned |
 | Night test and rain test with labelled recordings | planned |
 
-## Appendix A. First measurement on one recorded video (2026-10-27)
+## Appendix A. First measurement (2026-10-27)
 
-*(filled in from the analysis; see below)*
+**What was tested.** One recorded video, `Media1.mp4`: 9 minutes, 10 fps, 1912x1020. It is a **screen recording of the operator page**: the camera picture (road, daytime, parked bikes on the left, traffic entering at the top right, a line drawn across the right half) occupies about 1000x560 px of it, roughly half the camera's real resolution, re-encoded at 10 fps. Everything below is therefore a **pessimistic and indirect** test: the live system sees the camera stream at about twice this resolution and at a higher frame rate. Ground truth was made by looking at the pictures (no labelling tool, one reader, small samples). Numbers are indicators, not accuracy claims.
+
+### Table 1. Is a moving two-wheeler found? (detector stage)
+
+70 frames sampled from 10 motion events; "reference" = a stronger detector (YOLOv8s at 1280 px, looking at the road area) that found a moving, non-parked bike in 19 of them. Recall = share of those 19 found by each setting. (Setting 1 mimics the detector scale of the live NPU at 640 px.)
+
+| # | Setting | Moving bike found |
+|---|---|---|
+| 1 | Previous default: whole picture, confidence 0.35 | **2 of 19 (11 %)** |
+| 2 | Whole picture, confidence 0.20 | 8 of 19 (42 %) |
+| 3 | Road area only (zoom), confidence 0.35 | 7 of 19 (37 %) |
+| 4 | Road area only (zoom), confidence 0.25 | 10 of 19 (53 %) |
+| 5 | Road area only (zoom), confidence 0.20 | 13 of 19 (68 %) |
+
+Lower confidence found more bikes at the cost of a few extra boxes (one frame with a bike box that the reference did not confirm). Meaning: **most missed or "unverified" two-wheelers in this scene were never found by the detector at all.** The new defaults use confidence 0.25; the zoom is available as an option.
+
+### Table 2. Helmet decision versus head size (judge stage)
+
+The helmet model was run on 13 street photos from a public Cambodian dataset (its own training domain, so an **upper bound** for Indian roads), 33 heads (29 helmet, 4 no-helmet; the reference answer is the model's own confident detection at full size, which flatters it). Each photo was shrunk until the head had the stated height, then judged the way the live system does (whole rider, one pass, thresholds 0.5 / 0.6).
+
+| Head height (px) | Riders | Decided correctly | Decided wrongly | Left "unverified" |
+|---|---|---|---|---|
+| 80 | 7 | 4 | 0 | 3 |
+| 60 | 8 | 4 | 0 | 4 |
+| 45 | 12 | 8 | 0 | 4 |
+| 35 | 24 | 17 | 1 | 6 |
+| 28 | 29 | 17 | 3 | 9 |
+| 22 | 31 | 20 | 3 | 8 |
+| 16 | 33 | 15 | 3 | 15 |
+| 12 | 33 | 12 | 0 | 21 |
+
+Even with big heads about a third are left unverified; below about 28 px wrong answers appear; at 16 px or less about half or more are unverified. **Rule of thumb used in section 3: reliable only from about 45 px.**
+
+### Table 3. The test video itself
+
+In the video, riders' heads measure about **13-16 px** (the live stream roughly doubles that to 26-32 px). The helmet model returned **no helmet and no no-helmet box at all (confidence 0.15 or higher) for any of 12 rider frames from 6 passages**, including a rider with a clearly visible white helmet and several clearly bare heads, even after enlarging the crop 3 to 5 times. Reading the pictures, most riders in this video had no helmet (some with a cloth over the head); two passages carried a pillion rider. This explains why **every** two-wheeler ended as "Helmet unverified": the model cannot see a head of that size, so it says nothing, and the safe answer is "unverified".
+
+### What this does not show
+
+* No end-to-end count. The video's 10 fps and halved resolution break tracking of fast bikes (tracks of 1-7 frames), so the number of crossings in the recording says nothing about the live system.
+* No helmet accuracy on Indian roads. The helmet model has not seen this camera's pictures; its field accuracy is unknown until the section 6 test.
+* No night, rain or crowded-traffic result.
+
+### What to do with this
+
+1. Use the main stream at 1920x1080 (not a recording of the screen) and re-measure with `backend/tools/eval_twhelmet.py`.
+2. Where bikes are small at the line, turn on "Detect only around the line" and compare.
+3. Collect and label this camera's pictures (`backend/tools/twhelmet_train/harvest.py`) and fine-tune; head heights of 25-35 px need training examples of that size, which public sets rarely contain.

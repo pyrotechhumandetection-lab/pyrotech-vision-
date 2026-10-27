@@ -181,9 +181,9 @@ _CROSS_COMMON = {
 DEFAULTS["pcross"] = dict(copy.deepcopy(_CROSS_COMMON), excludeRiders=True, confidence=0.20, minTrackFrames=1,
                           snapshot={"mode": "crossing"},
                           alert={"enabled": False, "labels": ["Person IN", "Person OUT"], "severity": "low", "cooldownSec": 0})
-DEFAULTS["twhelmet"] = dict(copy.deepcopy(_CROSS_COMMON), minBoxFrac=0.05, includeBicycles=False,
+DEFAULTS["twhelmet"] = dict(copy.deepcopy(_CROSS_COMMON), confidence=0.25, minTrackFrames=2, minBoxFrac=0.03, includeBicycles=False,
                             helmetMinConf=0.5, noHelmetMinConf=0.6, minMissingVotes=3, minHelmetVotes=2, detectPlate=True, plateMinConf=0.35,
-                            judgeEvery=2, maxJudgePerFrame=2,
+                            judgeEvery=1, maxJudgePerFrame=2,
                             snapshot={"mode": "crossing"},
                             alert={"enabled": True, "labels": ["Helmet compliant", "Helmet missing"], "severity": "high",
                                    "compliantSeverity": "low", "cooldownSec": 5})
