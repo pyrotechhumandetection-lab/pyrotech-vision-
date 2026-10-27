@@ -273,6 +273,29 @@ class BikeAreaFallbackTests(unittest.TestCase):
             jd._STATE.update(old)
 
 
+class EveryFrameTests(unittest.TestCase):
+    def test_every_frame_lifts_the_shared_rate_cap_for_the_helmet_module_only(self):
+        eng = ScriptedEngine(lambda *a: None, lambda i: [])
+        try:
+            cfg_h = copy.deepcopy(DEFAULTS["twhelmet"])
+            cfg_p = copy.deepcopy(DEFAULTS["pcross"])
+            self.assertTrue(cfg_h["everyFrame"])
+            self.assertNotIn("everyFrame", cfg_p)
+            eng.set_module("pcross", cfg_p)
+            eng.set_rate_cap(5)
+            self.assertFalse(eng.every_frame)
+            self.assertEqual(eng.target_fps, 5.0)
+            eng.set_module("twhelmet", cfg_h)
+            self.assertTrue(eng.every_frame)
+            self.assertEqual(eng.target_fps, float(config.AI_FPS_MAX))
+            cfg_h["everyFrame"] = False
+            eng.set_module("twhelmet", cfg_h)
+            self.assertFalse(eng.every_frame)
+            self.assertEqual(eng.target_fps, 5.0)
+        finally:
+            eng.close()
+
+
 class QueueTests(unittest.TestCase):
     def test_newest_frame_wins_and_stale_dropped(self):
         got = Collect()

@@ -570,6 +570,8 @@ class CameraSession:
             cap = self.capture_cap if any_on else 0.0
             if any_on:                              # dynamic share of the AI budget (1 camera = the maximum)
                 cap = min(cap, self.rate.value) if cap else self.rate.value
+                if cross_eng is not None and cross_eng.every_frame:
+                    cap = 0.0                       # two-wheeler helmet "analyse every frame": no decimation of this camera's frames
             if cap:
                 # frame-rate decimation with a running schedule: 20 fps in, 16 fps target -> 16 of 20 frames
                 # (a plain "time since last frame" test would keep only every 2nd frame = 10 fps)

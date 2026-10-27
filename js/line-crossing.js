@@ -217,7 +217,8 @@
       fld('Area reaches beyond the line by', 'zoneMargin', num('zoneMargin', c.zoneMargin, 0.05, 1, 0.05), 'Fraction of the picture. Larger = objects are seen earlier, but smaller on the detector.');
     if (modId === 'pcross') h += chk('excludeRiders', c.excludeRiders !== false, 'Do not count riders of motorcycles / bicycles as people', 'they belong to the vehicle');
     if (modId === 'twhelmet') {
-      h += chk('includeBicycles', !!c.includeBicycles, 'Also check bicycles', 'off = motorcycles / scooters only') +
+      h += chk('everyFrame', c.everyFrame !== false, 'Analyse every camera frame (best for fast two-wheelers)', 'the AI looks at as many frames as it can instead of keeping to the shared AI rate, so a fast bike is followed over more frames. A live picture cannot be slowed down; this gives the same benefit. Limited by how fast the AI runs (see Inference rate in Detection Status).') +
+        chk('includeBicycles', !!c.includeBicycles, 'Also check bicycles', 'off = motorcycles / scooters only') +
         '<div class="dl-sub"><b>Helmet judge</b><div class="form-grid mt-8">' +
         fld('Helmet needs confidence ≥', 'helmetMinConf', num('helmetMinConf', c.helmetMinConf, 0.25, 0.99, 0.01), 'Default ' + esc(d.helmetMinConf) + '.') +
         fld('No-helmet needs confidence ≥', 'noHelmetMinConf', num('noHelmetMinConf', c.noHelmetMinConf, 0.25, 0.99, 0.01), 'Default ' + esc(d.noHelmetMinConf) + '. Needed in two views of the head.') +
@@ -249,7 +250,7 @@
     };
     if (modId === 'pcross') out.excludeRiders = q('excludeRiders').checked;
     if (modId === 'twhelmet') {
-      out.includeBicycles = q('includeBicycles').checked;
+      out.includeBicycles = q('includeBicycles').checked; out.everyFrame = q('everyFrame').checked;
       out.helmetMinConf = f('helmetMinConf'); out.noHelmetMinConf = f('noHelmetMinConf');
       out.minMissingVotes = parseInt(q('minMissingVotes').value, 10); out.minHelmetVotes = parseInt(q('minHelmetVotes').value, 10);
       out.alert.compliantSeverity = q('compliantSeverity').value;

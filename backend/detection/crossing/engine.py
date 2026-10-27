@@ -219,6 +219,7 @@ class CrossingEngine:
         self.target_fps = float(target_fps)
         self._cfg_fps = float(config.AI_FPS_MAX)       # highest rate; the live rate comes from set_rate_cap()
         self._rate_cap = None
+        self.every_frame = False
         self.lock = threading.Condition()
         self.job, self.busy = None, False
         self._seq, self._next, self.inflight = 0, 0, 0   # frame order: numbers are given when a worker takes a frame
@@ -265,7 +266,10 @@ class CrossingEngine:
 
     def _apply_fps(self):
         cap = self._rate_cap if self._rate_cap else self._cfg_fps
-        self.target_fps = max(1.0, min(self._cfg_fps, cap))
+        # Two-wheeler helmet module "analyse every frame": the shared dynamic AI rate does not hold this camera back; every
+        # frame the camera delivers is offered to the detector (it can still only go as fast as the model runs).
+        self.every_frame = any(m.cfg.get("everyFrame") and not m.paused for m in self.mods.values() if m.mid == "twhelmet")
+        self.target_fps = self._cfg_fps if self.every_frame else max(1.0, min(self._cfg_fps, cap))
 
     def remove_module(self, mid):
         with self.lock:
@@ -290,7 +294,7 @@ class CrossingEngine:
     def submit(self, frame, captured_at, frame_id):
         """Newest frame wins. Returns True when the frame was taken for analysis."""
         now = time.monotonic()
-        if now - self._last_submit < 1.0 / self.target_fps - 0.004:
+        if not self.every_frame and now - self._last_submit < 1.0 / self.target_fps - 0.004:
             self.m["skippedInterval"] += 1
             return False
         with self.lock:
