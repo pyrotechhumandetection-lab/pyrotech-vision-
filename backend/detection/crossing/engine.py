@@ -582,7 +582,8 @@ class CrossingEngine:
                    and b["box"][3] - b["box"][1] >= float(c.get("minBoxFrac", 0.05)) * h]
         use = [bikes[i] for i in use_idx]
         line = Line.from_cfg(c)
-        hmin, nmin = float(c.get("helmetMinConf", 0.5)), float(c.get("noHelmetMinConf", 0.6))
+        hmin, nmin = float(c.get("helmetMinConf", 0.6)), float(c.get("noHelmetMinConf", 0.6))
+        mhp = int(c.get("minHeadPx", helmet_judge.MIN_HEAD_PX))
         every = max(1, int(c.get("judgeEvery", 2)))
         budget = int(c.get("maxJudgePerFrame", 2))
         # 1. evidence while a two-wheeler approaches / passes the line: head crops go to the judge thread (bounded, droppable)
@@ -598,7 +599,7 @@ class CrossingEngine:
                     top = helmet_judge.head_crop(frame, rbox, 1.0 if str(key).startswith("bike-area") else 0.5)
                     if top is not None:
                         rh.queue(top, key == "bike-area")               # kept until judged: now by the judge thread, or at the crossing
-                        self.judger.submit_evidence(lambda rh=rh: rh.judge_pending(hmin, nmin, limit=1))
+                        self.judger.submit_evidence(lambda rh=rh: rh.judge_pending(hmin, nmin, limit=1, min_head_px=mhp))
                         budget -= 1
         events = tr.update(use, captured_at, fid)
         boxes = []
@@ -660,9 +661,10 @@ class CrossingEngine:
         for job in jobs:
             rh, ptid, pbox, top = job[:4]
             bike_area = bool(job[4]) if len(job) > 4 else ptid == "bike-area"
-            rh.judge_pending(hmin, nmin)                                                # approach frames the judge thread did not get to
+            mhp = int(c.get("minHeadPx", helmet_judge.MIN_HEAD_PX))
+            rh.judge_pending(hmin, nmin, min_head_px=mhp)                               # approach frames the judge thread did not get to
             if top is not None:
-                rh.add(helmet_judge.judge_crop(top, hmin, nmin, bike_area=bike_area))     # always judge the crossing frame itself
+                rh.add(helmet_judge.judge_crop(top, hmin, nmin, bike_area=bike_area, min_head_px=mhp))   # always judge the crossing frame itself
             verdict = rh.verdict(**votes_kw)
             last = rh.last or {}
             rl.append({"personId": ptid, "box": [round(v_, 1) for v_ in pbox], "verdict": verdict, "votes": list(rh.votes),

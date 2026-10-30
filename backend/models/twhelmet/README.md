@@ -32,7 +32,7 @@ Roboflow Universe set "Helmet and Number Plate Detection for Motorbike Safety" (
 or rename the files.
 
 How it is used: the COCO detector still finds and tracks the two-wheelers (NPU). At the line, each rider (person box + small margin)
-goes through this model in one pass; a `helmet` / `no-helmet` box in the upper 60 % of that crop and at least 14 px tall gives the
+goes through this model in one pass; a `helmet` / `no-helmet` box in the upper 60 % of that crop and at least 28 px (setting minHeadPx) gives the
 verdict (one clear view is enough, the vote rules still apply: 2 helmet frames, 3 no-helmet frames with no helmet frame). A two-wheeler
 with no person linked or nearby is judged by its own area; if no head is found there in 3 or more frames and the bike hardly moved
 (at most 1.5 bike-lengths), the crossing is "Vehicle only" (category "Only Vehicle Detected"); a bike that travelled further with no

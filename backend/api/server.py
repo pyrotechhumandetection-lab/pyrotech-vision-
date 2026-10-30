@@ -531,7 +531,7 @@ def mod_config_get(app, q, body, mod):
             "liveApply": ["confidence", "classConf", "classes", "zones", "snapshot", "alert"] + (["counting"] if mod == "count" else [])
             + (["iou", "imgSize", "everyNFrames", "removeGreenOverlay", "verifier", "alertRule", "smokeRules"] if mod == "fire" else [])
             + (["line", "direction", "targetFps", "refPoint", "minTrackFrames", "hysteresis", "recrossSec", "handoverSec", "dedupeSec", "minBoxFrac",
-                "excludeRiders", "includeBicycles", "helmetMinConf", "noHelmetMinConf", "minMissingVotes", "minHelmetVotes", "minNoRiderVotes", "vehicleOnlyMaxTravel", "judgeEvery",
+                "excludeRiders", "includeBicycles", "helmetMinConf", "noHelmetMinConf", "minMissingVotes", "minHelmetVotes", "minNoRiderVotes", "vehicleOnlyMaxTravel", "minHeadPx", "judgeEvery",
                 "maxJudgePerFrame", "everyFrame"] if mod in ("pcross", "twhelmet") else [])
             + (["monitor", "detector.conf", "detector.nameConf", "detector.nameConfFull", "detector.intervalS", "detector.showLabels"] if mod == "object" else []),
             "restartRequired": ["detector.model", "detector.imgsz", "detector.iou", "detector.tiles", "detector.enabled", "verifier"] if mod == "object" else []}

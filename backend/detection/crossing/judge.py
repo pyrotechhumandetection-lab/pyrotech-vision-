@@ -27,7 +27,9 @@ log = logging.getLogger("aivision.twhelmet")
 
 HELMET, MISSING, UNCERTAIN = "HELMET", "MISSING", "UNCERTAIN"
 NO_RIDER = "NO_RIDER"                # per-frame: the rider model saw the two-wheeler's area and found no head at all
-MIN_HEAD_PX = 14                     # a helmet / head box shorter than this (pixels, in the crop) is too small to trust
+MIN_HEAD_PX = 28                     # a helmet / head box shorter than this (pixels of the frame) never confirms anything: below it a dark
+                                     # head of hair seen from behind and a dark helmet are the same blob (field case 2026-10-30, track 429;
+                                     # first measurement: wrong answers appear below ~28 px). Setting minHeadPx of the module.
 MODELS_DIR = config.BACKEND_DIR / "models" / "twhelmet"
 CUSTOM = os.environ.get("AIV_TWHELMET_MODEL") or str(MODELS_DIR / "rider_helmet.pt")
 POSITIVE = {"helmet", "with_helmet", "with helmet", "wearing_helmet", "helmet_on", "hardhat", "with-helmet"}
@@ -202,7 +204,7 @@ def _view(name, res):
     return (name, pos, neg, info)
 
 
-def judge_crop(top, hmin=0.6, nmin=0.6, classify=None, heads=None, bike_area=False):
+def judge_crop(top, hmin=0.6, nmin=0.6, classify=None, heads=None, bike_area=False, min_head_px=MIN_HEAD_PX):
     """Judge the head region of one rider (see head_crop). `bike_area=True` means the crop is the two-wheeler's own
     area with no person linked to it (see bike_rider_box): if the rider model then finds no head at all, the frame
     votes NO_RIDER (a two-wheeler without a visible rider) instead of UNCERTAIN."""
@@ -213,7 +215,8 @@ def judge_crop(top, hmin=0.6, nmin=0.6, classify=None, heads=None, bike_area=Fal
     # head_crop adds a side margin of 1.0 x width for a bike area and 0.5 x width for a person: the object itself is the middle
     # third / half of the crop, which bounds how wide its rider's head can be
     ref_w = top.shape[1] * (1 / 3 if bike_area else 1 / 2)
-    classify = classify or (lambda crop: _classify(_STATE["model"], _STATE["names"], crop, 416, custom, ref_w=ref_w if crop is top else None))
+    classify = classify or (lambda crop: _classify(_STATE["model"], _STATE["names"], crop, 416, custom, min_head_px=min_head_px,
+                                                   ref_w=ref_w if crop is top else None))
     heads = heads or _head_boxes
     cx1 = cy1 = 0
     views = [_view("body-top", classify(top))]
@@ -287,7 +290,7 @@ class RiderHistory:
     def queue(self, top, bike_area=False):
         self.pending.append((top, bool(bike_area)))
 
-    def judge_pending(self, hmin=0.6, nmin=0.6, limit=None):
+    def judge_pending(self, hmin=0.6, nmin=0.6, limit=None, min_head_px=MIN_HEAD_PX):
         """Judge up to `limit` (default: all) waiting crops, oldest first. Returns how many were judged."""
         n = 0
         while self.pending and (limit is None or n < limit):
@@ -295,7 +298,7 @@ class RiderHistory:
                 top, ba = self.pending.popleft()
             except IndexError:
                 break
-            self.add(judge_crop(top, hmin, nmin, bike_area=ba))
+            self.add(judge_crop(top, hmin, nmin, bike_area=ba, min_head_px=min_head_px))
             n += 1
         return n
 

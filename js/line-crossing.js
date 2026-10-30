@@ -224,6 +224,7 @@
         fld('No-helmet needs confidence ≥', 'noHelmetMinConf', num('noHelmetMinConf', c.noHelmetMinConf, 0.25, 0.99, 0.01), 'Default ' + esc(d.noHelmetMinConf) + '. Needed in two views of the head.') +
         fld('Frames that must say “no helmet”', 'minMissingVotes', num('minMissingVotes', c.minMissingVotes, 1, 8, 1), 'Of the last 8 judged frames of that rider, with none saying helmet.') +
         fld('Frames that must say “helmet”', 'minHelmetVotes', num('minHelmetVotes', c.minHelmetVotes, 1, 8, 1), '') +
+        fld('Smallest head that can be judged (px)', 'minHeadPx', num('minHeadPx', c.minHeadPx == null ? d.minHeadPx : c.minHeadPx, 8, 200, 1), 'Default ' + esc(d.minHeadPx) + '. A smaller head never confirms helmet or no helmet: seen from behind, dark hair and a dark helmet look the same. Move the line nearer the camera rather than lowering this.') +
         fld('Frames with no rider at all → “Vehicle only”', 'minNoRiderVotes', num('minNoRiderVotes', c.minNoRiderVotes == null ? d.minNoRiderVotes : c.minNoRiderVotes, 1, 8, 1), 'Two-wheeler with no person linked and no head found by the rider model in every judged frame. One frame with a head keeps it “not verified”.') + '</div></div>';
     }
     h += '<div class="field"><label for="lc-snapmode">Snapshot of each crossing</label>' + sel('snapmode', [['crossing', 'Save the frame of the crossing'], ['off', 'No snapshot (still counted)']], sn.mode || 'crossing') + '</div>' +
@@ -254,7 +255,7 @@
       out.includeBicycles = q('includeBicycles').checked; out.everyFrame = q('everyFrame').checked;
       out.helmetMinConf = f('helmetMinConf'); out.noHelmetMinConf = f('noHelmetMinConf');
       out.minMissingVotes = parseInt(q('minMissingVotes').value, 10); out.minHelmetVotes = parseInt(q('minHelmetVotes').value, 10);
-      out.minNoRiderVotes = parseInt(q('minNoRiderVotes').value, 10);
+      out.minNoRiderVotes = parseInt(q('minNoRiderVotes').value, 10); out.minHeadPx = parseInt(q('minHeadPx').value, 10);
       out.alert.compliantSeverity = q('compliantSeverity').value;
     }
     const nums = [out.confidence, out.targetFps, out.minTrackFrames, out.hysteresis, out.endExtend, out.recrossSec, out.handoverSec, out.dedupeSec, out.minBoxFrac, out.zoneMargin, out.alert.cooldownSec];

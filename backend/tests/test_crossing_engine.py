@@ -325,6 +325,27 @@ class ConfirmedCategoryTests(unittest.TestCase):
         pos, neg, info = jd._classify(m, names, crop, 640, True)
         self.assertEqual((pos, neg, info), (0.0, 0.7, {"heads": 1, "tiny": 0, "headPx": 30, "foreign": 0}))
 
+    def test_rear_view_head_of_20px_never_confirms(self):
+        """Field case 2026-10-30, track 429: a bare head seen from behind at ~20 px was called helmet twice -> 'compliant'."""
+        class Box:
+            def __init__(s, c, conf, xyxy): s.cls, s.conf, s.xyxy = c, conf, [np.array(xyxy, float)]
+
+        class Res:
+            def __init__(s, boxes): s.boxes = boxes
+
+        class Model:
+            out = [Box(1, 0.78, [100, 10, 120, 31])]                              # 20 x 21 px "helmet"
+            def predict(s, crop, **kw): return [Res(s.out)]
+
+        names = {0: "bike", 1: "helmet", 2: "no-helmet", 3: "number-plate"}
+        crop = np.zeros((300, 330, 3), np.uint8)
+        pos, neg, info = jd._classify(Model(), names, crop, 640, True)              # default floor 28 px
+        self.assertEqual((pos, info["heads"], info["tiny"]), (0.0, 0, 1))
+        pos, neg, info = jd._classify(Model(), names, crop, 640, True, min_head_px=16)
+        self.assertEqual((pos, info["heads"]), (0.78, 1))
+        self.assertEqual(DEFAULTS["twhelmet"]["minHeadPx"], 28)
+        self.assertEqual(validate("twhelmet", dict(DEFAULTS["twhelmet"], minHeadPx=4), []), ["minHeadPx must be between 8 and 200"])
+
     def test_head_wider_than_its_bike_is_foreign(self):
         class Box:
             def __init__(s, c, conf, xyxy): s.cls, s.conf, s.xyxy = c, conf, [np.array(xyxy, float)]
