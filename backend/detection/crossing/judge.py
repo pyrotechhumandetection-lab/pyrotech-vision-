@@ -270,15 +270,34 @@ def decide(votes, min_missing=3, min_helmet=2, min_no_rider=3):
 
 class RiderHistory:
     """Rolling per-frame verdicts of one rider (keyed by the rider's position on its two-wheeler, not by person id,
-    so a person id switch does not lose the evidence)."""
+    so a person id switch does not lose the evidence). Crops of the approach are kept in `pending` (the last few) until
+    judged: the judge thread takes them when it has time, and whatever is still waiting when the two-wheeler crosses is
+    judged at the crossing - so a fast bike on a slow CPU still gets several votes instead of one."""
+    KEEP = 4
 
     def __init__(self, n=8):
         self.votes = deque(maxlen=n)
+        self.pending = deque(maxlen=self.KEEP)       # (crop, bike_area) not yet judged; oldest dropped when full
         self.last = None
 
     def add(self, ev):
         self.votes.append(ev["verdict"])
         self.last = ev
+
+    def queue(self, top, bike_area=False):
+        self.pending.append((top, bool(bike_area)))
+
+    def judge_pending(self, hmin=0.6, nmin=0.6, limit=None):
+        """Judge up to `limit` (default: all) waiting crops, oldest first. Returns how many were judged."""
+        n = 0
+        while self.pending and (limit is None or n < limit):
+            try:
+                top, ba = self.pending.popleft()
+            except IndexError:
+                break
+            self.add(judge_crop(top, hmin, nmin, bike_area=ba))
+            n += 1
+        return n
 
     def verdict(self, **kw):
         return decide(list(self.votes), **kw)

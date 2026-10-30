@@ -189,6 +189,7 @@ These are engineering rules of thumb **[expected]**, to be confirmed by the site
 | Training toolkit: harvest from the client's cameras, merge Indian datasets, fine-tune | in the repository (`backend/tools/twhelmet_train/`) |
 | Fine-tune on Indian road data (public sets and the client's own labelled images) | first pilot done 2026-10-30 (`in_v1`, see `backend/tools/twhelmet_train/README.md`): 313 curated public images, CPU run; measured against the installed weights on a held-out split and on 34 site snapshots. The client's own labelled crossings are still the missing ingredient |
 | Confirmed outcomes with gates against false confirmations: head-size minimum, "vehicle only" only for a bike that barely moved and had nobody near it, one frame with a head cancels "vehicle only" | in the software (2026-10-30) |
+| Votes lost on a slow CPU: approach frames were judged on a background thread and a fast bike crossed with 1-2 votes, so even a clear helmet (0.75) stayed "unverified" (field events, 2026-10-30) | fixed 2026-10-30: the last 4 approach crops of each rider are kept and judged at the crossing if still waiting |
 | Higher-resolution NPU model (960 / 1280 px) for small, far bikes | planned: needs a model conversion on a PC |
 | Minimum-movement check (ignore parked / hand-pushed bikes) | partly: the travel of each track is measured and used for the "vehicle only" decision; ignoring parked bikes altogether is still planned |
 | Masks for areas to ignore (parking, hoardings) | planned |

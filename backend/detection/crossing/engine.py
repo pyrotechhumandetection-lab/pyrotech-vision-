@@ -129,10 +129,13 @@ class _JudgeWorker:
             self.final.append(fn)
             self.cond.notify()
 
-    def close(self):
+    def close(self, wait=2.0):
         with self.cond:
             self._stop = True
+            self.evidence.clear()                      # nothing queued is worth finishing once the camera is gone
             self.cond.notify_all()
+        if wait and self.thread is not threading.current_thread():
+            self.thread.join(wait)                     # a job in flight must not touch shared state after we return
 
     def pending(self):
         return len(self.evidence) + len(self.final)
@@ -594,7 +597,8 @@ class CrossingEngine:
                 if near and budget > 0 and (fid or 0) % every == 0:
                     top = helmet_judge.head_crop(frame, rbox, 1.0 if str(key).startswith("bike-area") else 0.5)
                     if top is not None:
-                        self.judger.submit_evidence(lambda top=top, rh=rh, ba=(key == "bike-area"): rh.add(helmet_judge.judge_crop(top, hmin, nmin, bike_area=ba)))
+                        rh.queue(top, key == "bike-area")               # kept until judged: now by the judge thread, or at the crossing
+                        self.judger.submit_evidence(lambda rh=rh: rh.judge_pending(hmin, nmin, limit=1))
                         budget -= 1
         events = tr.update(use, captured_at, fid)
         boxes = []
@@ -656,6 +660,7 @@ class CrossingEngine:
         for job in jobs:
             rh, ptid, pbox, top = job[:4]
             bike_area = bool(job[4]) if len(job) > 4 else ptid == "bike-area"
+            rh.judge_pending(hmin, nmin)                                                # approach frames the judge thread did not get to
             if top is not None:
                 rh.add(helmet_judge.judge_crop(top, hmin, nmin, bike_area=bike_area))     # always judge the crossing frame itself
             verdict = rh.verdict(**votes_kw)

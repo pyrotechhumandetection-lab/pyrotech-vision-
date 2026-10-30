@@ -400,6 +400,45 @@ class ConfirmedCategoryTests(unittest.TestCase):
         none = lambda c: (0.0, 0.0, {"heads": 0, "tiny": 0, "headPx": 0})
         self.assertEqual(jd.judge_crop(self.top, classify=none, heads=lambda c: [], bike_area=False)["verdict"], jd.UNCERTAIN)
 
+    def test_pending_crops_are_judged_at_the_crossing_when_the_judge_thread_lags(self):
+        """Field finding 2026-10-30: every crossing had 1-2 votes because the judge thread (CPU) was behind, so a helmet at
+        0.75 stayed unverified. Approach crops are kept per rider and judged at the crossing if still waiting."""
+        rh = jd.RiderHistory()
+        crop = np.zeros((60, 40, 3), np.uint8)
+        calls = []
+        orig = jd.judge_crop
+        jd.judge_crop = lambda top, *a, **k: (calls.append(k.get("bike_area")) or {"verdict": jd.HELMET, "helmetConf": 0.75, "noHelmetConf": 0.0,
+                                                                                   "views": 1, "reason": "scripted", "source": "scripted"})
+        try:
+            for _ in range(6):                                   # six approach frames, the judge thread never ran
+                rh.queue(crop, True)
+            self.assertEqual(len(rh.pending), jd.RiderHistory.KEEP)   # only the last 4 are kept
+            self.assertEqual(rh.judge_pending(limit=1), 1)         # what the judge thread does when it has time
+            self.assertEqual(rh.judge_pending(), 3)                # what the crossing does with the rest
+            self.assertEqual((list(rh.votes), calls), ([jd.HELMET] * 4, [True] * 4))
+            self.assertEqual(rh.verdict(), jd.HELMET)
+        finally:
+            jd.judge_crop = orig
+
+    def test_slow_judge_thread_still_yields_a_confirmed_crossing(self):
+        orig = jd.judge_crop
+
+        def slow(top, *a, **k):
+            time.sleep(0.15)                                       # ~ the rider model on the box CPU
+            return {"verdict": jd.HELMET, "helmetConf": 0.8, "noHelmetConf": 0.0, "views": 1, "reason": "scripted", "source": "scripted"}
+        jd.judge_crop = slow
+        got = Collect()
+        eng = ScriptedEngine(got, lambda i: [bike(1, 640, 330 + 18 * i), rider_on(bike(1, 640, 330 + 18 * i), 10)])
+        try:
+            eng.set_module("twhelmet", cfg("twhelmet", minTrackFrames=1))          # default: 2 helmet votes needed
+            run(eng, 20)
+            e = got.wait(1, 10)[0][1]
+            self.assertGreaterEqual(len(e["riders"][0]["votes"]), 2, e["riders"][0])
+            self.assertEqual((e["label"], e["category"]), ("Helmet compliant", "Helmet Detected"))
+        finally:
+            eng.close()
+            jd.judge_crop = orig
+
     def test_unverified_event_is_not_confirmed(self):
         orig = jd.judge_crop
         jd.judge_crop = lambda top, *a, **k: {"verdict": jd.UNCERTAIN, "helmetConf": 0.2, "noHelmetConf": 0.1, "views": 1,
