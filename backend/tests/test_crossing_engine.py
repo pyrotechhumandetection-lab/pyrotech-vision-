@@ -646,7 +646,9 @@ class ScriptedEventTests(unittest.TestCase):
                 return out
             eng = ScriptedEngine(got, script)
             try:
-                eng.set_module("twhelmet", cfg("twhelmet", minTrackFrames=1, minMissingVotes=1, minHelmetVotes=1))
+                # maxJudgePerFrame=0: no approach crops, only the crossing frame is judged, so the scripted verdicts (which
+                # alternate per call, not per rider) land on the riders in a fixed order
+                eng.set_module("twhelmet", cfg("twhelmet", minTrackFrames=1, minMissingVotes=1, minHelmetVotes=1, maxJudgePerFrame=0))
                 run(eng, 20)
                 ev = got.wait(1, 6)
                 self.assertEqual(len(ev), 1, scripted)

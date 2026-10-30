@@ -61,6 +61,13 @@ python3 ../eval_twhelmet.py <folder with helmet/ and no_helmet/>          # olde
 * Result: see `../../models/twhelmet/README.md` (table) and `in_v1/compare_old_vs_new.json`. Short form: val mAP50 0.655 -> 0.817
   (no-helmet 0.47 -> 0.72), test mAP50 0.785 -> 0.858, confirmed-wrong site photos 4 -> 2 (with the new gates; no false
   helmet / no-helmet confirmation, most site riders left unverified). Not enough for an accuracy promise.
+### Done so far: `in_v2` (2026-10-30, later the same day)
+
+* Data: in_v1's 313 images + Kaggle "Helmet Detection" (andrewmvd) converted with `convert_kaggle_helmet.py`, 764 -> 432 images with a
+  motorcycle (452 helmet + 315 no-helmet heads). Train 515 / val 153; the public test (33) and Kaggle test (44) splits stay held out.
+* Run: same CPU settings, from in_v1, 24 epochs, best epoch 18. Result in `../../models/twhelmet/README.md`: public test mAP50
+  0.858 -> 0.922 with no-helmet precision 0.62 -> 0.83; Kaggle test level; site snapshots unchanged (2 wrong, no false helmet).
+
 * What is missing for a production number: the client's own labelled crossings (step 1, `harvest.py`), a night set, and a GPU run
   at 960 px with the shipped `train.py` settings once there are a few thousand labelled heads.
 
