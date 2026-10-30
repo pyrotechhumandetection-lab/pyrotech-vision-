@@ -92,7 +92,7 @@ def cuts_segment(line, a, b, w, h, tol_px=0.0):
 
 class _Track:
     __slots__ = ("tid", "cls", "n", "first_t", "last_t", "side", "anchor", "last", "cool_until", "crossed", "height",
-                 "width", "born_fid", "handed_from", "short_counted")
+                 "width", "born_fid", "handed_from", "short_counted", "origin", "travel")
 
     def __init__(self, tid, cls, t, fid):
         self.tid, self.cls, self.n = tid, cls, 0
@@ -101,6 +101,7 @@ class _Track:
         self.cool_until, self.crossed = 0.0, 0
         self.height = self.width = 0.0
         self.born_fid, self.handed_from, self.short_counted = fid, None, False
+        self.origin, self.travel = None, 0.0           # where the track started; farthest it has been from there (pixels)
 
 
 class CrossingTracker:
@@ -145,6 +146,9 @@ class CrossingTracker:
             gap = t - tr.last_t
             tr.n += 1
             tr.height, tr.width = max(1.0, y2 - y1), max(1.0, x2 - x1)
+            if tr.origin is None:
+                tr.origin = pt
+            tr.travel = max(tr.travel, math.hypot(pt[0] - tr.origin[0], pt[1] - tr.origin[1]))
             s = self.line.signed(pt, self.w, self.h)
             dead = max(3.0, self.hyst * tr.height)
             firm = abs(s) >= dead
@@ -189,7 +193,7 @@ class CrossingTracker:
         return {"tid": tr.tid, "direction": direction, "t": t, "frameId": fid, "point": [round(pt[0], 1), round(pt[1], 1)],
                 "box": [round(float(v), 1) for v in d["box"]], "cls": d.get("cls"), "conf": d.get("conf"),
                 "gapSec": round(gap, 3), "trackFrames": tr.n, "handedOver": tr.handed_from is not None,
-                "crossingNo": tr.crossed}
+                "crossingNo": tr.crossed, "travel": round(tr.travel / max(tr.height, tr.width), 2)}   # in units of the object's own size
 
     def _handover(self, new, pt, size, ids_now, t):
         """A new id starting close to where a recently lost track of the same class vanished continues that track."""
@@ -207,6 +211,7 @@ class CrossingTracker:
             return
         new.side, new.anchor, new.cool_until, new.crossed = best.side, best.anchor, best.cool_until, best.crossed
         new.n, new.first_t, new.handed_from = best.n, best.first_t, best.tid
+        new.origin, new.travel = best.origin, best.travel
         self.stats["handovers"] += 1
         self.tracks.pop(best.tid, None)               # the old id is gone for good
 

@@ -1,16 +1,42 @@
 # Two-Wheeler Helmet (line crossing) - models
 
-## Installed: `rider_helmet.pt`
+## Installed: `rider_helmet.pt` = `in_v1` (fine-tuned 2026-10-30)
 
-Third-party YOLOv8 weights from <https://github.com/Jingjing468/motorcycle-helmet-violation-detection> (`model/helmet_best.pt`,
-sha256 `45320ba938559d04bf76cd0ea15f94d99df7fadd2998280652f04ccb4b795657`). Classes: `bike`, `helmet`, `no-helmet`, `number-plate`.
-Trained by its author on the Roboflow Universe set "Helmet and Number Plate Detection for Motorbike Safety" (CC BY 4.0, attribution required).
-**Licence of the weights: not stated by the author - confirm before commercial use.** The author's mAP50 0.94 comes from their own test
-split; it has not been measured on this system's cameras (`validated: false`).
+YOLOv8n-size detector (3.0 M parameters, 640 px input), classes `bike`, `helmet`, `no-helmet`, `number-plate`. Fine-tuned from the
+previous weights (`rider_helmet_v0.pt`, below) on 313 curated public images of motorcycle / scooter riders, mostly Indian roads
+(Roboflow Universe "Motorcycle Helmet" v1, workspace gajanan-kalbande, **CC BY 4.0 - attribution required**; 629 images, of which
+bicycles, kids' scooters and images without a two-wheeler were removed by `backend/tools/twhelmet_train/curate_heads_dataset.py`;
+head boxes from the set, `bike` boxes pseudo-labelled by the COCO detector, `number-plate` not labelled). Split 227 / 53 / 33
+(train / val / test), 27 epochs on CPU, backbone frozen, strong scale / colour / mosaic augmentation (`in_v1/args.yaml`,
+`in_v1/results.csv`, best epoch 19).
+
+Measured against the previous weights (`backend/tools/twhelmet_train/compare_models.py`, numbers in `in_v1/compare_old_vs_new.json`):
+
+| | val mAP50 (53 img) | test mAP50 (33 img) | test no-helmet recall / precision | site snapshots: confirmed wrong (34) |
+|---|---|---|---|---|
+| `rider_helmet_v0.pt` (previous) | all 0.655 · bike 0.651 · helmet 0.846 · **no-helmet 0.469** | all 0.785 · helmet 0.780 · no-helmet 0.749 | 0.82 / 0.64 | 4 (3 helmeted riders and 1 bare-head rider called "vehicle only") |
+| `rider_helmet.pt` (in_v1) | all 0.817 · bike 0.894 · helmet 0.841 · **no-helmet 0.718** | all 0.858 · helmet 0.892 · no-helmet 0.749 | 0.94 / 0.62 | 2 (1 helmeted and 1 bare-head rider called "vehicle only"); no false helmet / no-helmet confirmation; 26 of 27 parked bikes "vehicle only"; 5 of 7 riders left unverified |
+
+Site column = single-frame result of the shipped judge (helmet >= 0.6, head >= 14 px, head no wider than 0.6 of its bike, a head seen
+near the bike blocks "vehicle only"); live crossings add the vote rules and the travel limit on top, so they are at least as cautious.
+
+What this does and does not prove: the val / test images are web photos (heads far larger than on a 1080p CCTV frame), not the
+client's cameras; the 34 site snapshots are one camera, one afternoon, 27 of them parked bikes, 7 riders - far too few for a
+percentage (see "3b" in the training README). The no-helmet precision is unchanged (about 0.63 on 17 test heads): a bare head is
+still the hard class. **`validated: false` stays until a labelled set of the client's own crossings exists.** The weights licence
+follows the previous weights (not stated by their author) and CC BY 4.0 for the added data - confirm before commercial use.
+
+Previous weights: `rider_helmet_v0.pt` - third-party YOLOv8 from <https://github.com/Jingjing468/motorcycle-helmet-violation-detection>
+(`model/helmet_best.pt`, sha256 `45320ba938559d04bf76cd0ea15f94d99df7fadd2998280652f04ccb4b795657`), trained by its author on the
+Roboflow Universe set "Helmet and Number Plate Detection for Motorbike Safety" (CC BY 4.0). To go back: `AIV_TWHELMET_MODEL=.../rider_helmet_v0.pt`
+or rename the files.
 
 How it is used: the COCO detector still finds and tracks the two-wheelers (NPU). At the line, each rider (person box + small margin)
-goes through this model in one pass; a `helmet` / `no-helmet` box in the upper 60 % of that crop gives the verdict (one clear view is
-enough, the 3-vote rule still applies). `number-plate` is searched on the two-wheeler's box at the crossing and recorded as
+goes through this model in one pass; a `helmet` / `no-helmet` box in the upper 60 % of that crop and at least 14 px tall gives the
+verdict (one clear view is enough, the vote rules still apply: 2 helmet frames, 3 no-helmet frames with no helmet frame). A two-wheeler
+with no person linked or nearby is judged by its own area; if no head is found there in 3 or more frames and the bike hardly moved
+(at most 1.5 bike-lengths), the crossing is "Vehicle only" (category "Only Vehicle Detected"); a bike that travelled further with no
+rider seen stays "unverified". `number-plate` is searched on the two-wheeler's box at the crossing and recorded as
 `plate` in the event and alert (`detectPlate`, `plateMinConf` in the module settings; "not visible" is reported only because
 this model can see plates). Remove the file to fall back to the stock PPE detector below. The PPE module is not touched.
 

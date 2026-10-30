@@ -1,0 +1,171 @@
+{
+ "old": {
+  "weights": "../../models/twhelmet/rider_helmet_v0.pt",
+  "val": {
+   "all": {
+    "P": 0.6746371224717257,
+    "R": 0.7152887216650953,
+    "mAP50": 0.6552375345729602,
+    "mAP50-95": 0.30211539342381555
+   },
+   "bike": {
+    "P": 0.7359033706305934,
+    "R": 0.6261682242990654,
+    "mAP50": 0.6512459019571999,
+    "F1": 0.6766153975441396
+   },
+   "helmet": {
+    "P": 0.7585214070010959,
+    "R": 0.904313325311605,
+    "mAP50": 0.8456682091401925,
+    "F1": 0.8250260865446071
+   },
+   "no-helmet": {
+    "P": 0.5294865897834876,
+    "R": 0.6153846153846154,
+    "mAP50": 0.4687984926214882,
+    "F1": 0.569213200461933
+   }
+  },
+  "test": {
+   "all": {
+    "P": 0.7524873422760557,
+    "R": 0.814880174291939,
+    "mAP50": 0.7849411418709004,
+    "mAP50-95": 0.3744753816279503
+   },
+   "bike": {
+    "P": 0.8910467324110091,
+    "R": 0.76,
+    "mAP50": 0.8252209786919037,
+    "F1": 0.8203226514896573
+   },
+   "helmet": {
+    "P": 0.7288363992370944,
+    "R": 0.8611111111111112,
+    "mAP50": 0.7804648692810459,
+    "F1": 0.7894714982481739
+   },
+   "no-helmet": {
+    "P": 0.6375788951800637,
+    "R": 0.8235294117647058,
+    "mAP50": 0.7491375776397515,
+    "F1": 0.7187214938215756
+   }
+  },
+  "site": {
+   "helmet_detected": {
+    "only_vehicle_detected": 3,
+    "unverified": 2
+   },
+   "helmet_not_detected": {
+    "unverified": 1,
+    "only_vehicle_detected": 1
+   },
+   "only_vehicle_detected": {
+    "only_vehicle_detected": 26,
+    "unverified": 1
+   }
+  },
+  "site_reasons": {
+   "helmet_detected": {
+    "no rider head found on the two-wheeler": 3,
+    "weak or single-view evidence": 1,
+    "head not visible": 1
+   },
+   "helmet_not_detected": {
+    "head not visible": 1,
+    "no rider head found on the two-wheeler": 1
+   },
+   "only_vehicle_detected": {
+    "no rider head found on the two-wheeler": 26,
+    "weak or single-view evidence": 1
+   }
+  }
+ },
+ "new": {
+  "weights": "../../models/twhelmet/rider_helmet.pt",
+  "val": {
+   "all": {
+    "P": 0.7888066325366125,
+    "R": 0.7864879975255613,
+    "mAP50": 0.8174006259522395,
+    "mAP50-95": 0.5050865930715681
+   },
+   "bike": {
+    "P": 0.9149660130319354,
+    "R": 0.8044935705317562,
+    "mAP50": 0.8936317998081501,
+    "F1": 0.8561809556624583
+   },
+   "helmet": {
+    "P": 0.8188709047145358,
+    "R": 0.8484848484848485,
+    "mAP50": 0.8409240900620155,
+    "F1": 0.8334148896324692
+   },
+   "no-helmet": {
+    "P": 0.6325829798633665,
+    "R": 0.7064855735600795,
+    "mAP50": 0.717645987986553,
+    "F1": 0.6674949511890907
+   }
+  },
+  "test": {
+   "all": {
+    "P": 0.7857671266477132,
+    "R": 0.9025273494098968,
+    "mAP50": 0.8578274854243255,
+    "mAP50-95": 0.5483015760287488
+   },
+   "bike": {
+    "P": 0.9359979201262187,
+    "R": 0.8775166887525663,
+    "mAP50": 0.9320408468130029,
+    "F1": 0.9058143689906692
+   },
+   "helmet": {
+    "P": 0.803565528238752,
+    "R": 0.8888888888888888,
+    "mAP50": 0.892493142332559,
+    "F1": 0.8440764635278067
+   },
+   "no-helmet": {
+    "P": 0.6177379315781688,
+    "R": 0.9411764705882353,
+    "mAP50": 0.7489484671274146,
+    "F1": 0.7459042079324596
+   }
+  },
+  "site": {
+   "helmet_detected": {
+    "unverified": 4,
+    "only_vehicle_detected": 1
+   },
+   "helmet_not_detected": {
+    "unverified": 1,
+    "only_vehicle_detected": 1
+   },
+   "only_vehicle_detected": {
+    "only_vehicle_detected": 26,
+    "unverified": 1
+   }
+  },
+  "site_reasons": {
+   "helmet_detected": {
+    "head seen near, not on, the two-wheeler": 1,
+    "head not visible": 2,
+    "no rider head found on the two-wheeler": 1,
+    "weak or single-view evidence": 1
+   },
+   "helmet_not_detected": {
+    "weak or single-view evidence": 1,
+    "no rider head found on the two-wheeler": 1
+   },
+   "only_vehicle_detected": {
+    "no rider head found on the two-wheeler": 26,
+    "weak or single-view evidence": 1
+   }
+  }
+ }
+}

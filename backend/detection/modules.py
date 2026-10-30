@@ -53,10 +53,10 @@ MODULES = {
     # counting (backend/detection/crossing/): one shared tracked pass and worker thread per camera session
     "twhelmet": {
         "id": "twhelmet", "name": "Two-Wheeler Helmet (Line Crossing)",
-        "labels": ["Helmet compliant", "Helmet missing", "Helmet unverified"],
+        "labels": ["Helmet compliant", "Helmet missing", "Helmet unverified", "Vehicle only"],
         "classKeys": {},
         "eventType": {"Helmet compliant": "twhelmet_compliant", "Helmet missing": "twhelmet_missing",
-                      "Helmet unverified": "twhelmet_unverified"},
+                      "Helmet unverified": "twhelmet_unverified", "Vehicle only": "twhelmet_vehicle_only"},
     },
     "pcross": {
         "id": "pcross", "name": "Person Line Crossing & Counting",
@@ -182,7 +182,7 @@ DEFAULTS["pcross"] = dict(copy.deepcopy(_CROSS_COMMON), excludeRiders=True, conf
                           snapshot={"mode": "crossing"},
                           alert={"enabled": False, "labels": ["Person IN", "Person OUT"], "severity": "low", "cooldownSec": 0})
 DEFAULTS["twhelmet"] = dict(copy.deepcopy(_CROSS_COMMON), confidence=0.25, minTrackFrames=2, minBoxFrac=0.03, includeBicycles=False,
-                            helmetMinConf=0.5, noHelmetMinConf=0.6, minMissingVotes=3, minHelmetVotes=2, detectPlate=True, plateMinConf=0.35,
+                            helmetMinConf=0.6, noHelmetMinConf=0.6, minMissingVotes=3, minHelmetVotes=2, minNoRiderVotes=3, vehicleOnlyMaxTravel=1.5, detectPlate=True, plateMinConf=0.35,
                             judgeEvery=1, maxJudgePerFrame=2, everyFrame=True,
                             snapshot={"mode": "crossing"},
                             alert={"enabled": True, "labels": ["Helmet compliant", "Helmet missing"], "severity": "high",
@@ -490,6 +490,8 @@ def _validate_cross(module_id, cfg):
         _num(errs, "helmetMinConf", cfg.get("helmetMinConf"), 0.25, 0.99)
         _num(errs, "noHelmetMinConf", cfg.get("noHelmetMinConf"), 0.25, 0.99)
         _num(errs, "minMissingVotes", cfg.get("minMissingVotes"), 1, 8, True)
+        _num(errs, "minNoRiderVotes", cfg.get("minNoRiderVotes"), 1, 8, True)
+        _num(errs, "vehicleOnlyMaxTravel", cfg.get("vehicleOnlyMaxTravel"), 0.0, 50.0)
         _num(errs, "minHelmetVotes", cfg.get("minHelmetVotes"), 1, 8, True)
         _num(errs, "judgeEvery", cfg.get("judgeEvery"), 1, 10, True)
         _num(errs, "maxJudgePerFrame", cfg.get("maxJudgePerFrame"), 1, 6, True)

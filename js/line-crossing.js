@@ -55,7 +55,7 @@
         [['Last minute', w.last1Min], ['Last 5 minutes', w.last5Min], ['Last 60 minutes', w.last60Min], ['Since start', c.counts]].map(function (r) { return '<tr><td>' + r[0] + '</td><td>' + (r[1] ? r[1].in : '—') + '</td><td>' + (r[1] ? r[1].out : '—') + '</td></tr>'; }).join('') + '</tbody></table></div>';
     } else {
       const j = c.judge || {};
-      body = '<div class="ppe-tiles">' + tile('Helmet compliant', c.counts.compliant, 'ok') + tile('Helmet missing', c.counts.missing, 'bad') + tile('Not verified', c.counts.unverified, 'warn') + tile('Two-wheelers crossed', c.crossings) + '</div>' +
+      body = '<div class="ppe-tiles">' + tile('Helmet compliant', c.counts.compliant, 'ok') + tile('Helmet missing', c.counts.missing, 'bad') + tile('Vehicle only (no rider)', c.counts.vehicleOnly || 0) + tile('Not verified', c.counts.unverified, 'warn') + tile('Two-wheelers crossed', c.crossings) + '</div>' +
         '<div class="notice ' + (j.custom ? 'notice-info' : 'notice-warning') + ' mt-12">' + icon('info', 16) + '<div><b>Helmet judge: ' + esc(j.model || 'not available') + '.</b> ' +
         (j.custom ? 'A rider-helmet model supplied by you is in use. Its accuracy has not been measured by this software — evaluate it on your own labelled footage (backend/tools/eval_twhelmet.py).'
           : 'The stock PPE detector was trained on construction helmets and is <b>not validated on motorcycle helmets</b>. It answers “helmet” or “no helmet” only on strong evidence over several frames; anything else is “not verified” and raises no compliant / missing alert.') + '</div></div>';
@@ -191,7 +191,7 @@
 
   // ------------------------------------------------------------------ settings
   const ALERT_LABELS = {
-    twhelmet: [['Helmet compliant', 'Helmet compliant (rider wears a helmet)'], ['Helmet missing', 'Helmet missing'], ['Helmet unverified', 'Helmet not verified (needs a look)']],
+    twhelmet: [['Helmet compliant', 'Helmet compliant (rider wears a helmet)'], ['Helmet missing', 'Helmet missing'], ['Helmet unverified', 'Helmet not verified (needs a look)'], ['Vehicle only', 'Vehicle only (two-wheeler without a visible rider)']],
     pcross: [['Person IN', 'Person crossed IN'], ['Person OUT', 'Person crossed OUT']]
   };
   function settingsHtml(modId, cfgResp) {
@@ -223,7 +223,8 @@
         fld('Helmet needs confidence ≥', 'helmetMinConf', num('helmetMinConf', c.helmetMinConf, 0.25, 0.99, 0.01), 'Default ' + esc(d.helmetMinConf) + '.') +
         fld('No-helmet needs confidence ≥', 'noHelmetMinConf', num('noHelmetMinConf', c.noHelmetMinConf, 0.25, 0.99, 0.01), 'Default ' + esc(d.noHelmetMinConf) + '. Needed in two views of the head.') +
         fld('Frames that must say “no helmet”', 'minMissingVotes', num('minMissingVotes', c.minMissingVotes, 1, 8, 1), 'Of the last 8 judged frames of that rider, with none saying helmet.') +
-        fld('Frames that must say “helmet”', 'minHelmetVotes', num('minHelmetVotes', c.minHelmetVotes, 1, 8, 1), '') + '</div></div>';
+        fld('Frames that must say “helmet”', 'minHelmetVotes', num('minHelmetVotes', c.minHelmetVotes, 1, 8, 1), '') +
+        fld('Frames with no rider at all → “Vehicle only”', 'minNoRiderVotes', num('minNoRiderVotes', c.minNoRiderVotes == null ? d.minNoRiderVotes : c.minNoRiderVotes, 1, 8, 1), 'Two-wheeler with no person linked and no head found by the rider model in every judged frame. One frame with a head keeps it “not verified”.') + '</div></div>';
     }
     h += '<div class="field"><label for="lc-snapmode">Snapshot of each crossing</label>' + sel('snapmode', [['crossing', 'Save the frame of the crossing'], ['off', 'No snapshot (still counted)']], sn.mode || 'crossing') + '</div>' +
       '<div class="dl-sub"><div class="row" style="justify-content:space-between"><b>Alert generation</b>' + ui.switchHtml('dl-alert-on', !!al.enabled, 'Generate alerts', { cls: 'blue' }) + '</div>' +
@@ -253,6 +254,7 @@
       out.includeBicycles = q('includeBicycles').checked; out.everyFrame = q('everyFrame').checked;
       out.helmetMinConf = f('helmetMinConf'); out.noHelmetMinConf = f('noHelmetMinConf');
       out.minMissingVotes = parseInt(q('minMissingVotes').value, 10); out.minHelmetVotes = parseInt(q('minHelmetVotes').value, 10);
+      out.minNoRiderVotes = parseInt(q('minNoRiderVotes').value, 10);
       out.alert.compliantSeverity = q('compliantSeverity').value;
     }
     const nums = [out.confidence, out.targetFps, out.minTrackFrames, out.hysteresis, out.endExtend, out.recrossSec, out.handoverSec, out.dedupeSec, out.minBoxFrac, out.zoneMargin, out.alert.cooldownSec];

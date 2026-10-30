@@ -42,7 +42,7 @@ TITLES = {
     "object_moved": "Object moved", "object_missing": "Object missing", "object_restored": "Object back in place",
     "ppe_missing": "PPE missing", "ppe_vest_color": "Safety vest wrong colour", "ppe_review": "PPE needs review",
     "twhelmet_compliant": "Two-wheeler helmet compliant", "twhelmet_missing": "Two-wheeler helmet missing",
-    "twhelmet_unverified": "Two-wheeler helmet not verified",
+    "twhelmet_unverified": "Two-wheeler helmet not verified", "twhelmet_vehicle_only": "Two-wheeler without rider",
     "line_cross_in": "Person crossed the line (IN)", "line_cross_out": "Person crossed the line (OUT)",
 }
 

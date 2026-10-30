@@ -26,6 +26,8 @@ from backend.runtime import gated
 log = logging.getLogger("aivision.twhelmet")
 
 HELMET, MISSING, UNCERTAIN = "HELMET", "MISSING", "UNCERTAIN"
+NO_RIDER = "NO_RIDER"                # per-frame: the rider model saw the two-wheeler's area and found no head at all
+MIN_HEAD_PX = 14                     # a helmet / head box shorter than this (pixels, in the crop) is too small to trust
 MODELS_DIR = config.BACKEND_DIR / "models" / "twhelmet"
 CUSTOM = os.environ.get("AIV_TWHELMET_MODEL") or str(MODELS_DIR / "rider_helmet.pt")
 POSITIVE = {"helmet", "with_helmet", "with helmet", "wearing_helmet", "helmet_on", "hardhat", "with-helmet"}
@@ -72,23 +74,46 @@ def _head_boxes(crop):
         return []
 
 
-def _classify(model, names, crop, imgsz, custom):
-    """(best helmet conf, best no_helmet conf) in one crop. With the rider model the crop is a whole rider: only a head
-    in its upper part counts (a helmet in the hand or on the bike's mirror does not)."""
+MAX_HEAD_FRAC = 0.6                  # a head is never wider than this share of its own two-wheeler / rider box
+
+
+def _classify(model, names, crop, imgsz, custom, min_head_px=MIN_HEAD_PX, ref_w=None):
+    """(best helmet conf, best no_helmet conf, info) in one crop. With the rider model the crop is a whole rider: only a
+    head in its upper part counts (a helmet in the hand or on the bike's mirror does not), and a head box smaller than
+    `min_head_px` is reported in info["tiny"] but never counted - too small to tell a helmet from hair, a cap or a shadow.
+    `ref_w` = width (crop pixels) of the two-wheeler or rider the crop was made for: a "head" wider than MAX_HEAD_FRAC of it
+    is something else (a parked bike or a helmet on a seat behind the rider) and is ignored (info["foreign"]).
+    info = {"heads": usable head boxes, "tiny": head boxes dropped for size, "headPx": shorter side of the best head}."""
     with _LOCK, gated():
         r = model.predict(crop, imgsz=640 if custom else imgsz, conf=0.25, verbose=False)[0]
     pos = neg = 0.0
     ch = crop.shape[0]
+    info = {"heads": 0, "tiny": 0, "headPx": 0, "foreign": 0}
     for b in (r.boxes if r.boxes is not None else []):
         n = names.get(int(b.cls), "")
         c = float(b.conf)
-        if custom and (float(b.xyxy[0][1]) + float(b.xyxy[0][3])) / 2 > 0.6 * ch:
+        is_pos = n in POSITIVE or (not custom and n == "helmet")
+        is_neg = n in NEGATIVE or (not custom and n == "no_helmet")
+        if not (is_pos or is_neg):
             continue
-        if n in POSITIVE or (not custom and n == "helmet"):
+        x1, y1, x2, y2 = (float(v) for v in b.xyxy[0])
+        if custom and (y1 + y2) / 2 > 0.6 * ch:
+            continue
+        side = min(x2 - x1, y2 - y1)
+        if side < min_head_px:
+            info["tiny"] += 1
+            continue
+        if ref_w and (x2 - x1) > MAX_HEAD_FRAC * ref_w:
+            info["foreign"] += 1
+            continue
+        info["heads"] += 1
+        if c >= max(pos, neg):
+            info["headPx"] = int(side)
+        if is_pos:
             pos = max(pos, c)
-        elif n in NEGATIVE or (not custom and n == "no_helmet"):
+        else:
             neg = max(neg, c)
-    return pos, neg
+    return pos, neg, info
 
 
 PLATE_NAMES = {"number-plate", "number_plate", "numberplate", "license-plate", "license_plate", "licence-plate", "plate"}
@@ -162,7 +187,7 @@ def bike_rider_box(vbox, fh, fw, up=0.7):
     return [max(0.0, x1), max(0.0, y1 - up * (y2 - y1)), min(float(fw), x2), min(float(fh), y2)]
 
 
-def judge_rider(frame, pbox, hmin=0.5, nmin=0.6, classify=None, heads=None):
+def judge_rider(frame, pbox, hmin=0.6, nmin=0.6, classify=None, heads=None):
     """One frame, one rider. `classify` / `heads` can be replaced (tests, custom pipelines)."""
     top = head_crop(frame, pbox)
     if top is None:
@@ -170,16 +195,28 @@ def judge_rider(frame, pbox, hmin=0.5, nmin=0.6, classify=None, heads=None):
     return judge_crop(top, hmin, nmin, classify, heads)
 
 
-def judge_crop(top, hmin=0.5, nmin=0.6, classify=None, heads=None):
-    """Judge the head region of one rider (see head_crop)."""
+def _view(name, res):
+    """Normalise a classify() result: (pos, neg) from older callers / tests, or (pos, neg, info)."""
+    pos, neg = float(res[0]), float(res[1])
+    info = dict(res[2]) if len(res) > 2 and res[2] else {"heads": int(pos > 0 or neg > 0), "tiny": 0, "headPx": None}
+    return (name, pos, neg, info)
+
+
+def judge_crop(top, hmin=0.6, nmin=0.6, classify=None, heads=None, bike_area=False):
+    """Judge the head region of one rider (see head_crop). `bike_area=True` means the crop is the two-wheeler's own
+    area with no person linked to it (see bike_rider_box): if the rider model then finds no head at all, the frame
+    votes NO_RIDER (a two-wheeler without a visible rider) instead of UNCERTAIN."""
     model = _load() if classify is None else True
     if not model:
         return {"verdict": UNCERTAIN, "helmetConf": 0.0, "noHelmetConf": 0.0, "views": 0, "reason": "no helmet model available", "source": None}
     custom = _STATE["custom"]
-    classify = classify or (lambda crop: _classify(_STATE["model"], _STATE["names"], crop, 416, custom))
+    # head_crop adds a side margin of 1.0 x width for a bike area and 0.5 x width for a person: the object itself is the middle
+    # third / half of the crop, which bounds how wide its rider's head can be
+    ref_w = top.shape[1] * (1 / 3 if bike_area else 1 / 2)
+    classify = classify or (lambda crop: _classify(_STATE["model"], _STATE["names"], crop, 416, custom, ref_w=ref_w if crop is top else None))
     heads = heads or _head_boxes
     cx1 = cy1 = 0
-    views = [("body-top",) + tuple(classify(top))]
+    views = [_view("body-top", classify(top))]
     head_box = None
     hs = [] if custom else heads(top)        # the rider model judges the whole rider in one pass; the stock model needs a second, tight view
     if hs:
@@ -189,28 +226,45 @@ def judge_crop(top, hmin=0.5, nmin=0.6, classify=None, heads=None):
         ax2, ay2 = min(top.shape[1], int(hx2 + pw)), min(top.shape[0], int(hy2 + ph))
         if ax2 - ax1 >= 10 and ay2 - ay1 >= 10:
             head_box = [cx1 + hx1, cy1 + hy1, cx1 + hx2, cy1 + hy2]
-            views.append(("head",) + tuple(classify(top[ay1:ay2, ax1:ax2])))
-    kinds = [view_verdict(p, n, hmin, nmin) for _name, p, n in views]
+            views.append(_view("head", classify(top[ay1:ay2, ax1:ax2])))
+    kinds = [view_verdict(p, n, hmin, nmin) for _name, p, n, _i in views]
+    n_heads = sum(i.get("heads", 0) for *_x, i in views)
+    n_tiny = sum(i.get("tiny", 0) for *_x, i in views)
+    n_foreign = sum(i.get("foreign", 0) for *_x, i in views)
     if HELMET in kinds and MISSING not in kinds:
         verdict, reason = HELMET, "helmet evidence"
     elif custom and kinds.count(MISSING) >= 1 and HELMET not in kinds:
         verdict, reason = MISSING, "custom model: no helmet"
     elif kinds.count(MISSING) >= 2:
         verdict, reason = MISSING, "no-helmet evidence in both views of the head"
+    elif HELMET in kinds and MISSING in kinds:
+        verdict, reason = UNCERTAIN, "conflicting views"
+    elif n_heads == 0 and n_tiny > 0:
+        verdict, reason = UNCERTAIN, "head too small to judge"
+    elif n_heads == 0 and n_foreign > 0:
+        verdict, reason = UNCERTAIN, "head seen near, not on, the two-wheeler"
+    elif n_heads == 0 and custom and bike_area:
+        verdict, reason = NO_RIDER, "no rider head found on the two-wheeler"
+    elif n_heads == 0:
+        verdict, reason = UNCERTAIN, "head not visible"
     else:
-        verdict, reason = UNCERTAIN, ("conflicting views" if HELMET in kinds and MISSING in kinds else "weak or single-view evidence")
-    return {"verdict": verdict, "helmetConf": round(max(p for _n, p, _m in views), 3), "noHelmetConf": round(max(m for _n, _p, m in views), 3),
-            "views": len(views), "reason": reason, "source": "custom" if custom else "stock", "headBox": head_box}
+        verdict, reason = UNCERTAIN, "weak or single-view evidence"
+    return {"verdict": verdict, "helmetConf": round(max(p for _n, p, _m, _i in views), 3), "noHelmetConf": round(max(m for _n, _p, m, _i in views), 3),
+            "views": len(views), "reason": reason, "source": "custom" if custom else "stock", "headBox": head_box,
+            "headPx": max((i.get("headPx") or 0) for *_x, i in views) or None}
 
 
-def decide(votes, min_missing=3, min_helmet=2):
+def decide(votes, min_missing=3, min_helmet=2, min_no_rider=3):
     """Combine per-frame verdicts of one rider. A single MISSING frame never decides; any confident HELMET frame
-    keeps the rider from being called MISSING."""
-    h, m = votes.count(HELMET), votes.count(MISSING)
+    keeps the rider from being called MISSING. NO_RIDER (a two-wheeler whose area never showed a head) needs
+    `min_no_rider` frames that all agree - one frame with a head, however unclear, keeps the case UNCERTAIN."""
+    h, m, nr = votes.count(HELMET), votes.count(MISSING), votes.count(NO_RIDER)
     if h >= min_helmet and h > m:
         return HELMET
     if m >= min_missing and h == 0:
         return MISSING
+    if nr >= min_no_rider and nr == len(votes):
+        return NO_RIDER
     return UNCERTAIN
 
 

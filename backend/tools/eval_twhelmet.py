@@ -23,7 +23,7 @@ from backend.detection.crossing import engine as ce, judge as jd  # noqa: E402
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("folder")
-    ap.add_argument("--hmin", type=float, default=0.5)
+    ap.add_argument("--hmin", type=float, default=0.6)
     ap.add_argument("--nmin", type=float, default=0.6)
     a = ap.parse_args()
     model, engine, imgsz, _p = ce.load_model()

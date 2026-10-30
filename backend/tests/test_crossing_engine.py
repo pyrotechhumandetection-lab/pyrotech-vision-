@@ -273,6 +273,150 @@ class BikeAreaFallbackTests(unittest.TestCase):
             jd._STATE.update(old)
 
 
+class ConfirmedCategoryTests(unittest.TestCase):
+    """Three classes when the evidence is sufficient, unverified otherwise - the gates that stop false confirmations."""
+
+    def setUp(self):
+        self.saved = dict(jd._STATE)
+        jd._STATE["custom"] = True
+        self.top = np.zeros((200, 120, 3), np.uint8)
+
+    def tearDown(self):
+        jd._STATE.clear()
+        jd._STATE.update(self.saved)
+
+    def test_no_rider_vote_only_from_bike_area_with_no_head_at_all(self):
+        none = lambda c: (0.0, 0.0, {"heads": 0, "tiny": 0, "headPx": 0})
+        r = jd.judge_crop(self.top, classify=none, heads=lambda c: [], bike_area=True)
+        self.assertEqual((r["verdict"], r["reason"]), (jd.NO_RIDER, "no rider head found on the two-wheeler"))
+        r = jd.judge_crop(self.top, classify=none, heads=lambda c: [], bike_area=False)       # a person WAS linked: head hidden
+        self.assertEqual((r["verdict"], r["reason"]), (jd.UNCERTAIN, "head not visible"))
+
+    def test_head_near_but_not_on_the_bike_blocks_vehicle_only(self):
+        near = lambda c: (0.0, 0.0, {"heads": 0, "tiny": 0, "headPx": 0, "foreign": 1})
+        r = jd.judge_crop(self.top, classify=near, heads=lambda c: [], bike_area=True)
+        self.assertEqual((r["verdict"], r["reason"]), (jd.UNCERTAIN, "head seen near, not on, the two-wheeler"))
+
+    def test_tiny_head_never_confirms_anything(self):
+        tiny = lambda c: (0.0, 0.0, {"heads": 0, "tiny": 1, "headPx": 0})          # _classify dropped a 9 px head
+        for ba in (True, False):
+            r = jd.judge_crop(self.top, classify=tiny, heads=lambda c: [], bike_area=ba)
+            self.assertEqual((r["verdict"], r["reason"]), (jd.UNCERTAIN, "head too small to judge"), ba)
+
+    def test_classify_drops_small_heads_and_lower_boxes(self):
+        class Box:
+            def __init__(s, c, conf, xyxy): s.cls, s.conf, s.xyxy = c, conf, [np.array(xyxy, float)]
+
+        class Res:
+            def __init__(s, boxes): s.boxes = boxes
+
+        class Model:
+            out = []
+            def predict(s, crop, **kw): return [Res(s.out)]
+
+        m = Model()
+        names = {0: "bike", 1: "helmet", 2: "no-helmet", 3: "number-plate"}
+        crop = np.zeros((200, 120, 3), np.uint8)
+        m.out = [Box(1, 0.9, [10, 10, 20, 20])]                                  # 10 px helmet: too small
+        self.assertEqual(jd._classify(m, names, crop, 640, True), (0.0, 0.0, {"heads": 0, "tiny": 1, "headPx": 0, "foreign": 0}))
+        m.out = [Box(1, 0.9, [10, 150, 40, 180])]                                # helmet in the lower part (on the lap / mirror)
+        self.assertEqual(jd._classify(m, names, crop, 640, True)[2]["heads"], 0)
+        m.out = [Box(2, 0.7, [10, 10, 40, 40]), Box(0, 0.9, [0, 0, 120, 200]), Box(3, 0.8, [5, 170, 50, 190])]
+        pos, neg, info = jd._classify(m, names, crop, 640, True)
+        self.assertEqual((pos, neg, info), (0.0, 0.7, {"heads": 1, "tiny": 0, "headPx": 30, "foreign": 0}))
+
+    def test_head_wider_than_its_bike_is_foreign(self):
+        class Box:
+            def __init__(s, c, conf, xyxy): s.cls, s.conf, s.xyxy = c, conf, [np.array(xyxy, float)]
+
+        class Res:
+            def __init__(s, boxes): s.boxes = boxes
+
+        class Model:
+            out = []
+            def predict(s, crop, **kw): return [Res(s.out)]
+
+        m = Model()
+        names = {0: "bike", 1: "helmet", 2: "no-helmet", 3: "number-plate"}
+        crop = np.zeros((400, 450, 3), np.uint8)                                # bike-area crop: the bike is the middle third (150 px)
+        m.out = [Box(1, 0.9, [170, 0, 290, 80]), Box(1, 0.6, [190, 80, 230, 130])]   # 120 px "helmet" = a parked bike behind; 40 px head
+        pos, neg, info = jd._classify(m, names, crop, 640, True, ref_w=150)
+        self.assertEqual((pos, info["heads"], info["foreign"]), (0.6, 1, 1))
+        pos, neg, info = jd._classify(m, names, crop, 640, True)                  # no reference width: no size rule
+        self.assertEqual((pos, info["heads"]), (0.9, 2))
+
+    def test_no_rider_needs_every_vote_to_agree(self):
+        self.assertEqual(jd.decide([jd.NO_RIDER] * 3), jd.NO_RIDER)
+        self.assertEqual(jd.decide([jd.NO_RIDER] * 2), jd.UNCERTAIN)
+        self.assertEqual(jd.decide([jd.NO_RIDER] * 5 + [jd.UNCERTAIN]), jd.UNCERTAIN)   # one frame showed a head
+        self.assertEqual(jd.decide([jd.NO_RIDER] * 2 + [jd.HELMET] * 2), jd.HELMET)
+        self.assertEqual(jd.decide([jd.NO_RIDER] * 2, min_no_rider=2), jd.NO_RIDER)
+
+    def test_event_carries_category_and_vehicle_only_count(self):
+        orig = jd.judge_crop
+
+        def fake(top, *a, **k):
+            return {"verdict": jd.NO_RIDER, "helmetConf": 0.0, "noHelmetConf": 0.0, "views": 1, "reason": "scripted", "source": "scripted"}
+        jd.judge_crop = fake
+        got = Collect()
+        eng = ScriptedEngine(got, lambda i: [bike(1, 640, 330 + 18 * i)])          # two-wheeler, nobody on it
+        try:
+            jd._STATE["tried"] = True
+            eng.set_module("twhelmet", cfg("twhelmet", minTrackFrames=1, minNoRiderVotes=1))
+            run(eng, 20)
+            ev = got.wait(1, 6)
+            self.assertEqual(len(ev), 1)
+            e = ev[0][1]
+            self.assertEqual((e["label"], e["category"], e["confirmed"]), ("Vehicle only", "Only Vehicle Detected", True))
+            self.assertEqual(eng.view("twhelmet")["counts"]["vehicleOnly"], 1)
+        finally:
+            eng.close()
+            jd.judge_crop = orig
+
+    def test_vehicle_only_refused_for_a_two_wheeler_that_travelled(self):
+        orig = jd.judge_crop
+        jd.judge_crop = lambda top, *a, **k: {"verdict": jd.NO_RIDER, "helmetConf": 0.0, "noHelmetConf": 0.0, "views": 1,
+                                              "reason": "no rider head found on the two-wheeler", "source": "scripted"}
+        got = Collect()
+        eng = ScriptedEngine(got, lambda i: [bike(1, 640, 60 + 40 * i, h=110, w=120)])   # 40 px a frame: travels several bike lengths before the line
+        try:
+            jd._STATE["tried"] = True
+            eng.set_module("twhelmet", cfg("twhelmet", minTrackFrames=1, minNoRiderVotes=1))
+            run(eng, 24)
+            e = got.wait(1, 6)[0][1]
+            self.assertGreater(e["travel"], 1.5)
+            self.assertEqual((e["label"], e["category"], e["why"]), ("Helmet unverified", None, "moving two-wheeler, rider not seen"))
+        finally:
+            eng.close()
+            jd.judge_crop = orig
+
+    def test_person_near_the_bike_blocks_vehicle_only(self):
+        bike_ = {"box": [100, 400, 200, 500], "tid": 1}
+        jd._STATE["tried"] = True
+        items = ce.CrossingEngine._rider_items([], [{"box": [90, 300, 150, 480], "tid": 7}], bike_, 1080, 1920)   # standing beside it, not linked
+        self.assertEqual([k for k, _t, _b in items], ["bike-area+person"])
+        items = ce.CrossingEngine._rider_items([], [{"box": [900, 300, 960, 480], "tid": 7}], bike_, 1080, 1920)  # far away
+        self.assertEqual([k for k, _t, _b in items], ["bike-area"])
+        none = lambda c: (0.0, 0.0, {"heads": 0, "tiny": 0, "headPx": 0})
+        self.assertEqual(jd.judge_crop(self.top, classify=none, heads=lambda c: [], bike_area=False)["verdict"], jd.UNCERTAIN)
+
+    def test_unverified_event_is_not_confirmed(self):
+        orig = jd.judge_crop
+        jd.judge_crop = lambda top, *a, **k: {"verdict": jd.UNCERTAIN, "helmetConf": 0.2, "noHelmetConf": 0.1, "views": 1,
+                                              "reason": "head too small to judge", "source": "scripted"}
+        got = Collect()
+        eng = ScriptedEngine(got, lambda i: [bike(1, 640, 330 + 18 * i), rider_on(bike(1, 640, 330 + 18 * i), 10)])
+        try:
+            eng.set_module("twhelmet", cfg("twhelmet", minTrackFrames=1))
+            run(eng, 20)
+            e = got.wait(1, 6)[0][1]
+            self.assertEqual((e["label"], e["category"], e["confirmed"]), ("Helmet unverified", None, False))
+            self.assertIn("head too small to judge", e["why"])
+        finally:
+            eng.close()
+            jd.judge_crop = orig
+
+
 class EveryFrameTests(unittest.TestCase):
     def test_every_frame_lifts_the_shared_rate_cap_for_the_helmet_module_only(self):
         eng = ScriptedEngine(lambda *a: None, lambda i: [])

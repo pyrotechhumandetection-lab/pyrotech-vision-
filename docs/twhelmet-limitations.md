@@ -161,7 +161,8 @@ These are engineering rules of thumb **[expected]**, to be confirmed by the site
 
 ## 5. How errors show up on screen
 
-* **Many "Unverified"** — picture too small, blurred, dark, or model not suited. Check head size (section 3).
+* **Many "Unverified"** — picture too small, blurred, dark, or model not suited. Check head size (section 3). Since 2026-10-30 the event's "why" names the reason: *head too small to judge* (a head box under 14 px in the crop is never trusted), *head not visible* (a person was seen on or beside the bike but no head), *moving two-wheeler, rider not seen* (see "Vehicle only" below), *conflicting views*, *weak or single-view evidence*.
+* **"Vehicle only"** (new outcome, 2026-10-30) — a two-wheeler crossed the line with nobody on it: no person was linked to it or seen beside it, the rider model found no head in its area in every judged frame (at least 3), and it barely moved (at most 1.5 bike-lengths from where its track began; a bike that travelled further had a rider, seen or not, and stays "Unverified"). Typical cause: a parked bike nudged over the line by box jitter. It raises no helmet alert. Each event also carries `category`: "Helmet Detected", "Helmet Not Detected", "Only Vehicle Detected", or empty when unverified, and `confirmed` true/false.
 * **Nothing at all although bikes pass** — the bike was not detected (A1, A2, C2) or never crossed the line (C9, C11). The Detection Status panel shows "passed beyond a line end" and the number of tracks.
 * **Alert for a person pushing or starting a bike** — C5.
 * **Compliant rider flagged "no helmet"** — usually open-face or non-standard helmet, shadow, or low resolution (D1, D6, B1).
@@ -186,9 +187,10 @@ These are engineering rules of thumb **[expected]**, to be confirmed by the site
 | Rider not found by the person detector: judge the bike's own area (stretched upward, wide margin) with the rider model | in the software (2026-10-27, after a field check: most crossings had no linked rider). On 11 field snapshots it gives a helmet answer on 4; it found no bare head from behind and can call a cap a helmet (snapshot 2598) |
 | Number-plate visible / not visible at the crossing | in the software |
 | Training toolkit: harvest from the client's cameras, merge Indian datasets, fine-tune | in the repository (`backend/tools/twhelmet_train/`) |
-| Fine-tune on Indian road data (public sets and the client's own labelled images) | planned: needs data and a GPU session (about 1-3 hours per run) |
+| Fine-tune on Indian road data (public sets and the client's own labelled images) | first pilot done 2026-10-30 (`in_v1`, see `backend/tools/twhelmet_train/README.md`): 313 curated public images, CPU run; measured against the installed weights on a held-out split and on 34 site snapshots. The client's own labelled crossings are still the missing ingredient |
+| Confirmed outcomes with gates against false confirmations: head-size minimum, "vehicle only" only for a bike that barely moved and had nobody near it, one frame with a head cancels "vehicle only" | in the software (2026-10-30) |
 | Higher-resolution NPU model (960 / 1280 px) for small, far bikes | planned: needs a model conversion on a PC |
-| Minimum-movement check (ignore parked / hand-pushed bikes) | planned |
+| Minimum-movement check (ignore parked / hand-pushed bikes) | partly: the travel of each track is measured and used for the "vehicle only" decision; ignoring parked bikes altogether is still planned |
 | Masks for areas to ignore (parking, hoardings) | planned |
 | Night test and rain test with labelled recordings | planned |
 

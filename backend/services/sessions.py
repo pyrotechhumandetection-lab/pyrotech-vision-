@@ -426,7 +426,7 @@ class CameraSession:
         label, tid, fid = ev["label"], ev["tid"], ev["frameId"]
         riders = ev.get("riders") or []
         if module_id == "twhelmet":
-            etype = {"Helmet compliant": "twhelmet_compliant", "Helmet missing": "twhelmet_missing"}.get(label, "twhelmet_unverified")
+            etype = {"Helmet compliant": "twhelmet_compliant", "Helmet missing": "twhelmet_missing", "Vehicle only": "twhelmet_vehicle_only"}.get(label, "twhelmet_unverified")
             sev = {"twhelmet_compliant": acfg.get("compliantSeverity", "low"), "twhelmet_missing": acfg.get("severity", "high")}.get(etype, "low")
             key = "noHelmetConf" if etype == "twhelmet_missing" else "helmetConf"
             conf = max([r.get(key) or 0.0 for r in riders] or [0.0]) or None
@@ -1070,7 +1070,7 @@ class CameraSession:
             else:
                 cur = {"Two-wheeler": len(cv["tracksNow"])} if live else {}
                 uniq = {"Compliant": cv["counts"]["compliant"], "Missing": cv["counts"]["missing"],
-                        "Unverified": cv["counts"]["unverified"]} if (m and cv) else {}
+                        "Vehicle only": cv["counts"].get("vehicleOnly", 0), "Unverified": cv["counts"]["unverified"]} if (m and cv) else {}
             return {
                 "state": st, "cameraState": self.state, "error": self.error, "currentCounts": cur, "uniqueCounts": uniq,
                 "lastDetectionAt": self.last_detection_at.get(module_id), "startedAt": m["startedAt"] if m else None,

@@ -30,7 +30,10 @@ log = logging.getLogger("aivision.crossing")
 CROSS_MODULES = ("twhelmet", "pcross")
 COCO = {"person": 0, "bicycle": 1, "motorcycle": 3}
 COLORS = {"twhelmet": (255, 170, 0), "pcross": (0, 200, 255)}          # BGR line colours (blue-ish / amber)
-VERDICT_BGR = {helmet_judge.HELMET: (60, 170, 60), helmet_judge.MISSING: (40, 40, 230), helmet_judge.UNCERTAIN: (0, 191, 255)}
+VERDICT_BGR = {helmet_judge.HELMET: (60, 170, 60), helmet_judge.MISSING: (40, 40, 230), helmet_judge.UNCERTAIN: (0, 191, 255),
+               helmet_judge.NO_RIDER: (200, 200, 200)}
+# the three classes a crossing is sorted into when the evidence is sufficient (None = left unverified, no alert)
+CATEGORY = {helmet_judge.HELMET: "Helmet Detected", helmet_judge.MISSING: "Helmet Not Detected", helmet_judge.NO_RIDER: "Only Vehicle Detected"}
 FLASH_SEC = 1.5
 MAX_AGE_SEC = 1.0
 RECENT_KEEP = 60
@@ -43,6 +46,13 @@ def now_iso(ts=None):
 def on_two_wheeler(pbox, vbox):
     from backend.detection.ppe.engine import on_two_wheeler as f
     return f(pbox, [vbox])
+
+
+def _inside_frac(box, area):
+    """Share of `box` that lies inside `area`."""
+    ix = max(0.0, min(box[2], area[2]) - max(box[0], area[0]))
+    iy = max(0.0, min(box[3], area[3]) - max(box[1], area[1]))
+    return ix * iy / max(1.0, (box[2] - box[0]) * (box[3] - box[1]))
 
 
 def overlap_score(pbox, vbox):
@@ -153,7 +163,7 @@ class _Module:
         self.tracker, self.tracker_key = None, None
         self.started = time.time()
         self.lock = threading.Lock()
-        self.counts = {"in": 0, "out": 0} if mid == "pcross" else {"compliant": 0, "missing": 0, "unverified": 0}
+        self.counts = {"in": 0, "out": 0} if mid == "pcross" else {"compliant": 0, "missing": 0, "unverified": 0, "vehicleOnly": 0}
         self.crossings = 0
         self.recent = deque(maxlen=RECENT_KEEP)
         self.minute = {}                            # epoch minute -> {"in": n, "out": n}
@@ -582,9 +592,9 @@ class CrossingEngine:
             for key, _ptid, rbox in self._rider_items(riders.get(vi, []), persons, v, h, w):
                 rh = hist.setdefault(key, helmet_judge.RiderHistory())
                 if near and budget > 0 and (fid or 0) % every == 0:
-                    top = helmet_judge.head_crop(frame, rbox, 1.0 if key == "bike-area" else 0.5)
+                    top = helmet_judge.head_crop(frame, rbox, 1.0 if str(key).startswith("bike-area") else 0.5)
                     if top is not None:
-                        self.judger.submit_evidence(lambda top=top, rh=rh: rh.add(helmet_judge.judge_crop(top, hmin, nmin)))
+                        self.judger.submit_evidence(lambda top=top, rh=rh, ba=(key == "bike-area"): rh.add(helmet_judge.judge_crop(top, hmin, nmin, bike_area=ba)))
                         budget -= 1
         events = tr.update(use, captured_at, fid)
         boxes = []
@@ -604,7 +614,8 @@ class CrossingEngine:
             jobs = []
             if vi is not None:
                 for key, ptid, rbox in self._rider_items(riders.get(vi, []), persons, bikes[vi], h, w)[:3]:
-                    jobs.append((hist.setdefault(key, helmet_judge.RiderHistory()), ptid, list(rbox), helmet_judge.head_crop(frame, rbox, 1.0 if key == "bike-area" else 0.5)))
+                    jobs.append((hist.setdefault(key, helmet_judge.RiderHistory()), ptid, list(rbox),
+                                 helmet_judge.head_crop(frame, rbox, 1.0 if str(key).startswith("bike-area") else 0.5), key == "bike-area"))
             mod.flash.append((captured_at, ev["tid"], ev["direction"]))        # the box turns red at once; the verdict follows
             mod.flash = mod.flash[-8:]
             ev.update(module="twhelmet", capturedAt=captured_at, frameShape=(h, w))
@@ -617,27 +628,41 @@ class CrossingEngine:
     @staticmethod
     def _rider_items(rider_idx, persons, bike, h, w):
         """[(history key, person id, box)] for one two-wheeler. With the rider model and no person linked to the bike, the
-        bike's own area (stretched upward) is judged instead, so a rider the person detector missed is not left unchecked."""
+        bike's own area (stretched upward) is judged instead, so a rider the person detector missed is not left unchecked.
+        Key "bike-area" = nobody seen anywhere near the bike (may vote NO_RIDER -> "vehicle only");
+        key "bike-area+person" = a person box overlaps that area but could not be linked as its rider (a crowd, a
+        pedestrian beside it, a rider half out of the picture): judged the same way, but never allowed to say "vehicle only"."""
         out = []
         for pi in rider_idx:
             p = persons[pi]
             out.append((p["tid"] if p["tid"] is not None else f"slot{pi}", p["tid"], list(p["box"])))
         if not out and helmet_judge._custom_expected():
-            out.append(("bike-area", "bike-area", helmet_judge.bike_rider_box(bike["box"], h, w)))
+            area = helmet_judge.bike_rider_box(bike["box"], h, w)
+            near = any(_inside_frac(p["box"], area) >= 0.3 for p in persons)
+            key = "bike-area+person" if near else "bike-area"
+            out.append((key, key, area))
         return out
 
     def _finalise_twhelmet(self, mod, ev, jobs, boxes, frame, shape, hmin, nmin):
-        """Judge thread: the crossing frame's own evidence + the votes of the approach -> verdict -> event."""
+        """Judge thread: the crossing frame's own evidence + the votes of the approach -> verdict -> event.
+        Outcome of one crossing (ev["category"]): "Helmet Detected" when every rider found has helmet votes,
+        "Helmet Not Detected" when any rider has enough no-helmet votes and no helmet vote, "Only Vehicle Detected" when
+        no person was linked to the two-wheeler and the rider model found no head in its area on several frames,
+        else unverified (category None): rider or head too small, hidden, conflicting or too few frames."""
         c = mod.cfg
+        votes_kw = dict(min_missing=int(c.get("minMissingVotes", 3)), min_helmet=int(c.get("minHelmetVotes", 2)),
+                        min_no_rider=int(c.get("minNoRiderVotes", 3)))
         rl = []
-        for rh, ptid, pbox, top in jobs:
+        for job in jobs:
+            rh, ptid, pbox, top = job[:4]
+            bike_area = bool(job[4]) if len(job) > 4 else ptid == "bike-area"
             if top is not None:
-                rh.add(helmet_judge.judge_crop(top, hmin, nmin))              # always judge the crossing frame itself
-            verdict = rh.verdict(min_missing=int(c.get("minMissingVotes", 3)), min_helmet=int(c.get("minHelmetVotes", 2)))
+                rh.add(helmet_judge.judge_crop(top, hmin, nmin, bike_area=bike_area))     # always judge the crossing frame itself
+            verdict = rh.verdict(**votes_kw)
             last = rh.last or {}
             rl.append({"personId": ptid, "box": [round(v_, 1) for v_ in pbox], "verdict": verdict, "votes": list(rh.votes),
                        "helmetConf": last.get("helmetConf"), "noHelmetConf": last.get("noHelmetConf"), "reason": last.get("reason"),
-                       "source": last.get("source")})
+                       "source": last.get("source"), "headPx": last.get("headPx")})
         if not rl:
             verdict, why = helmet_judge.UNCERTAIN, "no rider found on the two-wheeler"
         else:
@@ -646,8 +671,16 @@ class CrossingEngine:
                 verdict, why = helmet_judge.MISSING, "rider without helmet"
             elif all(x == helmet_judge.HELMET for x in vs):
                 verdict, why = helmet_judge.HELMET, "helmet on every rider"
+            elif all(x == helmet_judge.NO_RIDER for x in vs):
+                # a two-wheeler that travelled across the picture had a rider, seen or not: "vehicle only" is reserved for one
+                # that barely moved (parked, nudged over the line by box jitter). The limit is in units of the bike's own size.
+                if float(ev.get("travel") or 0.0) <= float(c.get("vehicleOnlyMaxTravel", 1.5)):
+                    verdict, why = helmet_judge.NO_RIDER, "two-wheeler without a visible rider"
+                else:
+                    verdict, why = helmet_judge.UNCERTAIN, "moving two-wheeler, rider not seen"
             else:
-                verdict, why = helmet_judge.UNCERTAIN, "helmet could not be verified"
+                reasons = sorted({r["reason"] for r in rl if r.get("reason")})
+                verdict, why = helmet_judge.UNCERTAIN, "helmet could not be verified" + (f" ({'; '.join(reasons)})" if reasons else "")
         plate = None
         if c.get("detectPlate", True):
             bike_box = next((b[0] for b in boxes if b[3] is not None and b[3] == ev["tid"]), None)
@@ -658,12 +691,12 @@ class CrossingEngine:
                     log.warning("number-plate check failed: %s", exc)
                 if plate and plate["detected"]:
                     boxes = list(boxes) + [(plate["box"], f"plate {plate['conf']:.2f}", (0, 255, 255), None)]
-        key = {helmet_judge.HELMET: "compliant", helmet_judge.MISSING: "missing"}.get(verdict, "unverified")
-        label = {"compliant": "Helmet compliant", "missing": "Helmet missing", "unverified": "Helmet unverified"}[key]
+        key = {helmet_judge.HELMET: "compliant", helmet_judge.MISSING: "missing", helmet_judge.NO_RIDER: "vehicleOnly"}.get(verdict, "unverified")
+        label = {"compliant": "Helmet compliant", "missing": "Helmet missing", "unverified": "Helmet unverified", "vehicleOnly": "Vehicle only"}[key]
         with mod.lock:
             mod.counts[key] += 1
             mod.crossings += 1
-            ev.update(label=label, verdict=verdict, why=why, riders=rl, plate=plate, counts=dict(mod.counts), judge=helmet_judge.status())
+            ev.update(label=label, verdict=verdict, category=CATEGORY.get(verdict), confirmed=verdict in CATEGORY, why=why, riders=rl, plate=plate, counts=dict(mod.counts), judge=helmet_judge.status())
             self._record(mod, ev, ev["capturedAt"], flash=False)
         snap = self._snapshot(frame, mod, boxes, ev, shape, f"{label.upper()}  {ev['cls']} {ev['tid']}  {ev['direction'].upper()}",
                               color=VERDICT_BGR[verdict])
