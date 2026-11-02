@@ -10,12 +10,15 @@ Frame flow (bounded, never accumulates):
 Every crossing event carries the id and capture time of the frame that showed the object past the line, and its
 snapshot is that very frame (annotated copy); the clean frame is kept as the original.
 """
+import json
 import logging
 import math
+import re
 import threading
 import time
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -158,6 +161,38 @@ class _JudgeWorker:
             self.stats["ms"].append((time.perf_counter() - t0) * 1000.0)
 
 
+class _SaveWorker:
+    """One thread that writes dataset-capture files; a bounded queue so the tracking thread never waits on the disk."""
+
+    def __init__(self, name, maxsize=8):
+        import queue
+        self.q = queue.Queue(maxsize=maxsize)
+        self.thread = threading.Thread(target=self._run, name=(name or "cross") + "-save", daemon=True)
+        self.thread.start()
+
+    def submit(self, fn):
+        try:
+            self.q.put_nowait(fn)
+            return True
+        except Exception:
+            return False
+
+    def close(self, wait=2.0):
+        self.q.put(None)
+        if self.thread is not threading.current_thread():
+            self.thread.join(wait)
+
+    def _run(self):
+        while True:
+            fn = self.q.get()
+            if fn is None:
+                return
+            try:
+                fn()
+            except Exception:
+                log.exception("dataset save job failed")
+
+
 class _Module:
     """State of one active module (line, tracker, counters, history)."""
 
@@ -174,6 +209,8 @@ class _Module:
         self.ignored = 0
         self.last_event_at = None
         self.riders = {}                            # twhelmet: vehicle tid -> {person tid -> RiderHistory}
+        self.captured = {}                          # twhelmet dataset capture: vehicle tid -> [saved count, last frame id]
+        self.dataset = {"frames": 0, "tracks": 0, "errors": 0, "dir": None}
         self.last_boxes = []
         self.warnings = []
 
@@ -250,6 +287,7 @@ class CrossingEngine:
         self.stage_ms = {}
         self.started = time.time()
         self.judger = _JudgeWorker(thread_name)
+        self.saver = None                                   # dataset capture writer, created on first use
         self.workers = [threading.Thread(target=self._run, args=(j,), name=(thread_name or "cross") + f"-det{j}", daemon=True)
                         for j in range(len(self.models))]
         for w in self.workers:
@@ -300,6 +338,8 @@ class CrossingEngine:
     def close(self):
         self._stop.set()
         self.judger.close()
+        if self.saver is not None:
+            self.saver.close()
         with self.lock:
             self.lock.notify_all()
 
@@ -609,6 +649,8 @@ class CrossingEngine:
             for pi in riders.get(vi, []):
                 boxes.append((persons[pi]["box"], "rider", (200, 120, 40), None))
         mod.last_boxes = boxes
+        if c.get("captureDataset"):
+            self._capture_dataset(mod, frame, bikes, use_idx, persons, riders, captured_at, fid, w, h)
         direction = c.get("direction", "both")
         for ev in events:
             if direction != "both" and ev["direction"] != direction:
@@ -629,6 +671,64 @@ class CrossingEngine:
         for tid in [t for t in mod.riders if t not in {b["tid"] for b in bikes} and tr.tracks.get(t) is None]:
             mod.riders.pop(tid, None)               # forget histories of two-wheelers the tracker has dropped
         return {"boxes": boxes, "tracker": tr}
+
+    def _capture_dataset(self, mod, frame, bikes, use_idx, persons, riders, captured_at, fid, w, h):
+        """Dataset capture (setting captureDataset): save clean frames of every tracked two-wheeler, anywhere in the
+        picture, for labelling and training - no overlays, no judging involved. Per track up to `capturePerTrack` frames,
+        at least `captureEveryFrames` frames apart (so the same bike is kept at several sizes as it approaches), only
+        while its box is at least `captureMinHeight` px tall. Next to each JPEG a YOLO label file pre-fills the `bike`
+        boxes (class 0 of the rider model) and a .json lists the riders the person detector linked - to be corrected by
+        a person, never used as truth. Saving runs on its own thread (bounded queue) so tracking never waits on the disk."""
+        c = mod.cfg
+        per_track = int(c.get("capturePerTrack", 4)); every = int(c.get("captureEveryFrames", 5))
+        min_h = float(c.get("captureMinHeight", 60))
+        root = Path(config.SNAPSHOT_DIR) / "twhelmet_dataset" / f"{datetime.fromtimestamp(captured_at):%Y-%m-%d}"
+        mod.dataset["dir"] = str(root)
+        todo = []
+        for vi in use_idx:
+            v = bikes[vi]
+            if v["tid"] is None or v["box"][3] - v["box"][1] < min_h:
+                continue
+            st = mod.captured.setdefault(v["tid"], [0, -10 ** 9])
+            if st[0] >= per_track or (fid or 0) - st[1] < every:
+                continue
+            st[0] += 1
+            st[1] = fid or 0
+            if st[0] == 1:
+                mod.dataset["tracks"] += 1
+            todo.append((v, [persons[pi] for pi in riders.get(vi, [])]))
+        if not todo:
+            return
+        if len(mod.captured) > 500:                      # forget old tracks
+            for k in list(mod.captured)[:-200]:
+                mod.captured.pop(k, None)
+        bike_lines = [f"0 {(b['box'][0] + b['box'][2]) / 2 / w:.6f} {(b['box'][1] + b['box'][3]) / 2 / h:.6f} "
+                      f"{(b['box'][2] - b['box'][0]) / w:.6f} {(b['box'][3] - b['box'][1]) / h:.6f}"
+                      for b in (bikes[i] for i in use_idx) if b["tid"] is not None]
+        img = frame.copy()
+        meta = {"camera": self.camera_id, "capturedAt": now_iso(captured_at), "frameId": fid, "frameSize": [w, h],
+                "twoWheelers": [{"tid": v["tid"], "box": [round(x, 1) for x in v["box"]], "conf": round(float(v["conf"]), 3),
+                                 "riders": [{"tid": p["tid"], "box": [round(x, 1) for x in p["box"]]} for p in ps]} for v, ps in todo]}
+        cam = re.sub(r"[^A-Za-z0-9]+", "-", str(self.camera_id or "cam")).strip("-") or "cam"
+        name = f"{cam}_{datetime.fromtimestamp(captured_at):%Y%m%d_%H%M%S}_{int((captured_at % 1) * 1000):03d}_f{fid or 0}_t{todo[0][0]['tid']}"
+
+        def save(img=img, meta=meta, lines=bike_lines, name=name, root=root, mod=mod):
+            try:
+                root.mkdir(parents=True, exist_ok=True)
+                ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                if not ok:
+                    raise OSError("JPEG encode failed")
+                (root / f"{name}.jpg").write_bytes(buf.tobytes())
+                (root / f"{name}.txt").write_text("\n".join(lines) + ("\n" if lines else ""))
+                (root / f"{name}.json").write_text(json.dumps(meta))
+                mod.dataset["frames"] += 1
+            except OSError as exc:
+                mod.dataset["errors"] += 1
+                log.warning("dataset capture failed: %s", exc)
+        if self.saver is None:
+            self.saver = _SaveWorker(self.thread_name)
+        if not self.saver.submit(save):
+            mod.dataset["errors"] += 1
 
     @staticmethod
     def _rider_items(rider_idx, persons, bike, h, w):
@@ -837,4 +937,5 @@ class CrossingEngine:
             out["net"] = mod.counts["in"] - mod.counts["out"]
         else:
             out["judge"] = helmet_judge.status()
+            out["dataset"] = dict(mod.dataset, enabled=bool(mod.cfg.get("captureDataset")))
         return out

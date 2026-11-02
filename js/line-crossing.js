@@ -56,6 +56,7 @@
     } else {
       const j = c.judge || {};
       body = '<div class="ppe-tiles">' + tile('Helmet compliant', c.counts.compliant, 'ok') + tile('Helmet missing', c.counts.missing, 'bad') + tile('Vehicle only (no rider)', c.counts.vehicleOnly || 0) + tile('Not verified', c.counts.unverified, 'warn') + tile('Two-wheelers crossed', c.crossings) + '</div>' +
+        (c.dataset && c.dataset.enabled ? '<div class="notice notice-info mt-12">' + icon('info', 16) + '<div><b>Dataset capture on:</b> ' + esc(String(c.dataset.frames)) + ' frames from ' + esc(String(c.dataset.tracks)) + ' two-wheelers saved' + (c.dataset.errors ? ', ' + esc(String(c.dataset.errors)) + ' failed' : '') + (c.dataset.dir ? ' → <code>' + esc(c.dataset.dir) + '</code>' : '') + '</div></div>' : '') +
         '<div class="notice ' + (j.custom ? 'notice-info' : 'notice-warning') + ' mt-12">' + icon('info', 16) + '<div><b>Helmet judge: ' + esc(j.model || 'not available') + '.</b> ' +
         (j.custom ? 'A rider-helmet model supplied by you is in use. Its accuracy has not been measured by this software — evaluate it on your own labelled footage (backend/tools/eval_twhelmet.py).'
           : 'The stock PPE detector was trained on construction helmets and is <b>not validated on motorcycle helmets</b>. It answers “helmet” or “no helmet” only on strong evidence over several frames; anything else is “not verified” and raises no compliant / missing alert.') + '</div></div>';
@@ -217,6 +218,11 @@
       fld('Area reaches beyond the line by', 'zoneMargin', num('zoneMargin', c.zoneMargin, 0.05, 1, 0.05), 'Fraction of the picture. Larger = objects are seen earlier, but smaller on the detector.');
     if (modId === 'pcross') h += chk('excludeRiders', c.excludeRiders !== false, 'Do not count riders of motorcycles / bicycles as people', 'they belong to the vehicle');
     if (modId === 'twhelmet') {
+      h += '<div class="dl-sub"><b>Dataset capture (for training)</b><div class="form-grid mt-8">' +
+        chk('captureDataset', !!c.captureDataset, 'Save clean frames of every tracked two-wheeler', 'anywhere in the picture, not only at the line; no boxes drawn. Each frame comes with a pre-filled label file (bike boxes) and a .json of the linked riders for a person to correct. Written to the snapshot folder under twhelmet_dataset/<date>/. Roughly 300 KB per frame: watch the disk.') +
+        fld('Frames per two-wheeler', 'capturePerTrack', num('capturePerTrack', c.capturePerTrack == null ? d.capturePerTrack : c.capturePerTrack, 1, 20, 1), 'Spread over its approach, so the same bike is kept at several sizes.') +
+        fld('Frames apart', 'captureEveryFrames', num('captureEveryFrames', c.captureEveryFrames == null ? d.captureEveryFrames : c.captureEveryFrames, 1, 100, 1), '') +
+        fld('Smallest two-wheeler to keep (px tall)', 'captureMinHeight', num('captureMinHeight', c.captureMinHeight == null ? d.captureMinHeight : c.captureMinHeight, 20, 1000, 10), 'Below about 60 px a rider cannot be labelled.') + '</div></div>';
       h += chk('everyFrame', c.everyFrame !== false, 'Analyse every camera frame (best for fast two-wheelers)', 'the AI looks at as many frames as it can instead of keeping to the shared AI rate, so a fast bike is followed over more frames. A live picture cannot be slowed down; this gives the same benefit. Limited by how fast the AI runs (see Inference rate in Detection Status).') +
         chk('includeBicycles', !!c.includeBicycles, 'Also check bicycles', 'off = motorcycles / scooters only') +
         '<div class="dl-sub"><b>Helmet judge</b><div class="form-grid mt-8">' +
@@ -256,6 +262,8 @@
       out.helmetMinConf = f('helmetMinConf'); out.noHelmetMinConf = f('noHelmetMinConf');
       out.minMissingVotes = parseInt(q('minMissingVotes').value, 10); out.minHelmetVotes = parseInt(q('minHelmetVotes').value, 10);
       out.minNoRiderVotes = parseInt(q('minNoRiderVotes').value, 10); out.minHeadPx = parseInt(q('minHeadPx').value, 10);
+      out.captureDataset = q('captureDataset').checked; out.capturePerTrack = parseInt(q('capturePerTrack').value, 10);
+      out.captureEveryFrames = parseInt(q('captureEveryFrames').value, 10); out.captureMinHeight = f('captureMinHeight');
       out.alert.compliantSeverity = q('compliantSeverity').value;
     }
     const nums = [out.confidence, out.targetFps, out.minTrackFrames, out.hysteresis, out.endExtend, out.recrossSec, out.handoverSec, out.dedupeSec, out.minBoxFrac, out.zoneMargin, out.alert.cooldownSec];

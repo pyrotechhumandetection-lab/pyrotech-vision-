@@ -494,6 +494,39 @@ class ConfirmedCategoryTests(unittest.TestCase):
             jd.judge_crop = orig
 
 
+class DatasetCaptureTests(unittest.TestCase):
+    def test_clean_frames_with_prelabels_are_saved_per_track(self):
+        import json as _json
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        saved = config.SNAPSHOT_DIR
+        config.SNAPSHOT_DIR = tmp
+        self.addCleanup(lambda: setattr(config, "SNAPSHOT_DIR", saved))
+        got = Collect()
+        eng = ScriptedEngine(got, lambda i: [bike(1, 300, 330 + 2 * i), rider_on(bike(1, 300, 330 + 2 * i), 10), bike(2, 1000, 200, h=40, w=40)])
+        try:
+            eng.set_module("twhelmet", cfg("twhelmet", captureDataset=True, capturePerTrack=3, captureEveryFrames=4, captureMinHeight=60))
+            run(eng, 30)
+            time.sleep(0.5)
+            v = eng.view("twhelmet")["dataset"]
+            files = sorted(Path(tmp).rglob("*.jpg"))
+            self.assertEqual((v["enabled"], v["tracks"], v["frames"], len(files)), (True, 1, 3, 3))      # bike 2 is 40 px: skipped
+            self.assertIn("twhelmet_dataset", str(files[0]))
+            lab = files[0].with_suffix(".txt").read_text().split("\n")
+            self.assertEqual(lab[0].split()[0], "0")                                                     # YOLO class 0 = bike
+            meta = _json.loads(files[0].with_suffix(".json").read_text())
+            self.assertEqual((meta["twoWheelers"][0]["tid"], meta["twoWheelers"][0]["riders"][0]["tid"]), (1, 10))
+            import cv2 as _cv2
+            img = _cv2.imread(str(files[0]))
+            self.assertEqual(img.shape[:2], frame(0).shape[:2])                                          # full, clean frame
+        finally:
+            eng.close()
+
+    def test_capture_off_by_default_and_validated(self):
+        self.assertFalse(DEFAULTS["twhelmet"]["captureDataset"])
+        self.assertEqual(validate("twhelmet", dict(DEFAULTS["twhelmet"], capturePerTrack=0), []), ["capturePerTrack must be between 1 and 20"])
+
+
 class EveryFrameTests(unittest.TestCase):
     def test_every_frame_lifts_the_shared_rate_cap_for_the_helmet_module_only(self):
         eng = ScriptedEngine(lambda *a: None, lambda i: [])
