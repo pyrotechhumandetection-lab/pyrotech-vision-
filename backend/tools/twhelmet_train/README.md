@@ -68,6 +68,15 @@ python3 ../eval_twhelmet.py <folder with helmet/ and no_helmet/>          # olde
 * Run: same CPU settings, from in_v1, 24 epochs, best epoch 18. Result in `../../models/twhelmet/README.md`: public test mAP50
   0.858 -> 0.922 with no-helmet precision 0.62 -> 0.83; Kaggle test level; site snapshots unchanged (2 wrong, no false helmet).
 
+### Recording test (2026-11-02): `run_recording.py`
+
+Any weights or setting can be run through the real engine on a recording before deployment (`run_recording.py`, with `--screen`
+for a screen capture of the operator page). On the 9-minute CAM-02 clip, v1 / v2 x zone off / on: zone on found 10 crossings
+instead of 2 (same for both models); helmet verdicts 0 confirmed with either model - the readable bare heads (39-47 px, half-
+resolution source) scored no-helmet 0.47-0.53, under the 0.6 bar; v2 scored them higher and gave no false-helmet vote where v1
+did. Results and the crossing sheet: `../../models/twhelmet/in_v2/recording_test/`. Check the snapshots yourself; the JSON has
+every vote.
+
 * What is missing for a production number: the client's own labelled crossings (step 1, `harvest.py`), a night set, and a GPU run
   at 960 px with the shipped `train.py` settings once there are a few thousand labelled heads.
 

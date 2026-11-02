@@ -681,7 +681,12 @@ class CrossingEngine:
             elif all(x == helmet_judge.NO_RIDER for x in vs):
                 # a two-wheeler that travelled across the picture had a rider, seen or not: "vehicle only" is reserved for one
                 # that barely moved (parked, nudged over the line by box jitter). The limit is in units of the bike's own size.
-                if float(ev.get("travel") or 0.0) <= float(c.get("vehicleOnlyMaxTravel", 1.5)):
+                # And a bike so small that a rider's head on it could never reach minHeadPx (head ~ 1/4 of the bike box's
+                # height) cannot be declared rider-less either: on a far bike "no head found" means nothing.
+                bh = float(ev["box"][3] - ev["box"][1]) if ev.get("box") else 0.0
+                if bh < 4 * int(c.get("minHeadPx", helmet_judge.MIN_HEAD_PX)):
+                    verdict, why = helmet_judge.UNCERTAIN, "two-wheeler too small to tell whether it has a rider"
+                elif float(ev.get("travel") or 0.0) <= float(c.get("vehicleOnlyMaxTravel", 1.5)):
                     verdict, why = helmet_judge.NO_RIDER, "two-wheeler without a visible rider"
                 else:
                     verdict, why = helmet_judge.UNCERTAIN, "moving two-wheeler, rider not seen"

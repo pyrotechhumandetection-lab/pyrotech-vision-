@@ -399,7 +399,7 @@ class ConfirmedCategoryTests(unittest.TestCase):
         jd.judge_crop = lambda top, *a, **k: {"verdict": jd.NO_RIDER, "helmetConf": 0.0, "noHelmetConf": 0.0, "views": 1,
                                               "reason": "no rider head found on the two-wheeler", "source": "scripted"}
         got = Collect()
-        eng = ScriptedEngine(got, lambda i: [bike(1, 640, 60 + 40 * i, h=110, w=120)])   # 40 px a frame: travels several bike lengths before the line
+        eng = ScriptedEngine(got, lambda i: [bike(1, 640, 20 + 40 * i, h=120, w=120)])   # 40 px a frame: travels several bike lengths before the line
         try:
             jd._STATE["tried"] = True
             eng.set_module("twhelmet", cfg("twhelmet", minTrackFrames=1, minNoRiderVotes=1))
@@ -407,6 +407,23 @@ class ConfirmedCategoryTests(unittest.TestCase):
             e = got.wait(1, 6)[0][1]
             self.assertGreater(e["travel"], 1.5)
             self.assertEqual((e["label"], e["category"], e["why"]), ("Helmet unverified", None, "moving two-wheeler, rider not seen"))
+        finally:
+            eng.close()
+            jd.judge_crop = orig
+
+    def test_vehicle_only_refused_for_a_far_small_two_wheeler(self):
+        """Recording 2026-11-02, frame 4119: an 80 px two-wheeler entering at the picture edge was confirmed "vehicle only" -
+        its rider's head could never reach minHeadPx, so "no head found" means nothing there."""
+        orig = jd.judge_crop
+        jd.judge_crop = lambda top, *a, **k: {"verdict": jd.NO_RIDER, "helmetConf": 0.0, "noHelmetConf": 0.0, "views": 1,
+                                              "reason": "no rider head found on the two-wheeler", "source": "scripted"}
+        got = Collect()
+        eng = ScriptedEngine(got, lambda i: [bike(1, 640, 330 + 18 * i, h=80, w=70)])      # 80 px tall, barely moving
+        try:
+            jd._STATE["tried"] = True
+            eng.set_module("twhelmet", cfg("twhelmet", minTrackFrames=1, minNoRiderVotes=1, minBoxFrac=0.01))
+            e = (run(eng, 20), got.wait(1, 6))[1][0][1]
+            self.assertEqual((e["label"], e["category"], e["why"]), ("Helmet unverified", None, "two-wheeler too small to tell whether it has a rider"))
         finally:
             eng.close()
             jd.judge_crop = orig

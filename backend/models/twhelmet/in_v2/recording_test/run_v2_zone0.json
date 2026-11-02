@@ -1,0 +1,146 @@
+{
+ "video": "/mnt/user-data/uploads/Media1.mp4",
+ "weights": "/home/claude/pyrotech-vision-/backend/models/twhelmet/rider_helmet.pt",
+ "zone": false,
+ "frames": 5156,
+ "skipped": 322,
+ "events": [
+  {
+   "frameId": 504,
+   "t": 50.4,
+   "tid": 15,
+   "direction": "in",
+   "label": "Helmet unverified",
+   "category": null,
+   "why": "helmet could not be verified (weak or single-view evidence)",
+   "travel": 1.95,
+   "box": [
+    1085.0,
+    159.1,
+    1201.3,
+    305.6
+   ],
+   "riders": [
+    {
+     "personId": "bike-area+person",
+     "verdict": "UNCERTAIN",
+     "votes": [
+      "UNCERTAIN",
+      "UNCERTAIN"
+     ],
+     "helmetConf": 0.0,
+     "noHelmetConf": 0.526,
+     "headPx": 33,
+     "reason": "weak or single-view evidence"
+    }
+   ]
+  },
+  {
+   "frameId": 2330,
+   "t": 233.0,
+   "tid": 120,
+   "direction": "in",
+   "label": "Helmet unverified",
+   "category": null,
+   "why": "helmet could not be verified (no rider head found on the two-wheeler)",
+   "travel": 0.52,
+   "box": [
+    1140.0,
+    3.1,
+    1207.2,
+    104.5
+   ],
+   "riders": [
+    {
+     "personId": "bike-area",
+     "verdict": "UNCERTAIN",
+     "votes": [
+      "UNCERTAIN",
+      "NO_RIDER",
+      "NO_RIDER",
+      "NO_RIDER"
+     ],
+     "helmetConf": 0.0,
+     "noHelmetConf": 0.0,
+     "headPx": null,
+     "reason": "no rider head found on the two-wheeler"
+    }
+   ]
+  }
+ ],
+ "counts": {
+  "compliant": 0,
+  "missing": 0,
+  "unverified": 2,
+  "vehicleOnly": 0
+ },
+ "crossings": 2,
+ "tracking": {
+  "tracksStarted": 31,
+  "tracksLost": 26,
+  "tracksShort": 7,
+  "handovers": 5,
+  "duplicatesSuppressed": 0,
+  "untrackedDetections": 0,
+  "shortTrackRatio": 0.269,
+  "meanTrackFrames": 18.1,
+  "activeTracks": 0,
+  "suppressed": {
+   "duplicate": 0,
+   "cooldown": 0,
+   "shortTrack": 0,
+   "pathAroundLineEnd": 1
+  }
+ },
+ "engine_ms_mean": 70.03266544918488,
+ "engine_ms_p95": 89.8280482501832,
+ "wall_s": 406.50305700302124,
+ "judge": {
+  "model": "custom: rider_helmet.pt",
+  "custom": true,
+  "validated": false,
+  "error": null
+ },
+ "metrics": {
+  "targetFps": 30.0,
+  "inferenceFps": 12.81,
+  "inferenceMsAvg": 67.2,
+  "inferenceMsP95": 84.9,
+  "latencyMsAvg": 1793594604323.7,
+  "latencyMsP95": 1793594606563.7,
+  "stageMs": {
+   "inference": 55.9,
+   "rules": 0.6
+  },
+  "queueSize": 1,
+  "queueDepthNow": 0,
+  "framesSubmitted": 0,
+  "framesProcessed": 5156,
+  "framesDropped": 0,
+  "droppedReplaced": 0,
+  "droppedStale": 0,
+  "skippedInterval": 0,
+  "droppedPct": 0.0,
+  "errors": 0,
+  "lastError": null,
+  "lastFrameId": 5477,
+  "judge": {
+   "queued": 0,
+   "evidenceJudged": 423,
+   "evidenceSkippedBusy": 0,
+   "crossingsFinalised": 2,
+   "msAvg": 68.5,
+   "errors": 0
+  },
+  "zone": null,
+  "pipeline": {
+   "depth": 1,
+   "workers": 1,
+   "inFlight": 0,
+   "orderSkipped": 0
+  },
+  "model": "yolov8n.pt",
+  "engine": "pytorch",
+  "uptimeSec": 406.5
+ }
+}
