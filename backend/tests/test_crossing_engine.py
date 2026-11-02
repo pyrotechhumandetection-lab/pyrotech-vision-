@@ -3,6 +3,7 @@ SCRIPTED detections are used where a test is about plumbing or rules (clearly na
 REAL detector on a real photo moved across a canvas (simulated motion, real pixels). Nothing here measures accuracy.
 Run: python3 -m unittest backend.tests.test_crossing_engine"""
 import copy
+import json
 import os
 import sys
 import threading
@@ -507,7 +508,7 @@ class DatasetCaptureTests(unittest.TestCase):
         got = Collect()
         eng = ScriptedEngine(got, lambda i: [bike(1, 300, 330 + 2 * i), rider_on(bike(1, 300, 330 + 2 * i), 10), bike(2, 1000, 200, h=40, w=40)])
         try:
-            eng.set_module("twhelmet", cfg("twhelmet", captureDataset=True, capturePerTrack=3, captureEveryFrames=4, captureMinHeight=60))
+            eng.set_module("twhelmet", cfg("twhelmet", captureDataset=True, capturePerTrack=3, captureEveryFrames=4, captureMinHeight=60, captureMinTravel=0))
             run(eng, 30)
             time.sleep(0.5)
             v = eng.view("twhelmet")["dataset"]
@@ -532,7 +533,7 @@ class DatasetCaptureTests(unittest.TestCase):
         self.addCleanup(lambda: setattr(config, "SNAPSHOT_DIR", saved))
         eng = ScriptedEngine(Collect(), lambda i: [bike(1, 300, 330 + 2 * i)])
         try:
-            c = cfg("twhelmet", captureDataset=True, capturePerTrack=2, captureEveryFrames=3)
+            c = cfg("twhelmet", captureDataset=True, capturePerTrack=2, captureEveryFrames=3, captureMinTravel=0)
             c["line"] = None                                                                         # no line drawn
             eng.set_module("twhelmet", c)
             run(eng, 12)
@@ -540,6 +541,27 @@ class DatasetCaptureTests(unittest.TestCase):
             v = eng.view("twhelmet")
             self.assertEqual((v["dataset"]["tracks"], v["dataset"]["frames"], len(v["tracksNow"])), (1, 2, 1))
             self.assertEqual(len(list(Path(tmp).rglob("*.jpg"))), 2)
+        finally:
+            eng.close()
+
+    def test_parked_bikes_are_not_captured_until_they_move(self):
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        saved = config.SNAPSHOT_DIR
+        config.SNAPSHOT_DIR = tmp
+        self.addCleanup(lambda: setattr(config, "SNAPSHOT_DIR", saved))
+        # bike 1 parked (jitter of 2 px), bike 2 rides 30 px a frame
+        eng = ScriptedEngine(Collect(), lambda i: [bike(1, 300, 400 + (i % 2) * 2), bike(2, 900, 100 + 30 * i)])
+        try:
+            c = cfg("twhelmet", captureDataset=True, capturePerTrack=2, captureEveryFrames=2)   # default captureMinTravel 0.5
+            c["line"] = None
+            eng.set_module("twhelmet", c)
+            run(eng, 20)
+            time.sleep(0.5)
+            v = eng.view("twhelmet")["dataset"]
+            metas = [json.loads(p.read_text()) for p in Path(tmp).rglob("*.json")]
+            self.assertEqual((v["tracks"], v["frames"]), (1, 2))
+            self.assertTrue(all(t["tid"] == 2 for m in metas for t in m["twoWheelers"]))
         finally:
             eng.close()
 

@@ -185,7 +185,7 @@ DEFAULTS["twhelmet"] = dict(copy.deepcopy(_CROSS_COMMON), confidence=0.25, minTr
                             zoneAroundLine=True,       # measured 2026-11-02 on a recording: 5x the crossings found at the far end of the road, detector cost unchanged
                             helmetMinConf=0.6, noHelmetMinConf=0.6, minMissingVotes=3, minHelmetVotes=2, minNoRiderVotes=3, vehicleOnlyMaxTravel=1.5, minHeadPx=28, detectPlate=True, plateMinConf=0.35,
                             judgeEvery=1, maxJudgePerFrame=2, everyFrame=True,
-                            captureDataset=False, capturePerTrack=4, captureEveryFrames=5, captureMinHeight=60,
+                            captureDataset=False, capturePerTrack=4, captureEveryFrames=5, captureMinHeight=60, captureMinTravel=0.5,
                             snapshot={"mode": "crossing"},
                             alert={"enabled": True, "labels": ["Helmet compliant", "Helmet missing"], "severity": "high",
                                    "compliantSeverity": "low", "cooldownSec": 5})
@@ -498,6 +498,7 @@ def _validate_cross(module_id, cfg):
         _num(errs, "capturePerTrack", cfg.get("capturePerTrack"), 1, 20, True)
         _num(errs, "captureEveryFrames", cfg.get("captureEveryFrames"), 1, 100, True)
         _num(errs, "captureMinHeight", cfg.get("captureMinHeight"), 20, 1000)
+        _num(errs, "captureMinTravel", cfg.get("captureMinTravel"), 0, 10)
         _num(errs, "minHelmetVotes", cfg.get("minHelmetVotes"), 1, 8, True)
         _num(errs, "judgeEvery", cfg.get("judgeEvery"), 1, 10, True)
         _num(errs, "maxJudgePerFrame", cfg.get("maxJudgePerFrame"), 1, 6, True)

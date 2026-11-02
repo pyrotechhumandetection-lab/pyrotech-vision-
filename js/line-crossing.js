@@ -223,7 +223,8 @@
         chk('captureDataset', !!c.captureDataset, 'Save clean frames of every tracked two-wheeler', 'anywhere in the picture, not only at the line; no boxes drawn. Each frame comes with a pre-filled label file (bike boxes) and a .json of the linked riders for a person to correct. Written to the snapshot folder under twhelmet_dataset/<date>/. Roughly 300 KB per frame: watch the disk.') +
         fld('Frames per two-wheeler', 'capturePerTrack', num('capturePerTrack', c.capturePerTrack == null ? d.capturePerTrack : c.capturePerTrack, 1, 20, 1), 'Spread over its approach, so the same bike is kept at several sizes.') +
         fld('Frames apart', 'captureEveryFrames', num('captureEveryFrames', c.captureEveryFrames == null ? d.captureEveryFrames : c.captureEveryFrames, 1, 100, 1), '') +
-        fld('Smallest two-wheeler to keep (px tall)', 'captureMinHeight', num('captureMinHeight', c.captureMinHeight == null ? d.captureMinHeight : c.captureMinHeight, 20, 1000, 10), 'Below about 60 px a rider cannot be labelled.') + '</div></div>';
+        fld('Smallest two-wheeler to keep (px tall)', 'captureMinHeight', num('captureMinHeight', c.captureMinHeight == null ? d.captureMinHeight : c.captureMinHeight, 20, 1000, 10), 'Below about 60 px a rider cannot be labelled.') +
+        fld('Must have moved (bike lengths)', 'captureMinTravel', num('captureMinTravel', c.captureMinTravel == null ? d.captureMinTravel : c.captureMinTravel, 0, 10, 0.1), 'Parked bikes are skipped until they move this far. 0 = keep parked bikes too.') + '</div></div>';
       h += chk('everyFrame', c.everyFrame !== false, 'Analyse every camera frame (best for fast two-wheelers)', 'the AI looks at as many frames as it can instead of keeping to the shared AI rate, so a fast bike is followed over more frames. A live picture cannot be slowed down; this gives the same benefit. Limited by how fast the AI runs (see Inference rate in Detection Status).') +
         chk('includeBicycles', !!c.includeBicycles, 'Also check bicycles', 'off = motorcycles / scooters only') +
         '<div class="dl-sub"><b>Helmet judge</b><div class="form-grid mt-8">' +
@@ -264,7 +265,7 @@
       out.minMissingVotes = parseInt(q('minMissingVotes').value, 10); out.minHelmetVotes = parseInt(q('minHelmetVotes').value, 10);
       out.minNoRiderVotes = parseInt(q('minNoRiderVotes').value, 10); out.minHeadPx = parseInt(q('minHeadPx').value, 10);
       out.captureDataset = q('captureDataset').checked; out.capturePerTrack = parseInt(q('capturePerTrack').value, 10);
-      out.captureEveryFrames = parseInt(q('captureEveryFrames').value, 10); out.captureMinHeight = f('captureMinHeight');
+      out.captureEveryFrames = parseInt(q('captureEveryFrames').value, 10); out.captureMinHeight = f('captureMinHeight'); out.captureMinTravel = f('captureMinTravel');
       out.alert.compliantSeverity = q('compliantSeverity').value;
     }
     const nums = [out.confidence, out.targetFps, out.minTrackFrames, out.hysteresis, out.endExtend, out.recrossSec, out.handoverSec, out.dedupeSec, out.minBoxFrac, out.zoneMargin, out.alert.cooldownSec];

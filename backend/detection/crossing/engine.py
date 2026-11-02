@@ -689,12 +689,14 @@ class CrossingEngine:
         """Dataset capture (setting captureDataset): save clean frames of every tracked two-wheeler, anywhere in the
         picture, for labelling and training - no overlays, no judging involved. Per track up to `capturePerTrack` frames,
         at least `captureEveryFrames` frames apart (so the same bike is kept at several sizes as it approaches), only
-        while its box is at least `captureMinHeight` px tall. Next to each JPEG a YOLO label file pre-fills the `bike`
+        while its box is at least `captureMinHeight` px tall and only after it has moved `captureMinTravel` of its own size
+        from where its track began (0 = parked bikes too; field 2026-11-02: 4 of 5 frames were the parked row). Next to each JPEG a YOLO label file pre-fills the `bike`
         boxes (class 0 of the rider model) and a .json lists the riders the person detector linked - to be corrected by
         a person, never used as truth. Saving runs on its own thread (bounded queue) so tracking never waits on the disk."""
         c = mod.cfg
         per_track = int(c.get("capturePerTrack", 4)); every = int(c.get("captureEveryFrames", 5))
         min_h = float(c.get("captureMinHeight", 60))
+        min_travel = float(c.get("captureMinTravel", 0.5))     # in units of the bike's own size; 0 = parked bikes too
         root = Path(config.SNAPSHOT_DIR) / "twhelmet_dataset" / f"{datetime.fromtimestamp(captured_at):%Y-%m-%d}"
         mod.dataset["dir"] = str(root)
         todo = []
@@ -702,9 +704,13 @@ class CrossingEngine:
             v = bikes[vi]
             if v["tid"] is None or v["box"][3] - v["box"][1] < min_h:
                 continue
-            st = mod.captured.setdefault(v["tid"], [0, -10 ** 9])
+            cx, cy = (v["box"][0] + v["box"][2]) / 2, (v["box"][1] + v["box"][3]) / 2
+            st = mod.captured.setdefault(v["tid"], [0, -10 ** 9, (cx, cy)])     # [saved, last frame, where the track started]
             if st[0] >= per_track or (fid or 0) - st[1] < every:
                 continue
+            size = max(v["box"][2] - v["box"][0], v["box"][3] - v["box"][1], 1.0)
+            if min_travel > 0 and math.hypot(cx - st[2][0], cy - st[2][1]) < min_travel * size:
+                continue                                         # parked (or not yet moved): a row of parked bikes is one picture, not 300
             st[0] += 1
             st[1] = fid or 0
             if st[0] == 1:
@@ -728,7 +734,7 @@ class CrossingEngine:
         def save(img=img, meta=meta, lines=bike_lines, name=name, root=root, mod=mod):
             try:
                 root.mkdir(parents=True, exist_ok=True)
-                ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 90])
                 if not ok:
                     raise OSError("JPEG encode failed")
                 (root / f"{name}.jpg").write_bytes(buf.tobytes())
