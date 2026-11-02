@@ -524,6 +524,25 @@ class DatasetCaptureTests(unittest.TestCase):
         finally:
             eng.close()
 
+    def test_capture_works_without_a_line(self):
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        saved = config.SNAPSHOT_DIR
+        config.SNAPSHOT_DIR = tmp
+        self.addCleanup(lambda: setattr(config, "SNAPSHOT_DIR", saved))
+        eng = ScriptedEngine(Collect(), lambda i: [bike(1, 300, 330 + 2 * i)])
+        try:
+            c = cfg("twhelmet", captureDataset=True, capturePerTrack=2, captureEveryFrames=3)
+            c["line"] = None                                                                         # no line drawn
+            eng.set_module("twhelmet", c)
+            run(eng, 12)
+            time.sleep(0.5)
+            v = eng.view("twhelmet")
+            self.assertEqual((v["dataset"]["tracks"], v["dataset"]["frames"], len(v["tracksNow"])), (1, 2, 1))
+            self.assertEqual(len(list(Path(tmp).rglob("*.jpg"))), 2)
+        finally:
+            eng.close()
+
     def test_capture_off_by_default_and_validated(self):
         self.assertFalse(DEFAULTS["twhelmet"]["captureDataset"])
         self.assertEqual(validate("twhelmet", dict(DEFAULTS["twhelmet"], capturePerTrack=0), []), ["capturePerTrack must be between 1 and 20"])

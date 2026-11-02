@@ -552,6 +552,11 @@ class CrossingEngine:
             if tr is None:
                 mod.warnings = ["No line drawn: draw it on the live picture"]
                 draw[mod.mid] = {"boxes": []}
+                if mod.mid == "twhelmet" and (mod.cfg.get("captureDataset") or config.TWHELMET_COLLECT_MODE):
+                    use_idx = self._two_wheelers(mod, bikes, h)                 # dataset capture needs no line
+                    self._capture_dataset(mod, frame, bikes, use_idx, persons, riders, captured_at, fid, w, h)
+                    draw[mod.mid] = {"boxes": [(bikes[i]["box"], f"{bikes[i]['cls']} {bikes[i]['tid']}", (255, 170, 0), bikes[i]["tid"]) for i in use_idx]}
+                    mod.last_boxes = draw[mod.mid]["boxes"]
                 continue
             if mod.mid == "pcross":
                 draw[mod.mid] = self._pcross(mod, tr, frame, persons, rider_idx, captured_at, fid, w, h)
@@ -615,11 +620,17 @@ class CrossingEngine:
             log.exception("crossing event handler failed")
 
     # ---- two-wheeler helmet at the line
-    def _twhelmet(self, mod, tr, frame, persons, bikes, riders, captured_at, fid, w, h):
+    @staticmethod
+    def _two_wheelers(mod, bikes, h):
+        """Indices of the detections this module acts on: motorcycles (bicycles if asked), above its confidence and size."""
         c = mod.cfg
         conf = float(c.get("confidence", 0.35))
-        use_idx = [i for i, b in enumerate(bikes) if b["conf"] >= conf and (b["cls"] == "motorcycle" or c.get("includeBicycles"))
-                   and b["box"][3] - b["box"][1] >= float(c.get("minBoxFrac", 0.05)) * h]
+        return [i for i, b in enumerate(bikes) if b["conf"] >= conf and (b["cls"] == "motorcycle" or c.get("includeBicycles"))
+                and b["box"][3] - b["box"][1] >= float(c.get("minBoxFrac", 0.05)) * h]
+
+    def _twhelmet(self, mod, tr, frame, persons, bikes, riders, captured_at, fid, w, h):
+        c = mod.cfg
+        use_idx = self._two_wheelers(mod, bikes, h)
         use = [bikes[i] for i in use_idx]
         line = Line.from_cfg(c)
         hmin, nmin = float(c.get("helmetMinConf", 0.6)), float(c.get("noHelmetMinConf", 0.6))
