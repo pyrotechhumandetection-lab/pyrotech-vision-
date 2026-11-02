@@ -19,6 +19,8 @@ from backend.detection.crossing import engine as ce  # noqa: E402
 from backend.detection.crossing import judge as jd  # noqa: E402
 from backend.detection.modules import DEFAULTS, validate  # noqa: E402
 
+config.TWHELMET_COLLECT_MODE = False          # the suite tests helmet checking; collection mode has its own test below
+
 W, H = 1280, 720
 LINE = {"x1": 0.1, "y1": 0.5, "x2": 0.9, "y2": 0.5, "refWidth": W, "refHeight": H}
 
@@ -525,6 +527,38 @@ class DatasetCaptureTests(unittest.TestCase):
     def test_capture_off_by_default_and_validated(self):
         self.assertFalse(DEFAULTS["twhelmet"]["captureDataset"])
         self.assertEqual(validate("twhelmet", dict(DEFAULTS["twhelmet"], capturePerTrack=0), []), ["capturePerTrack must be between 1 and 20"])
+
+
+class CollectModeTests(unittest.TestCase):
+    """AIV_TWHELMET_COLLECT (default on since 2026-11-02): judge paused, frames of every two-wheeler saved, crossings still counted."""
+
+    def test_collect_mode_pauses_the_judge_and_captures(self):
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        saved = (config.SNAPSHOT_DIR, config.TWHELMET_COLLECT_MODE)
+        config.SNAPSHOT_DIR, config.TWHELMET_COLLECT_MODE = tmp, True
+        self.addCleanup(lambda: (setattr(config, "SNAPSHOT_DIR", saved[0]), setattr(config, "TWHELMET_COLLECT_MODE", saved[1])))
+        calls = []
+        orig = jd.judge_crop
+        jd.judge_crop = lambda *a, **k: calls.append(1) or {"verdict": jd.HELMET, "helmetConf": 0.9, "noHelmetConf": 0.0, "views": 1, "reason": "x", "source": "x"}
+        got = Collect()
+        eng = ScriptedEngine(got, lambda i: [bike(1, 640, 330 + 18 * i), rider_on(bike(1, 640, 330 + 18 * i), 10)])
+        try:
+            eng.set_module("twhelmet", cfg("twhelmet", minTrackFrames=1))            # captureDataset NOT set: forced by the mode
+            run(eng, 20)
+            e = got.wait(1, 20)[0][1]                                                 # first call loads the judge model's status
+            time.sleep(0.5)
+            self.assertEqual(calls, [])                                               # nothing judged
+            self.assertEqual((e["label"], e["category"], e["riders"]), ("Helmet unverified", None, []))
+            self.assertIn("paused", e["why"])
+            v = eng.view("twhelmet")
+            self.assertEqual((v["counts"]["unverified"], v["crossings"]), (1, 1))     # still counted
+            self.assertTrue(v["dataset"]["enabled"] and v["dataset"]["collectMode"] and v["dataset"]["frames"] >= 1)
+            self.assertIn("paused", v["judge"])
+            self.assertTrue(list(Path(tmp).rglob("*.jpg")))
+        finally:
+            eng.close()
+            jd.judge_crop = orig
 
 
 class EveryFrameTests(unittest.TestCase):

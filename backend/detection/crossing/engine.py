@@ -635,6 +635,8 @@ class CrossingEngine:
             hist = mod.riders.setdefault(v["tid"], {})
             for key, _ptid, rbox in self._rider_items(riders.get(vi, []), persons, v, h, w):
                 rh = hist.setdefault(key, helmet_judge.RiderHistory())
+                if config.TWHELMET_COLLECT_MODE:
+                    continue                                                   # judge paused: collect frames only
                 if near and budget > 0 and (fid or 0) % every == 0:
                     top = helmet_judge.head_crop(frame, rbox, 1.0 if str(key).startswith("bike-area") else 0.5)
                     if top is not None:
@@ -649,7 +651,7 @@ class CrossingEngine:
             for pi in riders.get(vi, []):
                 boxes.append((persons[pi]["box"], "rider", (200, 120, 40), None))
         mod.last_boxes = boxes
-        if c.get("captureDataset"):
+        if c.get("captureDataset") or config.TWHELMET_COLLECT_MODE:
             self._capture_dataset(mod, frame, bikes, use_idx, persons, riders, captured_at, fid, w, h)
         direction = c.get("direction", "both")
         for ev in events:
@@ -758,6 +760,8 @@ class CrossingEngine:
         votes_kw = dict(min_missing=int(c.get("minMissingVotes", 3)), min_helmet=int(c.get("minHelmetVotes", 2)),
                         min_no_rider=int(c.get("minNoRiderVotes", 3)))
         rl = []
+        if config.TWHELMET_COLLECT_MODE:
+            jobs = []                                   # judge paused: the crossing is counted and recorded, nothing is judged
         for job in jobs:
             rh, ptid, pbox, top = job[:4]
             bike_area = bool(job[4]) if len(job) > 4 else ptid == "bike-area"
@@ -770,7 +774,9 @@ class CrossingEngine:
             rl.append({"personId": ptid, "box": [round(v_, 1) for v_ in pbox], "verdict": verdict, "votes": list(rh.votes),
                        "helmetConf": last.get("helmetConf"), "noHelmetConf": last.get("noHelmetConf"), "reason": last.get("reason"),
                        "source": last.get("source"), "headPx": last.get("headPx")})
-        if not rl:
+        if config.TWHELMET_COLLECT_MODE:
+            verdict, why = helmet_judge.UNCERTAIN, "helmet check paused: data-collection mode (AIV_TWHELMET_COLLECT=0 to resume)"
+        elif not rl:
             verdict, why = helmet_judge.UNCERTAIN, "no rider found on the two-wheeler"
         else:
             vs = [r["verdict"] for r in rl]
@@ -794,7 +800,7 @@ class CrossingEngine:
                 reasons = sorted({r["reason"] for r in rl if r.get("reason")})
                 verdict, why = helmet_judge.UNCERTAIN, "helmet could not be verified" + (f" ({'; '.join(reasons)})" if reasons else "")
         plate = None
-        if c.get("detectPlate", True):
+        if c.get("detectPlate", True) and not config.TWHELMET_COLLECT_MODE:
             bike_box = next((b[0] for b in boxes if b[3] is not None and b[3] == ev["tid"]), None)
             if bike_box is not None:
                 try:
@@ -937,5 +943,8 @@ class CrossingEngine:
             out["net"] = mod.counts["in"] - mod.counts["out"]
         else:
             out["judge"] = helmet_judge.status()
-            out["dataset"] = dict(mod.dataset, enabled=bool(mod.cfg.get("captureDataset")))
+            out["dataset"] = dict(mod.dataset, enabled=bool(mod.cfg.get("captureDataset")) or config.TWHELMET_COLLECT_MODE,
+                                  collectMode=config.TWHELMET_COLLECT_MODE)
+            if config.TWHELMET_COLLECT_MODE:
+                out["judge"] = dict(out["judge"], paused="data-collection mode: helmet check off, frames of every two-wheeler saved")
         return out
