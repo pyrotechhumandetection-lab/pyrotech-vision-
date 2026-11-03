@@ -10,6 +10,7 @@ train, measure, and copy `best.pt` over `backend/models/twhelmet/rider_helmet.pt
 | Source | What it gives | Check before use |
 |---|---|---|
 | **Your own cameras, live** (module setting "Save clean frames of every tracked two-wheeler", `captureDataset`) | the exact angle, light, distance, bikes and helmets of your sites, collected by the box itself while it runs: up to 4 clean 1080p frames per tracked two-wheeler (spaced as it approaches), each with a pre-filled YOLO `bike` label and a .json of linked riders, under `<snapshots>/twhelmet_dataset/<date>/` | correct the pre-labels and add the heads yourself (helmet / no-helmet); 500-1,500 labelled images per site is a realistic first target; ~300 KB per frame |
+| | pack what was captured for transfer: `bash backend/tools/twhelmet_train/pack_dataset.sh [date | --since date | --new]` -> `~/twhelmet_dataset_<stamp>.zip` with a yield summary | |
 | **Your own cameras, from a recording** (`harvest.py`) | the same, from a video file | label every box yourself |
 | [IITH Helmet dataset](https://sites.google.com/site/dineshsinghindian/iith_helmet_1-dataset) (IIT Hyderabad surveillance videos, India) | Indian campus roads, sparse traffic | licence not stated: ask the authors (page asks for citation); annotation format not stated: convert |
 | [Indian Helmet detection dataset (Kaggle)](https://www.kaggle.com/datasets/aryanvaid13/indian-helmet-detection-dataset) | Indian helmet photos | size, classes and licence not visible without logging in: read the page |
