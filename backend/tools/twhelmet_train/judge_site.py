@@ -59,17 +59,17 @@ def main():
             m = metas.get(base, {"twoWheelers": []})
             for c, cx, cy, w, h in heads:
                 x, y, hw, hh = cx * fw, cy * fh, w * fw, h * fh
-                pbox, kind, bike_area = None, None, False
+                pbox, kind, bike_area, bike = None, None, False, None
                 # the engine judges the person linked to the two-wheeler; a head in the top 40 % of a person box belongs to it
                 for t in m["twoWheelers"]:
                     for p in t.get("riders", []):
                         px1, py1, px2, py2 = p["box"]
                         if px1 <= x <= px2 and py1 - 0.1 * (py2 - py1) <= y <= py1 + 0.4 * (py2 - py1):
-                            pbox, kind = p["box"], "person"
+                            pbox, kind, bike = p["box"], "person", t["box"]
                 if pbox is None:
                     for t in m["twoWheelers"]:
                         if centre_in(t["box"], x, y, up=1.0):
-                            pbox, kind, bike_area = jd.bike_rider_box(t["box"], fh, fw), "bike-area", True
+                            pbox, kind, bike_area, bike = jd.bike_rider_box(t["box"], fh, fw), "bike-area", True, t["box"]
                 if pbox is None:                                   # no capture metadata: a stand-in rider box around the head
                     pbox, kind = [x - 2.5 * hw, y - 0.8 * hh, x + 2.5 * hw, y + 6 * hh], "synthetic"
                     pbox = [max(0, pbox[0]), max(0, pbox[1]), min(fw, pbox[2]), min(fh, pbox[3])]
@@ -80,7 +80,9 @@ def main():
                     res = jd.judge_crop(top, a.hmin, a.nmin, bike_area=bike_area, min_head_px=a.min_head)
                 recs.append({"frame": base, "day": base.split("_")[1] if "_" in base else "", "label": CLS[c], "verdict": res["verdict"],
                              "helmetConf": res["helmetConf"], "noHelmetConf": res["noHelmetConf"], "reason": res["reason"],
-                             "headPx": res.get("headPx"), "cx": round(x), "cy": round(y), "w": round(hw), "h": round(hh), "crop": kind})
+                             "headPx": res.get("headPx"), "cx": round(x), "cy": round(y), "w": round(hw), "h": round(hh), "crop": kind,
+                             # where the two-wheeler touches the ground (the point that crosses the line) - for zone_map.py --at ground
+                             "gx": round((bike[0] + bike[2]) / 2) if bike else round(x), "gy": round(bike[3]) if bike else round(y + 5 * hh)})
     # summaries
     def table(rows):
         t = collections.Counter((r["label"], r["verdict"]) for r in rows)

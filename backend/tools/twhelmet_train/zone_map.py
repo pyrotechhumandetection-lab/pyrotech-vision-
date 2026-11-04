@@ -26,12 +26,15 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--title", default="")
     ap.add_argument("--cell", type=int, default=160)
+    ap.add_argument("--at", choices=("head", "ground"), default="ground",
+                    help="where each head's outcome is placed: at the head, or at the point where its two-wheeler touches the ground "
+                         "(default) - the line is crossed by that point, so this is the map to draw the line with")
     a = ap.parse_args()
     J = json.load(open(a.judge))
     recs = J["records"]
     bg = cv2.imread(a.frame)
     H, W = bg.shape[:2]
-    pts = np.array([[r["cx"], r["cy"]] for r in recs], float)
+    pts = np.array([[r.get("gx", r["cx"]), r.get("gy", r["cy"])] if a.at == "ground" else [r["cx"], r["cy"]] for r in recs], float)
     right = np.array([1.0 if (r["label"] == "helmet" and r["verdict"] == "HELMET") or (r["label"] == "no-helmet" and r["verdict"] == "MISSING") else 0.0 for r in recs])
     wrong = np.array([1.0 if r["verdict"] in ("HELMET", "MISSING") and not rr else 0.0 for r, rr in zip(recs, right)])
     size = np.array([min(r["w"], r["h"]) for r in recs], float)
@@ -87,7 +90,7 @@ def main():
     g_n, g_r, g_w = int(gsel.sum()), int(right[gsel].sum()), int(wrong[gsel].sum())
     r_n, r_r, r_w = len(recs), int(right.sum()), int(wrong.sum())
     # legend
-    pad = np.zeros((190, W, 3), np.uint8)
+    pad = np.zeros((200, W, 3), np.uint8)
     f = cv2.FONT_HERSHEY_SIMPLEX
     cv2.putText(pad, a.title or f"Helmet judge reliability map - {os.path.basename(J.get('weights', ''))}", (16, 34), f, 0.9, (255, 255, 255), 2)
     cv2.putText(pad, f"GREEN = highest accuracy: {g_n} labelled heads here, {g_r} confirmed right, {g_w} confirmed wrong, "

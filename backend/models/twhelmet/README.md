@@ -35,8 +35,11 @@ Box metrics (`compare_models.py`, `in_v3/compare_*.json`, mAP50 helmet / no-helm
 Kaggle test 0.950 / 0.652 -> 0.950 / 0.681; **own-camera test crops 0.635 / 0.663 -> 0.921 / 0.920**. The public sets did not
 get worse, the own camera got a lot better.
 
-Camera-view map of where the verdicts are reliable: `in_v3/zone_cam02_in_v3.jpg` (`tools/twhelmet_train/zone_map.py`); the
-green area is the near half of the compound road, where heads are 40 px and more.
+Camera-view map of where the verdicts are reliable (`tools/twhelmet_train/zone_map.py`): **`in_v3/zone_cam02_in_v3_ground.jpg`**
+is keyed to the point where the two-wheeler touches the ground - the point that crosses the line - so it says where to draw the
+line: the green area is the near, paved part of the compound road (23 two-wheelers there, 20 judged right, 0 wrong, 3 unverified).
+`zone_cam02_in_v3.jpg` is the same data keyed to the head position. `three_events_on_zone_map_ground.jpg` places the three
+"unverified" events of 2026-11-04 16:00-16:06 on it: all three crossed in the yellow band above the green area.
 
 Still true: heads under 28 px are never confirmed (14 of the 23 bare heads on the test day); the far end of the road and the
 gate area stay "unverified"; one camera, three daytime sessions, the same regular riders - a night, rain or new-site test has
