@@ -47,3 +47,7 @@ The line is a finite segment. A person whose foot point passes right at A or B u
 pixels outside the segment. The segment now counts `endExtend` (default 0.5) x the person's box width beyond A and B
 (setting "Line ends: count this far beyond A / B"; 0 = exact segment). A path clearly around an end is still not counted;
 the Tracking row shows how many such passes happened ("passed beyond a line end"), so a line that is too short is visible.
+
+## Started by the backend
+
+Since 2026-11-04 the backend starts the two-wheeler helmet module on every enabled camera when it boots (`AIV_AUTOSTART_MODULES`, default `twhelmet`, `none` to turn off; see `backend/services/autostart.py`). Draw the line once; after that nobody has to click Start after a reboot or a service restart. Stop in the UI stops it until the next restart.

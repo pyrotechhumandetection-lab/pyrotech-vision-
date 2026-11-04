@@ -90,7 +90,9 @@ be reachable from the network; port 8000 cannot be reached from other PCs (verif
    removes) and starts them again in the background when it starts. A camera that is not reachable
    yet is retried after 10 s, 20 s, 40 s … then every 2 minutes, until it answers; every attempt is
    logged. The web UI is never blocked by this. Detection logic is unchanged. `AIV_AUTOSTART=0` in
-   `.env` switches it off.
+   `.env` switches it off. Since 2026-11-04 the backend also starts the **Two-Wheeler Helmet (Line Crossing)** module by itself
+   on every enabled camera at boot, whether or not anyone clicked Start (`AIV_AUTOSTART_MODULES`, default `twhelmet`; a comma
+   list of module ids; `none` turns it off). Stop in the UI stops it until the next restart.
 2. **Clean shutdown on `systemctl stop`.** The backend now treats SIGTERM like Ctrl+C (and the unit
    sends SIGINT): cameras are closed and pending counts/alerts are written before it exits.
 3. `./aivision.sh run` refuses to start a second copy while the services run (no duplicate camera loops).

@@ -9,6 +9,11 @@ available immediately - restoring never blocks them.
 
 The camera module setting "enabled" is not used for this: it is also set by the
 camera form and is not cleared on Stop.
+
+Modules the backend starts BY ITSELF (2026-11-04, by request): AIV_AUTOSTART_MODULES, a comma list of module ids, default
+"twhelmet" (the two-wheeler helmet line-crossing module). At every backend start these are started on every enabled camera,
+whether or not anyone clicked Start - the box watches the line as soon as it boots. Stop in the UI stops it until the next
+restart. AIV_AUTOSTART_MODULES=none turns this off; AIV_AUTOSTART=0 turns all resuming off.
 """
 import logging
 import threading
@@ -28,6 +33,15 @@ PERMANENT = {"CAMERA_NOT_FOUND", "CAMERA_DISABLED", "UNKNOWN_MODULE", "MODEL_NOT
 
 def enabled():
     return str(config._env("AIV_AUTOSTART", "1")).strip().lower() not in ("0", "off", "false", "no")
+
+
+def always_modules():
+    """Module ids the backend starts on every enabled camera at boot (AIV_AUTOSTART_MODULES, default twhelmet)."""
+    from backend.detection.modules import MODULES
+    raw = str(config._env("AIV_AUTOSTART_MODULES", "twhelmet"))
+    if raw.strip().lower() in ("none", "off", "0", "-"):
+        return []
+    return [m.strip() for m in raw.split(",") if m.strip() and m.strip() in MODULES]
 
 
 class AutoStart:
@@ -72,6 +86,14 @@ class AutoStart:
         if not enabled():
             log.info("detection auto-resume is off (AIV_AUTOSTART=0)")
             return
+        always = always_modules()
+        if always:
+            cams = [c for c in (self.registry.list() if self.registry else []) if c.get("enabled", True)]
+            added = [(c["id"], m) for c in cams for m in always if (c["id"], m) not in self.remembered()]
+            for cam_id, m in added:
+                self.record(cam_id, m)
+            log.info("backend-started modules %s on %d camera(s) (AIV_AUTOSTART_MODULES)%s", ",".join(always), len(cams),
+                     f": added {len(added)}" if added else "")
         items = self.remembered()
         if not items:
             return

@@ -488,6 +488,27 @@ class AutoStartTests(unittest.TestCase):
         self.assertEqual(calls, [("CAM-01", "fire")] * 3)
         self.assertNotIn("secret", str(b.status()))       # credentials never kept in the status
 
+    def test_backend_started_modules_on_every_enabled_camera(self):
+        """AIV_AUTOSTART_MODULES (default twhelmet): started at boot on every enabled camera, nobody has to click Start."""
+        class Registry:
+            def list(self):
+                return [{"id": "CAM-01", "enabled": True}, {"id": "CAM-02", "enabled": False}, {"id": "CAM-03"}]
+        sessions, calls = self._fake()
+        a = self.mod.AutoStart(sessions, Registry())
+        a.record("CAM-03", "fire")
+        a.start()
+        self.assertTrue(self._wait(lambda: len(calls) >= 3), calls)
+        a.stop()
+        self.assertEqual(sorted(set(calls)), [("CAM-01", "twhelmet"), ("CAM-03", "fire"), ("CAM-03", "twhelmet")])   # CAM-02 is disabled
+        self.assertEqual(sorted(self.mod.AutoStart(None, None).remembered()), [("CAM-01", "twhelmet"), ("CAM-03", "fire"), ("CAM-03", "twhelmet")])
+        os.environ["AIV_AUTOSTART_MODULES"] = "none"
+        try:
+            self.assertEqual(self.mod.always_modules(), [])
+            os.environ["AIV_AUTOSTART_MODULES"] = "twhelmet, pcross,nonsense"
+            self.assertEqual(self.mod.always_modules(), ["twhelmet", "pcross"])
+        finally:
+            os.environ.pop("AIV_AUTOSTART_MODULES", None)
+
     def test_permanent_error_and_user_stop(self):
         a = self.mod.AutoStart(None, None)
         a.record("CAM-09", "human")
