@@ -43,10 +43,15 @@ python3 harvest.py --source clip.mp4 --out to_label --stride 1 --per-track 6
 python3 merge_datasets.py --out data/twhelmet_in  iith=/data/iith_yolo  rf1=/data/roboflow_a  site=/data/site_labelled
 # 3. train on a GPU (Colab T4: ~1-3 h), starting from the shipped weights
 python3 train.py --data data/twhelmet_in/data.yaml --base ../../models/twhelmet/rider_helmet.pt --name in_v1
+# 3b. own-camera labels (images/ + labels/ from the box's dataset capture, labelled) -> crops the judge's size, split by day/track
+python3 build_site_crops.py            # paths at the top of the file; then train on its data.yaml as in step 3
 # 4. measure against the installed weights: box metrics on the held-out splits AND the project's own judgement on YOUR site
 #    photos sorted into helmet_detected/ helmet_not_detected/ only_vehicle_detected/ (+ optional event_boxes.json)
 python3 compare_models.py --data data/twhelmet_in/data.yaml --site site_test --json compare.json old=../../models/twhelmet/rider_helmet.pt new=runs/in_v1/weights/best.pt
 python3 ../eval_twhelmet.py <folder with helmet/ and no_helmet/>          # older, rider-photo-only table
+#    the number a client cares about: the shipped judge on every labelled own-camera head (right / wrong / unverified, by day and size)
+AIV_TWHELMET_MODEL=runs/in_v1/weights/best.pt python3 judge_site.py --set <labelled dir> --raw <capture dir> --json judge.json
+python3 zone_map.py --judge judge.json --frame <clean frame.jpg> --out zone.jpg   # where in the picture the verdicts are reliable
 # 5. only if it beats the installed model on YOUR photos: copy best.pt to backend/models/twhelmet/rider_helmet.pt (keep the old file)
 ```
 
@@ -69,6 +74,22 @@ python3 ../eval_twhelmet.py <folder with helmet/ and no_helmet/>          # olde
   motorcycle (452 helmet + 315 no-helmet heads). Train 515 / val 153; the public test (33) and Kaggle test (44) splits stay held out.
 * Run: same CPU settings, from in_v1, 24 epochs, best epoch 18. Result in `../../models/twhelmet/README.md`: public test mAP50
   0.858 -> 0.922 with no-helmet precision 0.62 -> 0.83; Kaggle test level; site snapshots unchanged (2 wrong, no false helmet).
+
+### Done so far: `in_v3` (2026-11-04) - first round with the client's own camera
+
+* Data: the in_v2 public training images + CAM-02's own captures (data-collection mode 2026-11-02..04; 903 frames received,
+  labelled from contact sheets with the head detector placing the boxes: 215 heads, 52 helmet / 163 no-helmet; review groups
+  confirmed by Pyrotech). 11-02 + 11-03 train, 11-04 held out (even tracks = val, odd tracks = test).
+* **Lesson: feed own-camera frames as crops, not as whole frames.** The judge runs the model on one rider's crop at 640 px; a whole
+  1080p frame at 640 px turns a 40 px head into 13 px. The full-frame run (`in_v3`, 16 epochs) looked fine on mAP and was *worse*
+  with the real judge on the own-camera heads (19 right / 1 wrong vs in_v2's 39 / 4). `build_site_crops.py` cuts the labelled
+  frames exactly the way `judge.head_crop` does (person box + 50 % margin, or the bike area stretched upward) and drops "parked"
+  crops in which the head detector still sees a person (166 of 333 - unlabelled bystanders would teach the model to ignore heads).
+* Run `in_v3b` on those crops (same CPU settings, from in_v2, 24 epochs, crops twice): installed as `rider_helmet.pt`. Numbers in
+  `../../models/twhelmet/README.md`: own-camera heads confirmed right 39 -> 82 of 215 with 4 -> 1 wrong; untouched test day
+  12 / 0 -> 14 / 0 of 33; public tests level.
+* New tools: `judge_site.py` (the shipped judge, scored per labelled head, by day and head size), `zone_map.py` (camera-view map
+  of where verdicts are reliable), `build_site_crops.py` (own-camera labels -> training crops + split).
 
 ### Recording test (2026-11-02): `run_recording.py`
 

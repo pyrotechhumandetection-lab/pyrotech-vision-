@@ -62,7 +62,13 @@ def main():
     # outline of the reliable region
     mask = (full == 3).astype(np.uint8) * 255
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(out, cnts, -1, (0, 255, 0), 3)
+    small = [c for c in cnts if cv2.contourArea(c) < 4 * a.cell * a.cell]          # specks smaller than 4 cells are not a zone
+    cv2.drawContours(mask, small, -1, 0, -1); full[(mask == 0) & (full == 3)] = 2
+    out = overlay.copy()
+    for c, bgr in col.items():
+        out[full == c] = (0.45 * np.array(bgr) + 0.55 * bg[full == c]).astype(np.uint8)
+    out[full == 0] = (0.6 * bg[full == 0]).astype(np.uint8)
+    cv2.drawContours(out, [c for c in cnts if cv2.contourArea(c) >= 4 * a.cell * a.cell], -1, (0, 255, 0), 3)
     # heads
     for (x, y), rr, ww in zip(pts, right, wrong):
         c = (0, 255, 0) if rr else (0, 0, 255) if ww else (255, 255, 255)
