@@ -266,11 +266,14 @@ AI_FPS_RAMP = max(0.5, float(_env("AIV_AI_FPS_RAMP", "6")))
 # time. auto = one per RK3588 NPU core (3) on the RKNN engine, 1 on every other engine. AIV_PIPELINE_DEPTH=1 turns it off.
 # With 2 cameras each gets NPU_CORES // 2 workers (1), with one camera all of them.
 NPU_CORES = max(1, int(_env("AIV_NPU_CORES", "3")))
-# Two-wheeler helmet module in DATA-COLLECTION mode (2026-11-02, by request): the helmet judge is paused and clean frames of
-# every tracked two-wheeler are saved for labelling (see engine._capture_dataset), whatever the saved module settings say.
-# Crossings are still tracked, counted and recorded as "Helmet unverified" (no helmet alert). Set AIV_TWHELMET_COLLECT=0 to
-# return to normal helmet checking.
-TWHELMET_COLLECT_MODE = _env("AIV_TWHELMET_COLLECT", "1").strip().lower() not in ("0", "false", "no", "off")
+# Two-wheeler helmet module DATA-COLLECTION mode: the helmet judge is paused and clean frames of every tracked two-wheeler are
+# saved for labelling (see engine._capture_dataset), whatever the saved module settings say. Crossings are still tracked,
+# counted and recorded as "Helmet unverified" (no helmet alert). It was the default from 2026-11-02 to 2026-11-04 while the
+# first own-camera set was collected; since the in_v3 model (trained on that set) it is OFF by default and helmet checking
+# runs. AIV_TWHELMET_COLLECT=1 pauses the judge again. Frame capture itself keeps running in normal mode when the module
+# setting captureDataset is on (default on since in_v3: the next training round needs more frames, see
+# backend/tools/twhelmet_train/README.md).
+TWHELMET_COLLECT_MODE = _env("AIV_TWHELMET_COLLECT", "0").strip().lower() in ("1", "true", "yes", "on")
 
 
 def pipeline_depth(engine):

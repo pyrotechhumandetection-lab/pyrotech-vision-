@@ -185,7 +185,8 @@ DEFAULTS["twhelmet"] = dict(copy.deepcopy(_CROSS_COMMON), confidence=0.25, minTr
                             zoneAroundLine=True,       # measured 2026-11-02 on a recording: 5x the crossings found at the far end of the road, detector cost unchanged
                             helmetMinConf=0.6, noHelmetMinConf=0.6, minMissingVotes=3, minHelmetVotes=2, minNoRiderVotes=3, vehicleOnlyMaxTravel=1.5, minHeadPx=28, detectPlate=True, plateMinConf=0.35,
                             judgeEvery=1, maxJudgePerFrame=2, everyFrame=True,
-                            captureDataset=False, capturePerTrack=4, captureEveryFrames=5, captureMinHeight=60, captureMinTravel=0.5,
+                            captureDataset=True,       # since in_v3 (2026-11-04): keep saving frames for the next training round (~300 KB each, see pack_dataset.sh)
+                            capturePerTrack=4, captureEveryFrames=5, captureMinHeight=60, captureMinTravel=0.5,
                             snapshot={"mode": "crossing"},
                             alert={"enabled": True, "labels": ["Helmet compliant", "Helmet missing"], "severity": "high",
                                    "compliantSeverity": "low", "cooldownSec": 5})
