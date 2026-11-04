@@ -565,13 +565,13 @@ class DatasetCaptureTests(unittest.TestCase):
         finally:
             eng.close()
 
-    def test_capture_off_by_default_and_validated(self):
-        self.assertFalse(DEFAULTS["twhelmet"]["captureDataset"])
+    def test_capture_on_by_default_and_validated(self):
+        self.assertTrue(DEFAULTS["twhelmet"]["captureDataset"])          # since in_v3 (2026-11-04): frames for the next training round
         self.assertEqual(validate("twhelmet", dict(DEFAULTS["twhelmet"], capturePerTrack=0), []), ["capturePerTrack must be between 1 and 20"])
 
 
 class CollectModeTests(unittest.TestCase):
-    """AIV_TWHELMET_COLLECT (default on since 2026-11-02): judge paused, frames of every two-wheeler saved, crossings still counted."""
+    """AIV_TWHELMET_COLLECT=1 (the default 2026-11-02..04, off since in_v3): judge paused, frames of every two-wheeler saved, crossings still counted."""
 
     def test_collect_mode_pauses_the_judge_and_captures(self):
         import tempfile

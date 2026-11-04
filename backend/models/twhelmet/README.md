@@ -1,6 +1,48 @@
 # Two-Wheeler Helmet (line crossing) - models
 
-## Installed: `rider_helmet.pt` = `in_v2` (fine-tuned 2026-10-30, second round)
+## Installed: `rider_helmet.pt` = `in_v3` (fine-tuned 2026-11-04 on the client's own camera + the public sets)
+
+sha256 `8172cd08be8c5bf0443fb2de32e667a2b548472b06d2175deefd4c5aaa46bd28`. Same YOLOv8n-size network and classes as in_v2, fine-tuned
+from in_v2 on:
+
+* the in_v2 public data (curated Roboflow 227 + Kaggle 288 training images), unchanged;
+* **CAM-02's own labelled captures** (data-collection mode 2026-11-02..04, labelled from contact sheets, review groups confirmed by
+  Pyrotech): 11-02 and 11-03 for training (141 heads: 30 helmet / 111 no-helmet), **11-04 held out** (74 heads) - even track ids
+  as validation, odd track ids (33 heads) as the untouched test day. The own-camera frames go in **as the judge sees them**: one
+  crop per rider (person box + 50 % side margin) or per two-wheeler area, built by `tools/twhelmet_train/build_site_crops.py`,
+  each crop twice. A first attempt on whole 1080p frames (`in_v3/judge_site_in_v3_fullframe_rejected.json`) made the model
+  *worse* at the judge's scale (a 40 px head is 13 px in a 640 px frame) and is not shipped.
+
+24 epochs on CPU (`in_v3/args.yaml`, `in_v3/results.csv`), backbone frozen; the installed file is the last epoch (mixed val
+mAP50 0.867 / mAP50-95 0.555; the fitness-best epoch 18 is kept as `in_v3/best_epoch18.pt`, same box metrics, one more false
+helmet on the site heads).
+
+**What matters - the shipped judge on the client's own heads** (`tools/twhelmet_train/judge_site.py`, single frame, helmet >= 0.6,
+no-helmet >= 0.6, head >= 28 px; `in_v3/judge_site_in_v2.json` vs `in_v3/judge_site_in_v3.json`):
+
+| labelled CAM-02 heads | in_v2: confirmed right / wrong / unverified | **in_v3**: confirmed right / wrong / unverified |
+|---|---|---|
+| untouched test day 11-04, odd tracks (33 heads: 10 helmet, 23 bare; 14 of the bare heads are under 28 px) | 12 / 0 / 21 | **14 / 0 / 19** |
+| 11-04 even tracks (41 heads, used for epoch selection only) | 11 / 1 / 29 | 12 / 1 / 28 |
+| training days 11-02 + 11-03 (141 heads, in-sample for in_v3) | 16 / 3 / 122 | 56 / 0 / 85 |
+| all 215 | 39 / 4 / 172 (precision 0.91) | **82 / 1 / 132 (precision 0.99)** |
+
+The one remaining wrong verdict (all three models) is the bare-headed **pillion** of a helmeted rider on 11-04 (track 56): the
+pillion's crop contains the rider's helmet, so the crop votes "helmet". Two people on one bike are still judged per person box;
+a second rider behind a helmeted one can inherit the helmet - known limitation.
+
+Box metrics (`compare_models.py`, `in_v3/compare_*.json`, mAP50 helmet / no-helmet): public test 0.942 / 0.878 -> 0.950 / 0.885;
+Kaggle test 0.950 / 0.652 -> 0.950 / 0.681; **own-camera test crops 0.635 / 0.663 -> 0.921 / 0.920**. The public sets did not
+get worse, the own camera got a lot better.
+
+Camera-view map of where the verdicts are reliable: `in_v3/zone_cam02_in_v3.jpg` (`tools/twhelmet_train/zone_map.py`); the
+green area is the near half of the compound road, where heads are 40 px and more.
+
+Still true: heads under 28 px are never confirmed (14 of the 23 bare heads on the test day); the far end of the road and the
+gate area stay "unverified"; one camera, three daytime sessions, the same regular riders - a night, rain or new-site test has
+not been done. `validated: false` stays in the status until a longer labelled period exists.
+
+## Previous: `rider_helmet_v2.pt` = `in_v2` (fine-tuned 2026-10-30, second round)
 
 YOLOv8n-size detector (3.0 M parameters, 640 px input), classes `bike`, `helmet`, `no-helmet`, `number-plate`. Fine-tuned from
 `in_v1` on two curated public sets, both filtered to images with a motorcycle / scooter (cyclists removed), `bike` boxes
@@ -28,8 +70,8 @@ Licences: the base weights' author stated none; added data is CC BY 4.0 and the 
 Site column = single-frame result of the shipped judge (helmet >= 0.6, head >= 28 px, head no wider than 0.6 of its bike, a head seen
 near the bike blocks "vehicle only"); live crossings add the vote rules and the travel limit on top, so they are at least as cautious.
 
-Previous weights: `rider_helmet_v1.pt` (in_v1, 2026-10-30, Roboflow set only) and `rider_helmet_v0.pt` (third-party, below).
-To go back: `AIV_TWHELMET_MODEL=.../rider_helmet_v1.pt` or rename the files.
+Older weights: `rider_helmet_v1.pt` (in_v1, 2026-10-30, Roboflow set only) and `rider_helmet_v0.pt` (third-party, below).
+To go back to in_v2: `AIV_TWHELMET_MODEL=.../rider_helmet_v2.pt` or rename the files.
 
 `rider_helmet_v0.pt` - third-party YOLOv8 from <https://github.com/Jingjing468/motorcycle-helmet-violation-detection>
 (`model/helmet_best.pt`, sha256 `45320ba938559d04bf76cd0ea15f94d99df7fadd2998280652f04ccb4b795657`), trained by its author on the
