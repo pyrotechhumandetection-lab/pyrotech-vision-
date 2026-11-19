@@ -91,6 +91,14 @@ python3 zone_map.py --judge judge.json --frame <clean frame.jpg> --out zone.jpg 
 * New tools: `judge_site.py` (the shipped judge, scored per labelled head, by day and head size), `zone_map.py` (camera-view map
   of where verdicts are reliable), `build_site_crops.py` (own-camera labels -> training crops + split).
 
+### Snapshots of the module in one zip: `pack_snapshots.py` (2026-11-19)
+
+`python3 backend/tools/twhelmet_train/pack_snapshots.py [date | --since date | --new] [--label unverified]` on the box packs every
+crossing snapshot of the two-wheeler helmet module (annotated picture + clean original frame, sorted into compliant / missing /
+unverified / vehicle_only folders) with `events.csv` / `events.json` - per snapshot the verdict, reason, `decidedAfterSec`,
+per-rider votes / confidences / head size, crossing box and line. `pack_dataset.sh` is the other zip: the background capture frames
+for labelling; this one is the events the operator saw.
+
 ### Recording test (2026-11-02): `run_recording.py`
 
 Any weights or setting can be run through the real engine on a recording before deployment (`run_recording.py`, with `--screen`

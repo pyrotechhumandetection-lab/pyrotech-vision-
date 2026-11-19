@@ -446,7 +446,8 @@ class CameraSession:
                  "handedOver": ev.get("handedOver")}
         if module_id == "twhelmet":
             extra.update(verdict=ev["verdict"], reason=ev["why"], riders=riders, judge=ev.get("judge"), vehicle=ev.get("cls"), plate=ev.get("plate"),
-                         category=ev.get("category"), confirmed=ev.get("confirmed"), travel=ev.get("travel"))
+                         category=ev.get("category"), confirmed=ev.get("confirmed"), travel=ev.get("travel"),
+                         decidedAfterSec=ev.get("decidedAfterSec"))
         self.mgr.events.on_module_alert(cam, module_id, etype, label, snapshot if snap_on else None, captured_at=ev["capturedAt"],
                                         confidence=round(conf, 3) if conf else None, severity=sev, description=desc, alert=want_alert,
                                         snapshot=snap_on, extra=extra, original=frame.copy() if snap_on else None,
