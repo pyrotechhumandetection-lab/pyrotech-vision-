@@ -184,6 +184,7 @@ DEFAULTS["pcross"] = dict(copy.deepcopy(_CROSS_COMMON), excludeRiders=True, conf
 DEFAULTS["twhelmet"] = dict(copy.deepcopy(_CROSS_COMMON), confidence=0.25, minTrackFrames=2, minBoxFrac=0.03, includeBicycles=False,
                             zoneAroundLine=True,       # measured 2026-11-02 on a recording: 5x the crossings found at the far end of the road, detector cost unchanged
                             helmetMinConf=0.6, noHelmetMinConf=0.6, minMissingVotes=3, minHelmetVotes=2, minNoRiderVotes=3, vehicleOnlyMaxTravel=1.5, minHeadPx=28, detectPlate=True, plateMinConf=0.35,
+                            verdictGraceSec=1.5,       # unverified at the line: keep judging the rider for this long after the crossing before reporting (0 = decide at the line)
                             judgeEvery=1, maxJudgePerFrame=2, everyFrame=True,
                             captureDataset=True,       # since in_v3 (2026-11-04): keep saving frames for the next training round (~300 KB each, see pack_dataset.sh)
                             capturePerTrack=4, captureEveryFrames=5, captureMinHeight=60, captureMinTravel=0.5,
@@ -496,6 +497,7 @@ def _validate_cross(module_id, cfg):
         _num(errs, "minNoRiderVotes", cfg.get("minNoRiderVotes"), 1, 8, True)
         _num(errs, "vehicleOnlyMaxTravel", cfg.get("vehicleOnlyMaxTravel"), 0.0, 50.0)
         _num(errs, "minHeadPx", cfg.get("minHeadPx"), 8, 200, True)
+        _num(errs, "verdictGraceSec", cfg.get("verdictGraceSec"), 0, 10)
         _num(errs, "capturePerTrack", cfg.get("capturePerTrack"), 1, 20, True)
         _num(errs, "captureEveryFrames", cfg.get("captureEveryFrames"), 1, 100, True)
         _num(errs, "captureMinHeight", cfg.get("captureMinHeight"), 20, 1000)

@@ -133,12 +133,19 @@ class _JudgeWorker:
             self.cond.notify()
 
     def close(self, wait=2.0):
+        self.drain(wait)                               # crossings already on the line are finished, approach evidence is not
         with self.cond:
             self._stop = True
             self.evidence.clear()                      # nothing queued is worth finishing once the camera is gone
             self.cond.notify_all()
         if wait and self.thread is not threading.current_thread():
             self.thread.join(wait)                     # a job in flight must not touch shared state after we return
+
+    def drain(self, wait=2.0):
+        """Wait (bounded) until every queued final job has run."""
+        end = time.time() + (wait or 0)
+        while self.final and time.time() < end and self.thread.is_alive() and self.thread is not threading.current_thread():
+            time.sleep(0.01)
 
     def pending(self):
         return len(self.evidence) + len(self.final)
@@ -209,6 +216,8 @@ class _Module:
         self.ignored = 0
         self.last_event_at = None
         self.riders = {}                            # twhelmet: vehicle tid -> {person tid -> RiderHistory}
+        self.held = {}                              # twhelmet: vehicle tid -> crossing waiting for more evidence (verdictGraceSec)
+        self.graced = {"decided": 0, "expired": 0}  # crossings held after the line: later confirmed / still unverified at the deadline
         self.captured = {}                          # twhelmet dataset capture: vehicle tid -> [saved count, last frame id]
         self.dataset = {"frames": 0, "tracks": 0, "errors": 0, "dir": None}
         self.last_boxes = []
@@ -337,6 +346,10 @@ class CrossingEngine:
 
     def close(self):
         self._stop.set()
+        with self.lock:
+            mods = list(self.mods.values())
+        for mod in mods:
+            self._settle_held(mod, None, None, float("inf"), 0, force=True)      # a crossing held for more evidence is decided now
         self.judger.close()
         if self.saver is not None:
             self.saver.close()
@@ -413,6 +426,7 @@ class CrossingEngine:
                             self._gap_since = None
                             continue
                     self.lock.wait(0.1)
+                    self._settle_stalled()               # no frames coming: held crossings must not hang
                 self.busy = self.inflight > 0 or bool(self.ready)
             if item is None:
                 continue
@@ -423,6 +437,17 @@ class CrossingEngine:
                 self.m["errors"] += 1
                 self.m["lastError"] = repr(exc)
                 log.exception("line crossing analysis failed")
+
+    def _settle_stalled(self):
+        """Called while the tracker waits for frames (lock held): a crossing held for more evidence is decided once no frame
+        has arrived for its whole grace window - a stalled stream or a stopped camera must not leave events pending."""
+        last = self.m.get("lastDoneWall")
+        if last is None:
+            return
+        idle = time.time() - last
+        for mod in self.mods.values():
+            if mod.held and idle >= float(mod.cfg.get("verdictGraceSec", 0) or 0):
+                self._settle_held(mod, None, None, float("inf"), 0, force=True)
 
     # ------------------------------------------------------------ analysis
     def _zone(self, mods, w, h):
@@ -565,7 +590,7 @@ class CrossingEngine:
         done = time.time()
         self.result = {"shape": (h, w), "t": done, "mods": draw}
         total = (time.perf_counter() - t_start) * 1000.0
-        self.m.update(processed=self.m["processed"] + 1, lastFrameId=fid, lastCapturedAt=captured_at)
+        self.m.update(processed=self.m["processed"] + 1, lastFrameId=fid, lastCapturedAt=captured_at, lastDoneWall=done)
         self.done_times.append(done)
         self.infer_ms.append(infer)
         self.latency_ms.append((done - captured_at) * 1000.0)
@@ -643,6 +668,7 @@ class CrossingEngine:
             if v["tid"] is None:
                 continue
             near = abs(line.signed(((v["box"][0] + v["box"][2]) / 2, v["box"][3]), w, h)) <= max(2.0 * (v["box"][3] - v["box"][1]), 0.25 * h)
+            near = near or v["tid"] in mod.held                 # crossing held for more evidence: keep judging it wherever it goes
             hist = mod.riders.setdefault(v["tid"], {})
             for key, _ptid, rbox in self._rider_items(riders.get(vi, []), persons, v, h, w):
                 rh = hist.setdefault(key, helmet_judge.RiderHistory())
@@ -681,9 +707,31 @@ class CrossingEngine:
             ev.update(module="twhelmet", capturedAt=captured_at, frameShape=(h, w))
             self.judger.submit_final(lambda ev=ev, jobs=jobs, boxes=list(boxes), frame=frame, mod=mod:
                                      self._finalise_twhelmet(mod, ev, jobs, boxes, frame, (h, w), hmin, nmin))
-        for tid in [t for t in mod.riders if t not in {b["tid"] for b in bikes} and tr.tracks.get(t) is None]:
+        if mod.held:
+            self._settle_held(mod, tr, {b["tid"] for b in use}, captured_at, fid, every=every)
+        for tid in [t for t in mod.riders if t not in {b["tid"] for b in bikes} and tr.tracks.get(t) is None and t not in mod.held]:
             mod.riders.pop(tid, None)               # forget histories of two-wheelers the tracker has dropped
         return {"boxes": boxes, "tracker": tr}
+
+    def _settle_held(self, mod, tr, present, captured_at, fid, every=1, force=False):
+        """Crossings waiting for more evidence (verdictGraceSec): decide at the deadline or when the two-wheeler is lost;
+        re-check a still-visible one every `every` frames so a verdict goes out as soon as the votes allow."""
+        with mod.lock:
+            items = list(mod.held.items())
+        for tid, hd in items:
+            lost = force or (tr is not None and tid not in present and tr.tracks.get(tid) is None)
+            due = captured_at >= hd["deadline"]
+            if lost or due:
+                with mod.lock:
+                    if mod.held.pop(tid, None) is None:
+                        continue
+                hd["ev"]["decidedAfterSec"] = round(max(0.0, min(captured_at, hd["deadline"]) - hd["ev"]["capturedAt"]), 2) if captured_at != float("inf") else hd["graceSec"]
+                self.judger.submit_final(lambda hd=hd: self._finalise_twhelmet(mod, hd["ev"], hd["jobs"], hd["boxes"], hd["frame"], hd["shape"],
+                                                                               hd["hmin"], hd["nmin"], final=True, held=hd))
+            elif tid in present and (fid or 0) % max(1, every) == 0:
+                hd["ev"]["decidedAfterSec"] = round(captured_at - hd["ev"]["capturedAt"], 2)
+                self.judger.submit_final(lambda hd=hd: self._finalise_twhelmet(mod, hd["ev"], hd["jobs"], hd["boxes"], hd["frame"], hd["shape"],
+                                                                               hd["hmin"], hd["nmin"], final=False, held=hd))
 
     def _capture_dataset(self, mod, frame, bikes, use_idx, persons, riders, captured_at, fid, w, h):
         """Dataset capture (setting captureDataset): save clean frames of every tracked two-wheeler, anywhere in the
@@ -767,18 +815,31 @@ class CrossingEngine:
             out.append((key, key, area))
         return out
 
-    def _finalise_twhelmet(self, mod, ev, jobs, boxes, frame, shape, hmin, nmin):
+    def _finalise_twhelmet(self, mod, ev, jobs, boxes, frame, shape, hmin, nmin, final=None, held=None):
         """Judge thread: the crossing frame's own evidence + the votes of the approach -> verdict -> event.
+        verdictGraceSec > 0: an unverified crossing is not reported at once but HELD; the two-wheeler keeps being judged
+        after the line (where the picture is often sharper), the held crossing is re-checked while it is visible and decided
+        at the deadline or when the track is lost (`final` True) - with the crossing's own time, frame and snapshot.
+        `final` None = first pass at the line, False = re-check, True = last word.
         Outcome of one crossing (ev["category"]): "Helmet Detected" when every rider found has helmet votes,
         "Helmet Not Detected" when any rider has enough no-helmet votes and no helmet vote, "Only Vehicle Detected" when
         no person was linked to the two-wheeler and the rider model found no head in its area on several frames,
         else unverified (category None): rider or head too small, hidden, conflicting or too few frames."""
         c = mod.cfg
+        if held is not None and held.get("done"):
+            return                                                      # a queued re-check of a crossing already reported
         votes_kw = dict(min_missing=int(c.get("minMissingVotes", 3)), min_helmet=int(c.get("minHelmetVotes", 2)),
                         min_no_rider=int(c.get("minNoRiderVotes", 3)))
         rl = []
         if config.TWHELMET_COLLECT_MODE:
             jobs = []                                   # judge paused: the crossing is counted and recorded, nothing is judged
+        if final is not None:                                   # re-check / last word: the crossing frame itself was judged in the first pass
+            jobs = [tuple(j[:3]) + (None,) + tuple(j[4:]) for j in jobs]
+            with mod.lock:                                      # riders linked to this two-wheeler only after the line
+                known = {id(j[0]) for j in jobs}
+                for key, rh in mod.riders.get(ev["tid"], {}).items():
+                    if id(rh) not in known:
+                        jobs.append((rh, key, list(ev.get("box") or [0, 0, 0, 0]), None, str(key).startswith("bike-area")))
         for job in jobs:
             rh, ptid, pbox, top = job[:4]
             bike_area = bool(job[4]) if len(job) > 4 else ptid == "bike-area"
@@ -816,6 +877,21 @@ class CrossingEngine:
             else:
                 reasons = sorted({r["reason"] for r in rl if r.get("reason")})
                 verdict, why = helmet_judge.UNCERTAIN, "helmet could not be verified" + (f" ({'; '.join(reasons)})" if reasons else "")
+        grace = float(c.get("verdictGraceSec", 0) or 0)
+        if verdict == helmet_judge.UNCERTAIN and grace > 0 and not final and not config.TWHELMET_COLLECT_MODE:
+            with mod.lock:
+                if final is None and ev["tid"] not in mod.held:              # first pass: hold, keep collecting evidence after the line
+                    mod.held[ev["tid"]] = {"ev": ev, "jobs": jobs, "boxes": boxes, "frame": frame, "shape": shape, "hmin": hmin, "nmin": nmin,
+                                           "deadline": ev["capturedAt"] + grace, "graceSec": grace}
+            return                                                          # a re-check that is still unverified keeps waiting
+        if final is not None:
+            waited = ev.get("decidedAfterSec")
+            with mod.lock:
+                if held is not None:
+                    held["done"] = True
+                    mod.held.pop(ev["tid"], None)
+                mod.graced["decided" if verdict != helmet_judge.UNCERTAIN else "expired"] += 1
+            why += f" (decided {waited:.1f} s after the crossing)" if waited is not None else ""
         plate = None
         if c.get("detectPlate", True) and not config.TWHELMET_COLLECT_MODE:
             bike_box = next((b[0] for b in boxes if b[3] is not None and b[3] == ev["tid"]), None)
@@ -960,6 +1036,8 @@ class CrossingEngine:
             out["net"] = mod.counts["in"] - mod.counts["out"]
         else:
             out["judge"] = helmet_judge.status()
+            with mod.lock:
+                out["grace"] = {"seconds": float(mod.cfg.get("verdictGraceSec", 0) or 0), "waiting": len(mod.held), **mod.graced}
             out["dataset"] = dict(mod.dataset, enabled=bool(mod.cfg.get("captureDataset")) or config.TWHELMET_COLLECT_MODE,
                                   collectMode=config.TWHELMET_COLLECT_MODE)
             if config.TWHELMET_COLLECT_MODE:

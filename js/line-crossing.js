@@ -233,6 +233,7 @@
         fld('Frames that must say “no helmet”', 'minMissingVotes', num('minMissingVotes', c.minMissingVotes, 1, 8, 1), 'Of the last 8 judged frames of that rider, with none saying helmet.') +
         fld('Frames that must say “helmet”', 'minHelmetVotes', num('minHelmetVotes', c.minHelmetVotes, 1, 8, 1), '') +
         fld('Smallest head that can be judged (px)', 'minHeadPx', num('minHeadPx', c.minHeadPx == null ? d.minHeadPx : c.minHeadPx, 8, 200, 1), 'Default ' + esc(d.minHeadPx) + '. A smaller head never confirms helmet or no helmet: seen from behind, dark hair and a dark helmet look the same. Move the line nearer the camera rather than lowering this.') +
+        fld('Wait after the crossing for a verdict (s)', 'verdictGraceSec', num('verdictGraceSec', c.verdictGraceSec == null ? d.verdictGraceSec : c.verdictGraceSec, 0, 10, 0.1), 'Default ' + esc(d.verdictGraceSec) + '. A crossing that is not verified at the line is held this long while the rider keeps being judged beyond it (the picture is often sharper there); the event keeps the crossing time. 0 = decide at the line.') +
         fld('Frames with no rider at all → “Vehicle only”', 'minNoRiderVotes', num('minNoRiderVotes', c.minNoRiderVotes == null ? d.minNoRiderVotes : c.minNoRiderVotes, 1, 8, 1), 'Two-wheeler with no person linked and no head found by the rider model in every judged frame. One frame with a head keeps it “not verified”.') + '</div></div>';
     }
     h += '<div class="field"><label for="lc-snapmode">Snapshot of each crossing</label>' + sel('snapmode', [['crossing', 'Save the frame of the crossing'], ['off', 'No snapshot (still counted)']], sn.mode || 'crossing') + '</div>' +
@@ -263,7 +264,7 @@
       out.includeBicycles = q('includeBicycles').checked; out.everyFrame = q('everyFrame').checked;
       out.helmetMinConf = f('helmetMinConf'); out.noHelmetMinConf = f('noHelmetMinConf');
       out.minMissingVotes = parseInt(q('minMissingVotes').value, 10); out.minHelmetVotes = parseInt(q('minHelmetVotes').value, 10);
-      out.minNoRiderVotes = parseInt(q('minNoRiderVotes').value, 10); out.minHeadPx = parseInt(q('minHeadPx').value, 10);
+      out.minNoRiderVotes = parseInt(q('minNoRiderVotes').value, 10); out.minHeadPx = parseInt(q('minHeadPx').value, 10); out.verdictGraceSec = f('verdictGraceSec');
       out.captureDataset = q('captureDataset').checked; out.capturePerTrack = parseInt(q('capturePerTrack').value, 10);
       out.captureEveryFrames = parseInt(q('captureEveryFrames').value, 10); out.captureMinHeight = f('captureMinHeight'); out.captureMinTravel = f('captureMinTravel');
       out.alert.compliantSeverity = q('compliantSeverity').value;

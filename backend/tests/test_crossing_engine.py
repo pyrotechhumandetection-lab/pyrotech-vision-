@@ -405,7 +405,7 @@ class ConfirmedCategoryTests(unittest.TestCase):
         eng = ScriptedEngine(got, lambda i: [bike(1, 640, 20 + 40 * i, h=120, w=120)])   # 40 px a frame: travels several bike lengths before the line
         try:
             jd._STATE["tried"] = True
-            eng.set_module("twhelmet", cfg("twhelmet", minTrackFrames=1, minNoRiderVotes=1))
+            eng.set_module("twhelmet", cfg("twhelmet", minTrackFrames=1, minNoRiderVotes=1, verdictGraceSec=0))   # decide at the line
             run(eng, 24)
             e = got.wait(1, 6)[0][1]
             self.assertGreater(e["travel"], 1.5)
@@ -425,8 +425,10 @@ class ConfirmedCategoryTests(unittest.TestCase):
         try:
             jd._STATE["tried"] = True
             eng.set_module("twhelmet", cfg("twhelmet", minTrackFrames=1, minNoRiderVotes=1, minBoxFrac=0.01))
-            e = (run(eng, 20), got.wait(1, 6))[1][0][1]
-            self.assertEqual((e["label"], e["category"], e["why"]), ("Helmet unverified", None, "two-wheeler too small to tell whether it has a rider"))
+            e = (run(eng, 20), got.wait(1, 6))[1][0][1]           # default grace: held 1.5 s, still unverified at the deadline
+            self.assertEqual((e["label"], e["category"]), ("Helmet unverified", None))
+            self.assertEqual(e["why"], "two-wheeler too small to tell whether it has a rider (decided 1.5 s after the crossing)")
+            self.assertEqual(e["decidedAfterSec"], 1.5)
         finally:
             eng.close()
             jd.judge_crop = orig
@@ -495,6 +497,100 @@ class ConfirmedCategoryTests(unittest.TestCase):
         finally:
             eng.close()
             jd.judge_crop = orig
+
+
+class GraceWindowTests(unittest.TestCase):
+    """verdictGraceSec (2026-11-19): a crossing unverified AT the line waits while the rider is judged beyond it - the sharp
+    part of the picture is often after the line - and is reported with the crossing's own time once the votes allow, at
+    the deadline, or when the track is lost."""
+
+    def setUp(self):
+        self.orig = jd.judge_crop
+        jd._STATE["tried"] = True
+
+    def tearDown(self):
+        jd.judge_crop = self.orig
+
+    def _script(self, i):
+        b = bike(1, 640, 330 + 18 * i)
+        return [b, rider_on(b, 10)]
+
+    def test_unverified_at_the_line_confirmed_from_frames_after_it(self):
+        """Votes: UNCERTAIN until frame 8 (bike at 474, past the 360 line), HELMET afterwards -> compliant, crossing time kept."""
+        seen = {"n": 0}
+
+        def judge(top, *a, **k):
+            seen["n"] += 1
+            v = jd.HELMET if seen["n"] > 8 else jd.UNCERTAIN
+            return {"verdict": v, "helmetConf": 0.9 if v == jd.HELMET else 0.3, "noHelmetConf": 0.0, "views": 1,
+                    "reason": "scripted" if v == jd.HELMET else "head too small to judge", "source": "scripted"}
+        jd.judge_crop = judge
+        got = Collect()
+        eng = ScriptedEngine(got, self._script)
+        try:
+            eng.set_module("twhelmet", cfg("twhelmet", minTrackFrames=1, judgeEvery=1, maxJudgePerFrame=1, verdictGraceSec=1.5))
+            run(eng, 20, sleep=0.03)                                     # 2 s of frames, judge thread keeps up
+            e = got.wait(1, 6)[0][1]
+            self.assertEqual((e["label"], e["category"], e["confirmed"]), ("Helmet compliant", "Helmet Detected", True))
+            self.assertLess(e["capturedAt"], 1000.5)                      # the event carries the time of the crossing itself
+            self.assertGreater(e["decidedAfterSec"], 0.0)
+            self.assertLessEqual(e["decidedAfterSec"], 1.5)
+            self.assertIn("decided", e["why"])
+            v = eng.view("twhelmet")
+            self.assertEqual((v["counts"]["compliant"], v["grace"]["decided"], v["grace"]["waiting"]), (1, 1, 0))
+        finally:
+            eng.close()
+
+    def test_still_unverified_at_the_deadline_is_reported_once_with_the_crossing_time(self):
+        jd.judge_crop = lambda top, *a, **k: {"verdict": jd.UNCERTAIN, "helmetConf": 0.2, "noHelmetConf": 0.1, "views": 1,
+                                              "reason": "head too small to judge", "source": "scripted"}
+        got = Collect()
+        eng = ScriptedEngine(got, self._script)
+        try:
+            eng.set_module("twhelmet", cfg("twhelmet", minTrackFrames=1, verdictGraceSec=1.0))
+            run(eng, 8)                                                   # crossing at ~1000.2, frames stop at 1000.7: not due yet
+            time.sleep(0.3)
+            self.assertEqual(len(got.ev), 0)                              # held, nothing reported
+            self.assertEqual(eng.view("twhelmet")["grace"]["waiting"], 1)
+            run(eng, 20)                                                  # frame ids restart but time runs on past the deadline
+            e = got.wait(1, 6)
+            self.assertEqual(len(e), 1)
+            e = e[0][1]
+            self.assertEqual((e["label"], e["category"], e["decidedAfterSec"]), ("Helmet unverified", None, 1.0))
+            self.assertLess(e["capturedAt"], 1000.5)
+            self.assertEqual(eng.view("twhelmet")["grace"]["expired"], 1)
+        finally:
+            eng.close()
+
+    def test_held_crossing_is_decided_when_the_engine_closes(self):
+        jd.judge_crop = lambda top, *a, **k: {"verdict": jd.UNCERTAIN, "helmetConf": 0.2, "noHelmetConf": 0.1, "views": 1,
+                                              "reason": "head not visible", "source": "scripted"}
+        got = Collect()
+        eng = ScriptedEngine(got, self._script)
+        eng.set_module("twhelmet", cfg("twhelmet", minTrackFrames=1, verdictGraceSec=5.0))
+        run(eng, 6)
+        time.sleep(0.3)
+        self.assertEqual(len(got.ev), 0)
+        eng.close()                                                       # the camera stops: the held crossing is not lost
+        e = got.wait(1, 3)
+        self.assertEqual(len(e), 1)
+        self.assertEqual(e[0][1]["label"], "Helmet unverified")
+
+    def test_zero_grace_decides_at_the_line(self):
+        jd.judge_crop = lambda top, *a, **k: {"verdict": jd.UNCERTAIN, "helmetConf": 0.2, "noHelmetConf": 0.1, "views": 1,
+                                              "reason": "head not visible", "source": "scripted"}
+        got = Collect()
+        eng = ScriptedEngine(got, self._script)
+        try:
+            eng.set_module("twhelmet", cfg("twhelmet", minTrackFrames=1, verdictGraceSec=0))
+            run(eng, 6)
+            e = got.wait(1, 3)[0][1]
+            self.assertEqual(e["label"], "Helmet unverified")
+            self.assertNotIn("decidedAfterSec", e)
+            self.assertEqual(DEFAULTS["twhelmet"]["verdictGraceSec"], 1.5)
+            self.assertEqual(validate("twhelmet", dict(DEFAULTS["twhelmet"], verdictGraceSec=11), []), ["verdictGraceSec must be between 0 and 10"])
+        finally:
+            eng.close()
 
 
 class DatasetCaptureTests(unittest.TestCase):

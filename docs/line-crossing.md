@@ -51,3 +51,16 @@ the Tracking row shows how many such passes happened ("passed beyond a line end"
 ## Started by the backend
 
 Since 2026-11-04 the backend starts the two-wheeler helmet module on every enabled camera when it boots (`AIV_AUTOSTART_MODULES`, default `twhelmet`, `none` to turn off; see `backend/services/autostart.py`). Draw the line once; after that nobody has to click Start after a reboot or a service restart. Stop in the UI stops it until the next restart.
+
+## Verdict after the line (`verdictGraceSec`, two-wheeler helmet module, 2026-11-19)
+
+The crossing is detected at the line; the helmet verdict no longer has to be. A crossing that is **unverified at the line**
+(head too small, hidden, conflicting votes) is held for `verdictGraceSec` seconds (default 1.5, 0 = decide at the line as
+before) while the same two-wheeler keeps being judged wherever it goes next - on CAM-02 the sharp part of the picture is
+after the gate line, not before it. The held crossing is re-checked while the two-wheeler is visible and reported as soon
+as the votes allow a verdict, at the deadline, or when the track is lost; a stalled stream or a stopped camera decides every
+held crossing after one grace window, so nothing hangs. The event keeps the crossing's own time, frame id and snapshot
+frame; `decidedAfterSec` says how long after the crossing it was decided and `why` ends with "(decided x.x s after the
+crossing)". A crossing confirmed at the line is reported at once, unchanged. Module status: `grace.waiting / decided /
+expired` (held now / later confirmed / still unverified at the deadline). Nothing is ever changed from unverified to
+"no helmet" by waiting: the bare-head evidence rules are the same, there is only more time to collect it.
